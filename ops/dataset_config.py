@@ -4,9 +4,9 @@
 # {jilin, songhan}@mit.edu, ganchuang@csail.mit.edu
 
 import os
-
-ROOT_DATASET = '/ssd/video/'  # '/data/jilin/'
-
+import common
+from os.path import join as ospj
+ROOT_DATASET = None #'/store/datasets/'  # '/data/jilin/'
 
 def return_ucf101(modality):
     filename_categories = 'UCF101/labels/classInd.txt'
@@ -63,9 +63,14 @@ def return_something(modality):
 def return_somethingv2(modality):
     filename_categories = 'something/v2/category.txt'
     if modality == 'RGB':
-        root_data = ROOT_DATASET + 'something/v2/20bn-something-something-v2-frames'
-        filename_imglist_train = 'something/v2/train_videofolder.txt'
-        filename_imglist_val = 'something/v2/val_videofolder.txt'
+        global ROOT_DATASET
+        ROOT_DATASET = common.DATA_PATH
+        #root_data = ROOT_DATASET + 'something/v2/20bn-something-something-v2-frames'
+        #filename_imglist_train = 'something/v2/train_videofolder.txt'
+        #filename_imglist_val = 'something/v2/val_videofolder.txt'
+        root_data = common.STHV2_FRAMES
+        filename_imglist_train = ospj(common.STHV2_PATH, "train_videofolder.txt")
+        filename_imglist_val = ospj(common.STHV2_PATH, "val_videofolder.txt")
         prefix = '{:06d}.jpg'
     elif modality == 'Flow':
         root_data = ROOT_DATASET + 'something/v2/20bn-something-something-v2-flow'

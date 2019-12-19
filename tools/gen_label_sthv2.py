@@ -9,8 +9,11 @@
 import os
 import json
 
+import common
+from os.path import join as ospj
+
 if __name__ == '__main__':
-    dataset_name = 'something-something-v2'  # 'jester-v1'
+    dataset_name = ospj(common.STHV2_PATH, 'something-something-v2')
     with open('%s-labels.json' % dataset_name) as f:
         data = json.load(f)
     categories = []
@@ -18,7 +21,7 @@ if __name__ == '__main__':
         assert i == int(idx)  # make sure the rank is right
         categories.append(cat)
 
-    with open('category.txt', 'w') as f:
+    with open(ospj(common.STHV2_PATH,'category.txt'), 'w') as f:
         f.write('\n'.join(categories))
 
     dict_categories = {}
@@ -43,8 +46,8 @@ if __name__ == '__main__':
             curFolder = folders[i]
             curIDX = idx_categories[i]
             # counting the number of frames in each video folders
-            dir_files = os.listdir(os.path.join('20bn-something-something-v2-frames', curFolder))
+            dir_files = os.listdir(ospj(common.STHV2_FRAMES, curFolder))
             output.append('%s %d %d' % (curFolder, len(dir_files), curIDX))
             print('%d/%d' % (i, len(folders)))
-        with open(filename_output, 'w') as f:
+        with open(ospj(common.STHV2_PATH,filename_output), 'w') as f:
             f.write('\n'.join(output))

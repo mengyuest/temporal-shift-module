@@ -4,6 +4,9 @@
 # {jilin, songhan}@mit.edu, ganchuang@csail.mit.edu
 
 # Notice that this file has been modified to support ensemble testing
+import os
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
 
 import argparse
 import time
@@ -16,6 +19,8 @@ from ops.models import TSN
 from ops.transforms import *
 from ops import dataset_config
 from torch.nn import functional as F
+
+
 
 # options
 parser = argparse.ArgumentParser(description="TSM testing on the full validation set")
@@ -50,6 +55,8 @@ parser.add_argument('--num_set_segments',type=int, default=1,help='TODO: select 
 parser.add_argument('--pretrain', type=str, default='imagenet')
 
 args = parser.parse_args()
+if args.gpus is not None:
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join([str(x) for x in args.gpus])
 
 
 class AverageMeter(object):
@@ -191,7 +198,7 @@ for this_weights, this_test_segments, test_file in zip(weights_list, test_segmen
     )
 
     if args.gpus is not None:
-        devices = [args.gpus[i] for i in range(args.workers)]
+        devices = args.gpus
     else:
         devices = list(range(args.workers))
 

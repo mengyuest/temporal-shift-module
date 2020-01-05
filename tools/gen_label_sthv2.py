@@ -8,7 +8,8 @@
 
 import os
 import json
-
+import sys
+sys.path.append('../')
 import common
 from os.path import join as ospj
 

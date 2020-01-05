@@ -25,7 +25,7 @@ elif user_name in ["cvpr", "ieee", "sc071139"]:
     ROOT_DIR = "/dccstor/longxun"
     CODE_PREFIX = "../../u/cvpr"
     DATA_PREFIX = "datasets"
-    LOG_PREFIX = "exps_dpc"
+    LOG_PREFIX = ""
 
 else:
     exit("unauthorized user@host '%s@%s'" % (user_name, host_name))
@@ -34,4 +34,8 @@ CODE_PATH=ospj(ROOT_DIR, CODE_PREFIX,"temporal-shift-module")
 DATA_PATH = ospj(ROOT_DIR, DATA_PREFIX)
 STHV2_PATH=ospj(DATA_PATH, "something/v2")
 STHV2_FRAMES=ospj(STHV2_PATH, '20bn-something-something-v2-frames')
-EXPS_PATH=ospj(ROOT_DIR, LOG_PREFIX,"exps_tsm")
+UCF101_PATH=ospj(DATA_PATH, "UCF101")
+UCF101_META_PATH = ospj(UCF101_PATH, "file_list")
+UCF101_FRAMES=ospj(UCF101_PATH, 'frame')
+
+EXPS_PATH=ospj(ROOT_DIR, LOG_PREFIX,"logs_tsm")

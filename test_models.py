@@ -4,6 +4,9 @@
 # {jilin, songhan}@mit.edu, ganchuang@csail.mit.edu
 
 # Notice that this file has been modified to support ensemble testing
+import warnings
+warnings.filterwarnings("ignore")
+
 import os
 import ssl
 ssl._create_default_https_context = ssl._create_unverified_context

@@ -4,6 +4,7 @@
 # {jilin, songhan}@mit.edu, ganchuang@csail.mit.edu
 
 import torch.utils.data as data
+import torch #TODO(yue)
 
 from PIL import Image
 import os
@@ -33,7 +34,7 @@ class TSNDataSet(data.Dataset):
                  num_segments=3, new_length=1, modality='RGB',
                  image_tmpl='img_{:05d}.jpg', transform=None,
                  random_shift=True, test_mode=False,
-                 remove_missing=False, dense_sample=False, twice_sample=False):
+                 remove_missing=False, dense_sample=False, twice_sample=False, args=None):
 
         self.root_path = root_path
         self.list_file = list_file
@@ -47,6 +48,8 @@ class TSNDataSet(data.Dataset):
         self.remove_missing = remove_missing
         self.dense_sample = dense_sample  # using dense sample as I3D
         self.twice_sample = twice_sample  # twice sample for more validation
+        self.args=args
+
         if self.dense_sample:
             print('=> Using dense sample for the dataset...')
         if self.twice_sample:
@@ -208,7 +211,19 @@ class TSNDataSet(data.Dataset):
                     p += 1
 
         process_data = self.transform(images)
-        return process_data, record.label
+        print("proc_data.shape",process_data.shape)
+        if self.args.ada_reso_skip:
+            return tuple(
+                [process_data] +
+                [self.rescale(process_data, (x,x)) for x in self.args.reso_list[1:]] +
+                [record.label])
+        else:
+            return process_data, record.label
+
+    # TODO(yue)
+    # (NC, H, W)->(NC, H', W')
+    def rescale(self, input_data, size):
+        return torch.nn.functional.interpolate(input_data.unsqueeze(1), size=size, mode='nearest').squeeze(1)
 
     def __len__(self):
         return len(self.video_list)

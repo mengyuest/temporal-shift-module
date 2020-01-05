@@ -8,9 +8,15 @@ from torch import nn
 from ops.basic_ops import ConsensusModule
 from ops.transforms import *
 from torch.nn.init import normal_, constant_
+import torch.nn.functional as F
 
+def init_hidden(batch_size, cell_size):
+    init_cell = torch.Tensor(batch_size, cell_size).zero_()
+    if torch.cuda.is_available():
+        init_cell = init_cell.cuda()
+    return init_cell
 
-class TSN(nn.Module):
+class TSN_Ada(nn.Module):
     def __init__(self, num_class, num_segments, modality,
                  base_model='resnet101', new_length=None,
                  consensus_type='avg', before_softmax=True,
@@ -19,7 +25,7 @@ class TSN(nn.Module):
                  is_shift=False, shift_div=8, shift_place='blockres', fc_lr5=False,
                  temporal_pool=False, non_local=False,
                  rescale_to=224, rescale_pattern="L", args=None):
-        super(TSN, self).__init__()
+        super(TSN_Ada, self).__init__()
         self.modality = modality
         self.num_segments = num_segments
         self.reshape = True
@@ -42,6 +48,15 @@ class TSN(nn.Module):
         self.rescale_to = rescale_to
         self.rescale_pattern = rescale_pattern
         self.args = args
+
+        #TODO(yue)
+        self.lite_backbone = getattr(torchvision.models, "ResNet18")(True)
+        self.lite_backbone.last_layer_name = 'fc'
+        self.lite_backbone.avgpool = nn.AdaptiveAvgPool2d(1)
+
+        self.rnn = nn.LSTMCell(input_size=512, hidden_size=512, bias=True)
+        self.linear = nn.Linear(512, 3)
+
 
         if not before_softmax and consensus_type != 'avg':
             raise ValueError("Only avg consensus can be used after Softmax")
@@ -180,7 +195,7 @@ class TSN(nn.Module):
         Override the default train() to freeze the BN parameters
         :return:
         """
-        super(TSN, self).train(mode)
+        super(TSN_Ada, self).train(mode)
         count = 0
         if self._enable_pbn and mode:
             print("Freezing BatchNorm2D except the first one.")
@@ -266,94 +281,52 @@ class TSN(nn.Module):
              'name': "lr10_bias"},
         ]
 
-    def forward(self, input, no_reshape=False):
-        #TODO (one-time rescale)
-        if self.rescale_to != 224:
-            _N, _, _H, _W = input.shape
-            _T=self.num_segments
-            _C=3
-            input = torch.nn.functional.interpolate(input.view(_N*_T,_C,_H,_W),
-                                                    size=(self.rescale_to, self.rescale_to),
-                                                    mode='nearest').view((_N, _T*_C,self.rescale_to,self.rescale_to))
-        # TODO(offline rescale policy)
-        # multi base_out, and merge
-        if self.rescale_pattern != "L":
-            _N, _, _H, _W = input.shape
-            high_res_input=[]
-            low_res_input=[]
-            debug_high_idx=[]
-            debug_low_idx=[]
-            len_pat=len(self.rescale_pattern)
-            num_clips=self.num_segments//len_pat
-            scale_dict={"S":64,
-                        "R":112}
-            low_scale=0
-            if num_clips==0:
-                exit("Pattern is too long (%d) for given num_segment=%d"%(len_pat, self.num_segments))
-            for clip_i in range(num_clips):
-                for p_i, pattern in enumerate(self.rescale_pattern):
-                    selected_tensor = input[:, (clip_i*len_pat+p_i)*3:(clip_i*len_pat+p_i+1)*3]
-                    if pattern=="L":
-                        high_res_input.append(selected_tensor)
-                        debug_high_idx.append(clip_i*len_pat+p_i)
-                    elif pattern in scale_dict:
-                        low_res_input.append(selected_tensor)
-                        debug_low_idx.append(clip_i * len_pat + p_i)
-                        low_scale = scale_dict[pattern]
-                    else:
-                        exit("Cannot recognize pattern: %s"%(pattern))
-
-            # print("debug_high_idx", debug_high_idx)
-            # print("debug_low_idx", debug_low_idx)
-
-            if len(high_res_input)==0 or len(low_res_input)==0:
-                exit("Cannot let high/low_res_input empty")
-
-            high_len = len(high_res_input)
-            low_len = len(low_res_input)
-            high_res_input = torch.cat(high_res_input, dim=1)
-            low_res_input = torch.cat(low_res_input, dim=1)
-            # print("high_res_input:", high_res_input.shape)
-            # print("low_res_input:", low_res_input.shape)
-
-            low_res_input = torch.nn.functional.interpolate(low_res_input.view(_N * low_len, 3, _H, _W),
-                                                    size=(low_scale, low_scale), mode='nearest'
-                                                            ).view((_N, low_len * 3, low_scale, low_scale))
-
-            high_out = self.base_model(high_res_input.view((-1, 3) + high_res_input.size()[-2:]))
-            low_out = self.base_model(low_res_input.view((-1, 3) + low_res_input.size()[-2:]))
-            # print("high_out:", high_out.shape)
-            # print("low_out:", low_out.shape)
-
-            base_out = torch.cat([high_out.view((-1, high_len)+(high_out.shape[-1],)),
-                                 low_out.view((-1, low_len)+(low_out.shape[-1],))], dim=1).view(-1,high_out.shape[-1])
-            # print("base_out:", base_out.shape)
-            #exit()
-        else:
-            if not no_reshape:
-                sample_len = (3 if self.modality == "RGB" else 2) * self.new_length
-
-                if self.modality == 'RGBDiff':
-                    sample_len = 3 * self.new_length
-                    input = self._get_diff(input)
-
-                base_out = self.base_model(input.view((-1, sample_len) + input.size()[-2:]))
-            else:
-                base_out = self.base_model(input)
-
-        if self.dropout > 0:
+    def forward(self, input_0, input_1, no_reshape=False):
+        # if not no_reshape && self.dropout > 0 && no-shift:
+        def backbone(input_data):
+            base_out = self.base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]))
             base_out = self.new_fc(base_out)
+            base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
+            return base_out
 
-        if not self.before_softmax:
-            base_out = self.softmax(base_out)
+        # TODO(yue) - LITE-BACKBONE
+        feat_lite = self.lite_backbone(input_0) #TODO N*T, F
 
-        if self.reshape:
-            if self.is_shift and self.temporal_pool:
-                base_out = base_out.view((-1, self.num_segments // 2) + base_out.size()[1:])
-            else:
-                base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
-            output = self.consensus(base_out)
-            return output.squeeze(1)
+        base_out_0 = backbone(input_0) #TODO N, T, C
+        base_out_1 = backbone(input_1) #TODO N, T, C
+
+        # TODO(yue) - RNN + GUMBEL + COMBINE
+        batch_size = input_0.shape[0]
+        hx = init_hidden(batch_size, 512)
+        cx = init_hidden(batch_size, 512)
+
+        logits_list = []
+        for t in range(self.num_segments):
+            hx, cx = self.rnn(feat_lite, (hx, cx))
+            p_t = self.linear(hx)
+            p_t = torch.log(F.softmax(p_t, dim=1))
+            logits_list.append(p_t)
+
+        logits = torch.stack(logits_list, dim=1) # N*T*3
+        r = F.gumbel_softmax(logits=logits, tau=1.0, hard=True, eps=1e-10, dim=-1)
+        output = self.combine_logits(r, base_out_0,base_out_1)
+
+        # TODO(yue) - ALSO DEFINE LOSS FUNCTIONS
+        # base_out = backbone(input_0)
+        # output = self.consensus(base_out)
+        return output.squeeze(1), r
+
+    def combine_logits(self, r, base_out_0, base_out_1):
+        # TODO r           N, T, 3  (0-origin, 1-low, 2-skip)
+        # TODO base_out_0  N, T, C
+        # TODO base_out_1  N, T, C
+        total_num = torch.sum(r[:,:,0:2], dim=[1,2])
+        r_like_base_0 = r[:, :, 0].unsqueeze(-1).expand_as(base_out_0)
+        r_like_base_1 = r[:, :, 1].unsqueeze(-1).expand_as(base_out_1)
+        res_base_0 = torch.sum(r_like_base_0 * base_out_0, dim=1)
+        res_base_1 = torch.sum(r_like_base_1 * base_out_1, dim=1)
+        pred = (res_base_0 + res_base_1 ) / torch.clamp(total_num, 1)
+        return pred
 
     def _get_diff(self, input, keep_rgb=False):
         input_c = 3 if self.modality in ["RGB", "RGBDiff"] else 2

@@ -9,12 +9,12 @@ from os.path import join as ospj
 ROOT_DATASET = None #'/store/datasets/'  # '/data/jilin/'
 
 def return_ucf101(modality):
-    filename_categories = 'UCF101/labels/classInd.txt'
+    filename_categories =  ospj(common.UCF101_META_PATH,'classInd.txt')
     if modality == 'RGB':
-        root_data = ROOT_DATASET + 'UCF101/jpg'
-        filename_imglist_train = 'UCF101/file_list/ucf101_rgb_train_split_1.txt'
-        filename_imglist_val = 'UCF101/file_list/ucf101_rgb_val_split_1.txt'
-        prefix = 'img_{:05d}.jpg'
+        root_data = common.UCF101_FRAMES
+        filename_imglist_train = ospj(common.UCF101_META_PATH, 'ucf101_rgb_train_split_1.txt')
+        filename_imglist_val = ospj(common.UCF101_META_PATH,'ucf101_rgb_val_split_1.txt')
+        prefix = 'image_{:05d}.jpg'
     elif modality == 'Flow':
         root_data = ROOT_DATASET + 'UCF101/jpg'
         filename_imglist_train = 'UCF101/file_list/ucf101_flow_train_split_1.txt'
@@ -61,7 +61,7 @@ def return_something(modality):
 
 
 def return_somethingv2(modality):
-    filename_categories = 'something/v2/category.txt'
+    filename_categories = ospj(common.STHV2_PATH,'category.txt')
     if modality == 'RGB':
         global ROOT_DATASET
         ROOT_DATASET = common.DATA_PATH
@@ -115,10 +115,10 @@ def return_dataset(dataset, modality):
     else:
         raise ValueError('Unknown dataset '+dataset)
 
-    file_imglist_train = os.path.join(ROOT_DATASET, file_imglist_train)
-    file_imglist_val = os.path.join(ROOT_DATASET, file_imglist_val)
+    #file_imglist_train = os.path.join(ROOT_DATASET, file_imglist_train)
+    #file_imglist_val = os.path.join(ROOT_DATASET, file_imglist_val)
     if isinstance(file_categories, str):
-        file_categories = os.path.join(ROOT_DATASET, file_categories)
+        #file_categories = os.path.join(ROOT_DATASET, file_categories)
         with open(file_categories) as f:
             lines = f.readlines()
         categories = [item.rstrip() for item in lines]

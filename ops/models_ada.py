@@ -39,7 +39,8 @@ class TSN_Ada(nn.Module):
         self.is_shift = is_shift
         self.shift_div = shift_div
         self.shift_place = shift_place
-        self.base_model_name = base_model
+        #self.base_model_name = base_model
+
         self.fc_lr5 = fc_lr5
         self.temporal_pool = temporal_pool
         self.non_local = non_local
@@ -49,13 +50,23 @@ class TSN_Ada(nn.Module):
         self.rescale_pattern = rescale_pattern
         self.args = args
 
+        #TODO
+        base_model = self.args.backbone_list[0]
+        self.base_model_name = base_model
+
         #TODO(yue)
-        self.lite_backbone = getattr(torchvision.models, "ResNet18")(True)
+        self.lite_backbone = getattr(torchvision.models, "resnet18")(True)
+        #print(self.lite_backbone)
+        #exit()
         self.lite_backbone.last_layer_name = 'fc'
         self.lite_backbone.avgpool = nn.AdaptiveAvgPool2d(1)
 
         self.rnn = nn.LSTMCell(input_size=512, hidden_size=512, bias=True)
-        self.linear = nn.Linear(512, 3)
+
+        if self.args.no_skip:
+            self.linear = nn.Linear(512, 2)
+        else:
+            self.linear = nn.Linear(512, 3)
 
 
         if not before_softmax and consensus_type != 'avg':
@@ -108,6 +119,11 @@ class TSN_Ada(nn.Module):
             setattr(self.base_model, self.base_model.last_layer_name, nn.Dropout(p=self.dropout))
             self.new_fc = nn.Linear(feature_dim, num_class)
 
+        # TODO(yue)
+        if self.args.ada_reso_skip:
+            setattr(self.lite_backbone, self.lite_backbone.last_layer_name, nn.Dropout(p=self.dropout))
+            if self.two_models:
+                setattr(self.base_model_1, self.base_model_1.last_layer_name, nn.Dropout(p=self.dropout))
         std = 0.001
         if self.new_fc is None:
             normal_(getattr(self.base_model, self.base_model.last_layer_name).weight, 0, std)
@@ -123,6 +139,13 @@ class TSN_Ada(nn.Module):
 
         if 'resnet' in base_model:
             self.base_model = getattr(torchvision.models, base_model)(True if self.pretrain == 'imagenet' else False)
+
+            #TODO
+            self.two_models = False
+            if self.args.ada_reso_skip and len(self.args.backbone_list)>1 and self.args.shared_backbone==False:
+                self.two_models = True
+                self.base_model_1 = getattr(torchvision.models, self.args.backbone_list[1])(True if self.pretrain == 'imagenet' else False)
+
             if self.is_shift:
                 print('Adding temporal shift...')
                 from ops.temporal_shift import make_temporal_shift
@@ -140,6 +163,9 @@ class TSN_Ada(nn.Module):
             self.input_std = [0.229, 0.224, 0.225]
 
             self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
+            if self.two_models:
+                self.base_model_1.last_layer_name = 'fc'
+                self.base_model_1.avgpool = nn.AdaptiveAvgPool2d(1)
 
             if self.modality == 'Flow':
                 self.input_mean = [0.5]
@@ -196,17 +222,25 @@ class TSN_Ada(nn.Module):
         :return:
         """
         super(TSN_Ada, self).train(mode)
-        count = 0
+
         if self._enable_pbn and mode:
             print("Freezing BatchNorm2D except the first one.")
-            for m in self.base_model.modules():
-                if isinstance(m, nn.BatchNorm2d):
-                    count += 1
-                    if count >= (2 if self._enable_pbn else 1):
-                        m.eval()
-                        # shutdown update in frozen mode
-                        m.weight.requires_grad = False
-                        m.bias.requires_grad = False
+
+            models= [self.base_model]
+            if self.args.ada_reso_skip:
+                models.append(self.lite_backbone)
+                if self.two_models:
+                    models.append(self.base_model_1)
+            for the_model in models:
+                count = 0
+                for m in the_model.modules():
+                    if isinstance(m, nn.BatchNorm2d):
+                        count += 1
+                        if count >= (2 if self._enable_pbn else 1):
+                            m.eval()
+                            # shutdown update in frozen mode
+                            m.weight.requires_grad = False
+                            m.bias.requires_grad = False
 
     def partialBN(self, enable):
         self._enable_pbn = enable
@@ -257,6 +291,16 @@ class TSN_Ada(nn.Module):
                 # later BN's are frozen
                 if not self._enable_pbn or bn_cnt == 1:
                     bn.extend(list(m.parameters()))
+
+            elif isinstance(m, torch.nn.LSTMCell):
+                #print("m", m)
+                ps = list(m.parameters())
+                #print("ps",ps)
+                normal_weight.append(ps[0])
+                normal_weight.append(ps[1])
+                normal_bias.append(ps[2])
+                normal_bias.append(ps[3])
+
             elif len(m._modules) == 0:
                 if len(list(m.parameters())) > 0:
                     raise ValueError("New atomic module type: {}. Need to give it a learning policy".format(type(m)))
@@ -283,17 +327,22 @@ class TSN_Ada(nn.Module):
 
     def forward(self, input_0, input_1, no_reshape=False):
         # if not no_reshape && self.dropout > 0 && no-shift:
-        def backbone(input_data):
-            base_out = self.base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]))
+        def backbone(input_data, the_base_model):
+            base_out = the_base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]))
             base_out = self.new_fc(base_out)
             base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
             return base_out
 
         # TODO(yue) - LITE-BACKBONE
-        feat_lite = self.lite_backbone(input_0) #TODO N*T, F
-
-        base_out_0 = backbone(input_0) #TODO N, T, C
-        base_out_1 = backbone(input_1) #TODO N, T, C
+        #print("input_0",input_0.shape, "input_1", input_1.shape)
+        feat_lite = self.lite_backbone(input_0.view((-1, 3 * self.new_length) + input_0.size()[-2:])) #TODO N*T, F
+        feat_lite = feat_lite.view((-1, self.num_segments) + feat_lite.size()[1:])
+        #print("feat_lite", feat_lite.shape)
+        base_out_0 = backbone(input_0, self.base_model) #TODO N, T, C
+        if self.two_models==False:
+            base_out_1 = backbone(input_1, self.base_model)  # TODO N, T, C
+        else:
+            base_out_1 = backbone(input_1, self.base_model_1) #TODO N, T, C
 
         # TODO(yue) - RNN + GUMBEL + COMBINE
         batch_size = input_0.shape[0]
@@ -301,8 +350,11 @@ class TSN_Ada(nn.Module):
         cx = init_hidden(batch_size, 512)
 
         logits_list = []
+        #print("feat_lite.shape", feat_lite.shape)
+        #print("hx.shape",hx.shape)
+        #print("cx.shape", cx.shape)
         for t in range(self.num_segments):
-            hx, cx = self.rnn(feat_lite, (hx, cx))
+            hx, cx = self.rnn(feat_lite[:,t], (hx, cx))
             p_t = self.linear(hx)
             p_t = torch.log(F.softmax(p_t, dim=1))
             logits_list.append(p_t)
@@ -320,12 +372,23 @@ class TSN_Ada(nn.Module):
         # TODO r           N, T, 3  (0-origin, 1-low, 2-skip)
         # TODO base_out_0  N, T, C
         # TODO base_out_1  N, T, C
-        total_num = torch.sum(r[:,:,0:2], dim=[1,2])
+        offset = self.args.t_offset # 0
+        batchsize = r.shape[0]
+        total_num = torch.sum(r[:,offset:,0:2], dim=[1,2]) + offset * batchsize
+
+        #print("r",r)
+        #print("total_num", total_num)
         r_like_base_0 = r[:, :, 0].unsqueeze(-1).expand_as(base_out_0)
         r_like_base_1 = r[:, :, 1].unsqueeze(-1).expand_as(base_out_1)
+
+        if offset>0:
+            r_like_base_0[:, :offset, :] = 1
+            r_like_base_1[:, :offset, :] = 0
+
         res_base_0 = torch.sum(r_like_base_0 * base_out_0, dim=1)
         res_base_1 = torch.sum(r_like_base_1 * base_out_1, dim=1)
-        pred = (res_base_0 + res_base_1 ) / torch.clamp(total_num, 1)
+        #print("res_bases:",res_base_0.shape, res_base_1.shape)
+        pred = (res_base_0 + res_base_1 ) / torch.clamp(total_num.unsqueeze(-1), 1)
         return pred
 
     def _get_diff(self, input, keep_rgb=False):

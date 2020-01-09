@@ -15,6 +15,10 @@ from numpy.random import randint
 class VideoRecord(object):
     def __init__(self, row):
         self._data = row
+        self._labels = torch.tensor([-1, -1, -1])
+        labels=sorted(list(set([int(x) for x in self._data[2:]])))
+        for i,l in enumerate(labels):
+            self._labels[i]=l
 
     @property
     def path(self):
@@ -26,7 +30,7 @@ class VideoRecord(object):
 
     @property
     def label(self):
-        return int(self._data[2])
+        return self._labels
 
 
 class TSNDataSet(data.Dataset):
@@ -96,7 +100,9 @@ class TSNDataSet(data.Dataset):
 
     def _parse_list(self):
         # check the frame number is large >3:
-        tmp = [x.strip().split(' ') for x in open(self.list_file)]
+        splitter="," if self.args.dataset == "actnet" else " "
+        tmp = [x.strip().split(splitter) for x in open(self.list_file)]
+
         if not self.test_mode or self.remove_missing:
             tmp = [item for item in tmp if int(item[1]) >= 3]
         self.video_list = [VideoRecord(item) for item in tmp]
@@ -211,7 +217,6 @@ class TSNDataSet(data.Dataset):
                     p += 1
 
         process_data = self.transform(images)
-        print("proc_data.shape",process_data.shape)
         if self.args.ada_reso_skip:
             return tuple(
                 [process_data] +

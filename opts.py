@@ -19,8 +19,8 @@ parser.add_argument('--k', type=int, default=3)
 
 parser.add_argument('--dropout', '--do', default=0.5, type=float,
                     metavar='DO', help='dropout ratio (default: 0.5)')
-parser.add_argument('--loss_type', type=str, default="nll",
-                    choices=['nll'])
+#parser.add_argument('--loss_type', type=str, default="nll",
+#                    choices=['nll'])
 parser.add_argument('--img_feature_dim', default=256, type=int, help="the feature dimension for each frame")
 parser.add_argument('--suffix', type=str, default=None)
 parser.add_argument('--pretrain', type=str, default='imagenet')
@@ -76,16 +76,23 @@ parser.add_argument('--non_local', default=False, action="store_true", help='add
 
 parser.add_argument('--dense_sample', default=False, action="store_true", help='use dense sample for video dataset')
 
-# TODO (yue)
+# TODO(yue) basic style + (offline-related)
 parser.add_argument('--exp_header', default="default", type=str, help='experiment header')
 parser.add_argument('--rescale_to', default=224, type=int, help='rescale to this resolution (TSN only)')
 parser.add_argument('--rescale_pattern', default="L", type=str, help='The offline scale policy')
 
-# TODO(yue)
+# TODO(yue) adaptive resolution and skipping (hardcoded version)
 parser.add_argument('--ada_reso_skip', action='store_true', help='adaptively select scale and choose to skip')
 parser.add_argument('--reso_list', default=[224, 112], type=int, nargs='+', help="list of resolutions")
 parser.add_argument('--skip_list', default=[1], type=int, nargs='+', help="list of frames to skip")
-parser.add_argument('--backbone_list', default=['resnet50', 'resnet50'], type=str, nargs='+', help="backbones for diff resos")
+parser.add_argument('--backbone_list', default=['resnet50'], type=str, nargs='+', help="backbones for diff resos")
 parser.add_argument('--shared_backbone', action='store_true', help="share same backbone weight")
 parser.add_argument('--accuracy_weight', default=1., type=float)
 parser.add_argument('--efficency_weight', default=0., type=float)
+parser.add_argument('--no_skip', action='store_true')
+parser.add_argument('--show_pred', action='store_true')
+parser.add_argument('--t_offset', default=0, type=int)
+
+# TODO(yue) multi-label cases (for activity-net-v1.3)
+# Always provides (single + multi) mAPs. Difference is only in training
+parser.add_argument('--loss_type', type=str, default="nll", choices=['nll', 'bce'])

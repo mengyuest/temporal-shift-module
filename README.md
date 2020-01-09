@@ -1,3 +1,43 @@
+# Adaptive Resolution and Skipping
+
+Requirement: I think only `pytorch` and `tensorboardX`
+
+For paths see `common.py`
+
+CMD Flags are in `opts.py`
+
+Modified model is mainly in `ops/models_ada.py`
+
+## Commands:
+**Baseline-1**: Train UCF101 with TSN
+```
+python main.py ucf101 RGB --arch resnet50 --num_segments 8 --gd 20 --lr 0.02 --wd 1e-4 --lr_steps 20 40 --epochs 50 --batch-size 72 -j 8 --dropout 0.5 --consensus_type=avg --eval-freq=1 --npb --gpus 0 1 2 3 4 5 --exp_header ucf_tsn
+```
+
+**Baseline-2**: Train ActNet with multi-label loss
+```
+python main.py actnet RGB --arch resnet50 --num_segments 8 --gd 20 --lr 0.02 --wd 1e-4 --lr_steps 20 40 --epochs 50 --batch-size 72 -j 4 --dropout 0.5 --consensus_type=avg --eval-freq=1 --npb --gpus 0 1 2 3 4 5 6 7 --exp_header act_tsn_bce --loss_type bce
+```
+
+**Rescaling to a scale 112)**:
+```
+python main.py ucf101 RGB --arch resnet50 --num_segments 8 --gd 20 --lr 0.02 --wd 1e-4 --lr_steps 20 40 --epochs 50 --batch-size 72 -j 8 --dropout 0.5 --consensus_type=avg --eval-freq=1 --npb --gpus 0 1 2 3 4 5 --exp_header ucf_tsn_R --rescale_to 112
+```
+
+**Using two diff scales 224 & 112)**:
+```
+python main.py ucf101 RGB --arch resnet50 --num_segments 8 --gd 20 --lr 0.02 --wd 1e-4 --lr_steps 20 40 --epochs 50 --batch-size 72 -j 4 --dropout 0.5 --consensus_type=avg --eval-freq=1 --npb --gpus 0 1 2 3 4 5 --exp_header ucf_tsn_LR --rescale_pattern LR
+```
+
+**PolicyNet (224, 112, skipping, two backbone models)**:
+```
+python main.py ucf101 RGB --arch resnet50 --num_segments 8 --gd 20 --lr 0.02 --wd 1e-4 --lr_steps 20 40 --epochs 50 --batch-size 72 -j 4 --dropout 0.5 --consensus_type=avg --eval-freq=1 --npb --gpus 0 1 2 3 4 5 --ada_reso_skip --reso_list 224 112 --backbone_list resnet50 resnet50 --accuracy_weight 0.90 --efficency_weight 0.10  --exp_header ucf_tsn_ada5050_LRS_acc0.9_e0.1
+```
+
+
+
+
+
 # TSM: Temporal Shift Module for Efficient Video Understanding [[Website]](https://hanlab.mit.edu/projects/tsm/) [[arXiv]](https://arxiv.org/abs/1811.08383)[[Demo]](https://www.youtube.com/watch?v=0T6u7S_gq-4)
 
 ```
@@ -11,7 +51,6 @@
 
 **[NEW!]** We have released the code of online hand gesture recognition on NVIDIA Jeston Nano. It can achieve real-time recognition at only 8 watts. See [`online_demo`](online_demo) folder for the details. [[Full Video]](https://hanlab.mit.edu/projects/tsm/#live_demo)
 
-![tsm-demo](https://hanlab.mit.edu/projects/tsm/external/tsm-demo2.gif)
 
 ## Overview
 

@@ -21,7 +21,7 @@ from ops.models_ada import TSN_Ada
 from ops.transforms import *
 from opts import parser
 from ops import dataset_config
-from ops.utils import AverageMeter, accuracy
+from ops.utils import AverageMeter, accuracy, cal_map, Recorder, get_multi_hot
 from ops.temporal_shift import make_temporal_pool
 
 from tensorboardX import SummaryWriter
@@ -29,13 +29,14 @@ from ops.my_logger import Logger
 
 
 best_prec1 = 0
+num_class = -1
 
 # TODO(yue)
 import common
 from os.path import join as ospj
 
 def main():
-    global args, best_prec1
+    global args, best_prec1, num_class
     args = parser.parse_args()
 
     logger=Logger()
@@ -176,6 +177,8 @@ def main():
     # define loss function (criterion) and optimizer
     if args.loss_type == 'nll':
         criterion = torch.nn.CrossEntropyLoss().cuda()
+    elif args.loss_type == "bce":
+        criterion = torch.nn.BCEWithLogitsLoss().cuda()
     else:
         raise ValueError("Unknown loss type")
 
@@ -192,6 +195,12 @@ def main():
     with open(os.path.join(exp_full_path, 'args.txt'), 'w') as f:
         f.write(str(args))
     tf_writer = SummaryWriter(log_dir=exp_full_path)
+
+    # TODO(yue)
+    map_record = Recorder()
+    mmap_record = Recorder()
+    prec_record = Recorder()
+
     for epoch in range(args.start_epoch, args.epochs):
         adjust_learning_rate(optimizer, epoch, args.lr_type, args.lr_steps)
 
@@ -200,23 +209,45 @@ def main():
 
         # evaluate on validation set
         if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
-            prec1 = validate(val_loader, model, criterion, epoch, tf_writer)
+            mAP, mmAP, prec1 = validate(val_loader, model, criterion, epoch, tf_writer)
 
             # remember best prec@1 and save checkpoint
-            is_best = prec1 > best_prec1
-            best_prec1 = max(prec1, best_prec1)
-            tf_writer.add_scalar('acc/test_top1_best', best_prec1, epoch)
+            map_record.update(mAP)
+            mmap_record.update(mmAP)
+            prec_record.update(prec1)
 
-            print('Best Prec@1: %.3f\n' % (best_prec1))
+            tf_writer.add_scalar('acc/test_top1_best', prec_record.best_val, epoch)
+
+            print('Best mAP: %.3f (epoch=%d)\t\tBest mmAP: %.3f(epoch=%d)\t\tBest Prec@1: %.3f (epoch=%d)\n' % (
+                map_record.best_val, map_record.best_at,
+                mmap_record.best_val, mmap_record.best_at,
+                prec_record.best_val, prec_record.best_at))
 
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
-                'best_prec1': best_prec1,
-            }, is_best, exp_full_path)
+                'best_prec1': prec_record.best_val,
+            }, prec_record.is_current_best(), exp_full_path)
 
+def cal_eff(r):
+    # TODO r N, T, 3 or 2
+    if args.no_skip:
+        r_loss = torch.tensor([4., 2.]).cuda()  # loss for diff ops
+    else:
+        r_loss = torch.tensor([4., 2., 1.]).cuda() # loss for diff ops
+    return torch.sum(torch.mean(r, axis=[0,1]) * r_loss)
+
+def reverse_onehot(a):
+    return [np.where(r == 1)[0][0] for r in a]
+
+def get_criterion_loss(criterion, output, target):
+    if args.loss_type == "bce":
+        multi_hot_target = get_multi_hot(target, num_class).cuda()
+        return criterion(output, multi_hot_target)
+    else:
+        return criterion(output, target[:, 0])
 
 def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
     batch_time = AverageMeter()
@@ -224,6 +255,10 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
     losses = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
+
+    if args.ada_reso_skip:
+        alosses = AverageMeter()
+        elosses = AverageMeter()
 
     if args.no_partialbn:
         model.module.partialBN(False)
@@ -247,14 +282,20 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
             input_var_1 = torch.autograd.Variable(input_tuple[1])
             #TODO(yue) + LOSS + validation part!
             output, r = model(input_var_0, input_var_1)
+
+            acc_loss = get_criterion_loss(criterion, output, target_var)
+            eff_loss = cal_eff(r)
+
+            alosses.update(acc_loss.item() * args.accuracy_weight, input.size(0))
+            elosses.update(eff_loss.item() * args.efficency_weight, input.size(0))
+            loss = acc_loss * args.accuracy_weight + eff_loss * args.efficency_weight
         else:
             input_var = torch.autograd.Variable(input)
             output = model(input_var)
-
-        loss = criterion(output, target_var)
+            loss = get_criterion_loss(criterion, output, target_var)
 
         # measure accuracy and record loss
-        prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
+        prec1, prec5 = accuracy(output.data, target[:,0], topk=(1, 5))
         losses.update(loss.item(), input.size(0))
         top1.update(prec1.item(), input.size(0))
         top5.update(prec5.item(), input.size(0))
@@ -273,7 +314,7 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
         end = time.time()
 
         if i % args.print_freq == 0:
-            output = ('Epoch: [{0}][{1}/{2}], lr: {lr:.5f}\t'
+            print_output = ('Epoch: [{0}][{1}/{2}], lr: {lr:.5f}\t'
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
@@ -281,12 +322,22 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
                       'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
                 epoch, i, len(train_loader), batch_time=batch_time,
                 data_time=data_time, loss=losses, top1=top1, top5=top5, lr=optimizer.param_groups[-1]['lr'] * 0.1))  # TODO
-            print(output)
+
+            if args.ada_reso_skip:
+                print_output += '\ta {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
+                    aloss = alosses, eloss =elosses, r=reverse_onehot(r[-1,:,:].detach().cpu().numpy())
+                )
+
+            if args.show_pred:
+                print_output +="\tp {p}".format(p=output[-1,:].detach().cpu().numpy())
+
+            print(print_output)
 
     tf_writer.add_scalar('loss/train', losses.avg, epoch)
     tf_writer.add_scalar('acc/train_top1', top1.avg, epoch)
     tf_writer.add_scalar('acc/train_top5', top5.avg, epoch)
     tf_writer.add_scalar('lr', optimizer.param_groups[-1]['lr'], epoch)
+
 
 
 def validate(val_loader, model, criterion, epoch, tf_writer=None):
@@ -295,20 +346,43 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
     top1 = AverageMeter()
     top5 = AverageMeter()
 
+    # TODO(yue)
+    all_results = []
+    all_targets = []
+
+    if args.ada_reso_skip:
+        alosses = AverageMeter()
+        elosses = AverageMeter()
+        r_list=[]
+
     # switch to evaluate mode
     model.eval()
 
     end = time.time()
     with torch.no_grad():
-        for i, (input, target) in enumerate(val_loader):
-            target = target.cuda()
+        for i, input_tuple in enumerate(val_loader):
+            target = input_tuple[-1].cuda()
+            input = input_tuple[0]
 
             # compute output
-            output = model(input)
-            loss = criterion(output, target)
+            if args.ada_reso_skip:
+                output, r = model(input_tuple[0], input_tuple[1])
+                acc_loss = get_criterion_loss(criterion, output, target)
+                eff_loss = cal_eff(r)
+
+                alosses.update(acc_loss.item() * args.accuracy_weight, input.size(0))
+                elosses.update(eff_loss.item() * args.efficency_weight, input.size(0))
+                loss = acc_loss * args.accuracy_weight + eff_loss * args.efficency_weight
+            else:
+                output = model(input)
+                loss = get_criterion_loss(criterion, output, target)
+
+            # TODO(yue)
+            all_results.append(output)
+            all_targets.append(target)
 
             # measure accuracy and record loss
-            prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
+            prec1, prec5 = accuracy(output.data, target[:,0], topk=(1, 5))
 
             losses.update(loss.item(), input.size(0))
             top1.update(prec1.item(), input.size(0))
@@ -317,6 +391,8 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
             # measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
+            if args.ada_reso_skip:
+                r_list.append(r.cpu().numpy())
 
             if i % args.print_freq == 0:
                 output = ('Test: [{0}/{1}]\t'
@@ -326,18 +402,42 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
                           'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
                     i, len(val_loader), batch_time=batch_time, loss=losses,
                     top1=top1, top5=top5))
+                if args.ada_reso_skip:
+                    output += '\ta {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
+                        aloss=alosses, eloss=elosses, r=reverse_onehot(r[-1, :, :].cpu().numpy())
+                    )
+
                 print(output)
 
-    output = ('Testing Results: Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
-              .format(top1=top1, top5=top5, loss=losses))
+    # TODO(yue)
+    mAP,_ = cal_map(torch.cat(all_results,0).cpu(), torch.cat(all_targets,0)[:,0:1].cpu()) # TODO(yue) single-label mAP
+    mmAP, _ = cal_map(torch.cat(all_results, 0).cpu(), torch.cat(all_targets, 0).cpu())    # TODO(yue)  multi-label mAP
+
+    output = ('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
+              .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses))
     print(output)
+
+    if args.ada_reso_skip:
+        rs=np.concatenate(r_list, axis=0)
+        normal_ops = np.sum(rs[:, :, 0]==1)
+        small_ops = np.sum(rs[:, :, 1] == 1)
+        if rs.shape[2]==3:
+            skip_ops = np.sum(rs[:, :, 2] == 1)
+        else:
+            skip_ops = 0
+        total_ops = normal_ops+small_ops+skip_ops
+        print("normal: %d (%.4f), small:%d (%.4f), skip:%d (%.4f)"%(
+            normal_ops, 1.0 * normal_ops / total_ops,
+            small_ops, 1.0 * small_ops / total_ops,
+            skip_ops, 1.0 * skip_ops / total_ops,
+        ))
 
     if tf_writer is not None:
         tf_writer.add_scalar('loss/test', losses.avg, epoch)
         tf_writer.add_scalar('acc/test_top1', top1.avg, epoch)
         tf_writer.add_scalar('acc/test_top5', top5.avg, epoch)
 
-    return top1.avg
+    return mAP, mmAP, top1.avg
 
 
 def save_checkpoint(state, is_best, exp_full_path):

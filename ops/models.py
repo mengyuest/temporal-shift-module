@@ -267,7 +267,7 @@ class TSN(nn.Module):
         ]
 
     def forward(self, input, no_reshape=False):
-        #TODO (one-time rescale)
+        # TODO(yue) one-time rescale
         if self.rescale_to != 224:
             _N, _, _H, _W = input.shape
             _T=self.num_segments
@@ -275,14 +275,12 @@ class TSN(nn.Module):
             input = torch.nn.functional.interpolate(input.view(_N*_T,_C,_H,_W),
                                                     size=(self.rescale_to, self.rescale_to),
                                                     mode='nearest').view((_N, _T*_C,self.rescale_to,self.rescale_to))
-        # TODO(offline rescale policy)
+        # TODO(yue) diff scales (offline-policy)
         # multi base_out, and merge
         if self.rescale_pattern != "L":
             _N, _, _H, _W = input.shape
             high_res_input=[]
             low_res_input=[]
-            debug_high_idx=[]
-            debug_low_idx=[]
             len_pat=len(self.rescale_pattern)
             num_clips=self.num_segments//len_pat
             scale_dict={"S":64,
@@ -295,16 +293,11 @@ class TSN(nn.Module):
                     selected_tensor = input[:, (clip_i*len_pat+p_i)*3:(clip_i*len_pat+p_i+1)*3]
                     if pattern=="L":
                         high_res_input.append(selected_tensor)
-                        debug_high_idx.append(clip_i*len_pat+p_i)
                     elif pattern in scale_dict:
                         low_res_input.append(selected_tensor)
-                        debug_low_idx.append(clip_i * len_pat + p_i)
                         low_scale = scale_dict[pattern]
                     else:
                         exit("Cannot recognize pattern: %s"%(pattern))
-
-            # print("debug_high_idx", debug_high_idx)
-            # print("debug_low_idx", debug_low_idx)
 
             if len(high_res_input)==0 or len(low_res_input)==0:
                 exit("Cannot let high/low_res_input empty")
@@ -313,8 +306,6 @@ class TSN(nn.Module):
             low_len = len(low_res_input)
             high_res_input = torch.cat(high_res_input, dim=1)
             low_res_input = torch.cat(low_res_input, dim=1)
-            # print("high_res_input:", high_res_input.shape)
-            # print("low_res_input:", low_res_input.shape)
 
             low_res_input = torch.nn.functional.interpolate(low_res_input.view(_N * low_len, 3, _H, _W),
                                                     size=(low_scale, low_scale), mode='nearest'
@@ -322,13 +313,9 @@ class TSN(nn.Module):
 
             high_out = self.base_model(high_res_input.view((-1, 3) + high_res_input.size()[-2:]))
             low_out = self.base_model(low_res_input.view((-1, 3) + low_res_input.size()[-2:]))
-            # print("high_out:", high_out.shape)
-            # print("low_out:", low_out.shape)
 
             base_out = torch.cat([high_out.view((-1, high_len)+(high_out.shape[-1],)),
                                  low_out.view((-1, low_len)+(low_out.shape[-1],))], dim=1).view(-1,high_out.shape[-1])
-            # print("base_out:", base_out.shape)
-            #exit()
         else:
             if not no_reshape:
                 sample_len = (3 if self.modality == "RGB" else 2) * self.new_length

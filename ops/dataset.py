@@ -54,6 +54,9 @@ class TSNDataSet(data.Dataset):
         self.twice_sample = twice_sample  # twice sample for more validation
         self.args=args
 
+        # TODO(yue)
+        self.root_path += self.args.folder_suffix
+
         if self.dense_sample:
             print('=> Using dense sample for the dataset...')
         if self.twice_sample:

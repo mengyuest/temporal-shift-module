@@ -45,61 +45,53 @@ class TSN_Ada(nn.Module):
         self.temporal_pool = temporal_pool
         self.non_local = non_local
 
-        #TODO
+        # TODO(yue)
         self.rescale_to = rescale_to
         self.rescale_pattern = rescale_pattern
         self.args = args
-
-        #TODO
         base_model = self.args.backbone_list[0]
         self.base_model_name = base_model
 
-        #TODO(yue)
-        self.lite_backbone = getattr(torchvision.models, "resnet18")(True)
-        #print(self.lite_backbone)
-        #exit()
-        self.lite_backbone.last_layer_name = 'fc'
-        self.lite_backbone.avgpool = nn.AdaptiveAvgPool2d(1)
+        # TODO(yue)
+        if self.args.ada_reso_skip:
+            policy_feat_dim_dict={"resnet18": 512,
+                            "resnet34": 512,
+                            "resnet50": 2048,
+                            "resnet101": 2048,
+                            "mobilenet_v2": 1280}
 
-        self.rnn = nn.LSTMCell(input_size=512, hidden_size=512, bias=True)
+            self.lite_backbone = getattr(torchvision.models, self.args.policy_backbone)(True)
 
-        if self.args.no_skip:
-            self.linear = nn.Linear(512, 2)
-        else:
-            self.linear = nn.Linear(512, 3)
+            self.lite_backbone.avgpool = nn.AdaptiveAvgPool2d(1)
+            if "resnet" in self.args.policy_backbone:
+                self.lite_backbone.last_layer_name = 'fc'
+            else:
+                self.lite_backbone.last_layer_name = 'classifier'
 
 
-        if not before_softmax and consensus_type != 'avg':
-            raise ValueError("Only avg consensus can be used after Softmax")
+            self.policy_feat_dim = policy_feat_dim_dict[self.args.policy_backbone]
+            self.rnn = nn.LSTMCell(input_size=self.policy_feat_dim, hidden_size=self.args.hidden_dim, bias=True)
 
-        if new_length is None:
-            self.new_length = 1 if modality == "RGB" else 5
-        else:
-            self.new_length = new_length
-        if print_spec:
-            print(("""
-    Initializing TSN with base model: {}.
-    TSN Configurations:
-        input_modality:     {}
-        num_segments:       {}
-        new_length:         {}
-        consensus_module:   {}
-        dropout_ratio:      {}
-        img_feature_dim:    {}
-            """.format(base_model, self.modality, self.num_segments, self.new_length, consensus_type, self.dropout, self.img_feature_dim)))
+            self.multi_models = False
+            if len(self.args.backbone_list) >= 1:
+                self.multi_models = True
+                self.base_model_list = nn.ModuleList() #[]
+                self.new_fc_list = nn.ModuleList()#[]
+
+            self.reso_dim = len(self.args.backbone_list)
+            self.skip_dim = len(self.args.skip_list)
+            self.action_dim = self.reso_dim + self.skip_dim
+
+            if self.args.no_skip:
+                self.action_dim = self.reso_dim
+
+        self._sanity_check(base_model, before_softmax, consensus_type, new_length, print_spec, modality)
 
         self._prepare_base_model(base_model)
 
-        feature_dim = self._prepare_tsn(num_class)
+        self._prepare_tsn(num_class)
 
-        if self.modality == 'Flow':
-            print("Converting the ImageNet model to a flow init model")
-            self.base_model = self._construct_flow_model(self.base_model)
-            print("Done. Flow model ready...")
-        elif self.modality == 'RGBDiff':
-            print("Converting the ImageNet model to RGB+Diff init model")
-            self.base_model = self._construct_diff_model(self.base_model)
-            print("Done. RGBDiff model ready.")
+        self._do_if_flow_or_rgbdiff()
 
         self.consensus = ConsensusModule(consensus_type)
 
@@ -110,62 +102,71 @@ class TSN_Ada(nn.Module):
         if partial_bn:
             self.partialBN(True)
 
-    def _prepare_tsn(self, num_class):
-        feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
-        if self.dropout == 0:
-            setattr(self.base_model, self.base_model.last_layer_name, nn.Linear(feature_dim, num_class))
-            self.new_fc = None
-        else:
-            setattr(self.base_model, self.base_model.last_layer_name, nn.Dropout(p=self.dropout))
-            self.new_fc = nn.Linear(feature_dim, num_class)
+    def _sanity_check(self, base_model, before_softmax, consensus_type, new_length, print_spec, modality):
+        if not before_softmax and consensus_type != 'avg':
+            raise ValueError("Only avg consensus can be used after Softmax")
 
-        # TODO(yue)
-        if self.args.ada_reso_skip:
-            setattr(self.lite_backbone, self.lite_backbone.last_layer_name, nn.Dropout(p=self.dropout))
-            if self.two_models:
-                setattr(self.base_model_1, self.base_model_1.last_layer_name, nn.Dropout(p=self.dropout))
-        std = 0.001
-        if self.new_fc is None:
-            normal_(getattr(self.base_model, self.base_model.last_layer_name).weight, 0, std)
-            constant_(getattr(self.base_model, self.base_model.last_layer_name).bias, 0)
+        if new_length is None:
+            self.new_length = 1 if modality == "RGB" else 5
         else:
-            if hasattr(self.new_fc, 'weight'):
-                normal_(self.new_fc.weight, 0, std)
-                constant_(self.new_fc.bias, 0)
-        return feature_dim
+            self.new_length = new_length
+        if print_spec:
+            print(("""
+        Initializing TSN with base model: {}.
+        TSN Configurations:
+            input_modality:     {}
+            num_segments:       {}
+            new_length:         {}
+            consensus_module:   {}
+            dropout_ratio:      {}
+            img_feature_dim:    {}
+                """.format(base_model, self.modality, self.num_segments, self.new_length, consensus_type, self.dropout,
+                           self.img_feature_dim)))
+
+    def _do_if_flow_or_rgbdiff(self):
+        if self.modality == 'Flow':
+            print("Converting the ImageNet model to a flow init model")
+            self.base_model = self._construct_flow_model(self.base_model)
+            print("Done. Flow model ready...")
+        elif self.modality == 'RGBDiff':
+            print("Converting the ImageNet model to RGB+Diff init model")
+            self.base_model = self._construct_diff_model(self.base_model)
+            print("Done. RGBDiff model ready.")
 
     def _prepare_base_model(self, base_model):
         print('=> base model: {}'.format(base_model))
 
+        self.input_size = 224
+        self.input_mean = [0.485, 0.456, 0.406]
+        self.input_std = [0.229, 0.224, 0.225]
+
+        if self.args.ada_reso_skip and len(self.args.backbone_list) > 1:
+            for backbone_name in self.args.backbone_list:
+                self.base_model_list.append(
+                    getattr(torchvision.models, backbone_name)(self.pretrain == 'imagenet'))
+
+                if 'resnet' in backbone_name:
+                    self.base_model_list[-1].last_layer_name = 'fc'
+                    self.base_model_list[-1].avgpool = nn.AdaptiveAvgPool2d(1)
+                elif backbone_name == 'mobilenet_v2':
+                    self.base_model_list[-1].last_layer_name = 'classifier'
+                    self.base_model_list[-1].avgpool = nn.AdaptiveAvgPool2d(1)
+            return
+
         if 'resnet' in base_model:
-            self.base_model = getattr(torchvision.models, base_model)(True if self.pretrain == 'imagenet' else False)
-
-            #TODO
-            self.two_models = False
-            if self.args.ada_reso_skip and len(self.args.backbone_list)>1 and self.args.shared_backbone==False:
-                self.two_models = True
-                self.base_model_1 = getattr(torchvision.models, self.args.backbone_list[1])(True if self.pretrain == 'imagenet' else False)
-
+            self.base_model = getattr(torchvision.models, base_model)(self.pretrain == 'imagenet')
             if self.is_shift:
                 print('Adding temporal shift...')
                 from ops.temporal_shift import make_temporal_shift
                 make_temporal_shift(self.base_model, self.num_segments,
                                     n_div=self.shift_div, place=self.shift_place, temporal_pool=self.temporal_pool)
-
             if self.non_local:
                 print('Adding non-local module...')
                 from ops.non_local import make_non_local
                 make_non_local(self.base_model, self.num_segments)
 
             self.base_model.last_layer_name = 'fc'
-            self.input_size = 224
-            self.input_mean = [0.485, 0.456, 0.406]
-            self.input_std = [0.229, 0.224, 0.225]
-
             self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
-            if self.two_models:
-                self.base_model_1.last_layer_name = 'fc'
-                self.base_model_1.avgpool = nn.AdaptiveAvgPool2d(1)
 
             if self.modality == 'Flow':
                 self.input_mean = [0.5]
@@ -177,12 +178,7 @@ class TSN_Ada(nn.Module):
         elif base_model == 'mobilenetv2':
             from archs.mobilenet_v2 import mobilenet_v2, InvertedResidual
             self.base_model = mobilenet_v2(True if self.pretrain == 'imagenet' else False)
-
             self.base_model.last_layer_name = 'classifier'
-            self.input_size = 224
-            self.input_mean = [0.485, 0.456, 0.406]
-            self.input_std = [0.229, 0.224, 0.225]
-
             self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
             if self.is_shift:
                 from ops.temporal_shift import TemporalShift
@@ -216,6 +212,49 @@ class TSN_Ada(nn.Module):
         else:
             raise ValueError('Unknown base model: {}'.format(base_model))
 
+    def _prepare_tsn(self, num_class):
+        # TODO(yue)
+        std = 0.001
+        if self.args.ada_reso_skip:
+            setattr(self.lite_backbone, self.lite_backbone.last_layer_name, nn.Dropout(p=self.dropout))
+            self.linear = nn.Linear(self.args.hidden_dim, self.action_dim)
+            self.lite_fc = nn.Linear(self.args.hidden_dim, num_class)
+            if hasattr(self.linear, 'weight'):
+                normal_(self.linear.weight, 0, std)
+                constant_(self.linear.bias, 0)
+            if hasattr(self.lite_fc, 'weight'):
+                normal_(self.lite_fc.weight, 0, std)
+                constant_(self.lite_fc.bias, 0)
+        if self.multi_models:
+            for base_model in self.base_model_list:
+                feature_dim = getattr(base_model, base_model.last_layer_name).in_features
+                setattr(base_model, base_model.last_layer_name, nn.Dropout(p=self.dropout))
+                new_fc = nn.Linear(feature_dim, num_class)
+                if hasattr(new_fc, 'weight'):
+                    normal_(new_fc.weight, 0, std)
+                    constant_(new_fc.bias, 0)
+                self.new_fc_list.append(new_fc)
+            return None
+
+        feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
+        if self.dropout == 0:
+            setattr(self.base_model, self.base_model.last_layer_name, nn.Linear(feature_dim, num_class))
+            self.new_fc = None
+        else:
+            setattr(self.base_model, self.base_model.last_layer_name, nn.Dropout(p=self.dropout))
+            self.new_fc = nn.Linear(feature_dim, num_class)
+
+        std = 0.001
+        if self.new_fc is None:
+            normal_(getattr(self.base_model, self.base_model.last_layer_name).weight, 0, std)
+            constant_(getattr(self.base_model, self.base_model.last_layer_name).bias, 0)
+        else:
+            if hasattr(self.new_fc, 'weight'):
+                normal_(self.new_fc.weight, 0, std)
+                constant_(self.new_fc.bias, 0)
+
+        return feature_dim
+
     def train(self, mode=True):
         """
         Override the default train() to freeze the BN parameters
@@ -226,11 +265,12 @@ class TSN_Ada(nn.Module):
         if self._enable_pbn and mode:
             print("Freezing BatchNorm2D except the first one.")
 
-            models= [self.base_model]
             if self.args.ada_reso_skip:
-                models.append(self.lite_backbone)
-                if self.two_models:
-                    models.append(self.base_model_1)
+                models=[self.lite_backbone]
+                if self.multi_models:
+                    models = models + self.base_model_list
+            else:
+                models=[self.base_model]
             for the_model in models:
                 count = 0
                 for m in the_model.modules():
@@ -325,70 +365,108 @@ class TSN_Ada(nn.Module):
              'name': "lr10_bias"},
         ]
 
-    def forward(self, input_0, input_1, no_reshape=False):
+    def forward(self, *argv, **kwargs):
         # if not no_reshape && self.dropout > 0 && no-shift:
-        def backbone(input_data, the_base_model):
+        def backbone(input_data, the_base_model, new_fc):
             base_out = the_base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]))
-            base_out = self.new_fc(base_out)
+            if new_fc is not None:
+                base_out = new_fc(base_out)
             base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
             return base_out
 
+
+        batch_size = argv[0].shape[0]
+
         # TODO(yue) - LITE-BACKBONE
         #print("input_0",input_0.shape, "input_1", input_1.shape)
-        feat_lite = self.lite_backbone(input_0.view((-1, 3 * self.new_length) + input_0.size()[-2:])) #TODO N*T, F
-        feat_lite = feat_lite.view((-1, self.num_segments) + feat_lite.size()[1:])
-        #print("feat_lite", feat_lite.shape)
-        base_out_0 = backbone(input_0, self.base_model) #TODO N, T, C
-        if self.two_models==False:
-            base_out_1 = backbone(input_1, self.base_model)  # TODO N, T, C
+        #feat_lite = self.lite_backbone(input_0.view((-1, 3 * self.new_length) + input_0.size()[-2:])) #TODO N*T, F
+        #feat_lite = feat_lite.view((-1, self.num_segments) + feat_lite.size()[1:])
+
+        if self.args.ada_reso_skip:
+            feat_lite = backbone(argv[self.args.policy_input_offset], self.lite_backbone, None)
+            hx = init_hidden(batch_size, self.args.hidden_dim)
+            cx = init_hidden(batch_size, self.args.hidden_dim)
+            logits_list = []
+            lite_j_list = []
+
+            for t in range(self.num_segments):
+                hx, cx = self.rnn(feat_lite[:, t], (hx, cx))
+                p_t = self.linear(hx)
+                p_t = torch.log(F.softmax(p_t, dim=1))
+                logits_list.append(p_t)
+
+                j_t = self.lite_fc(hx)
+                lite_j_list.append(j_t)
+
+            if self.args.offline_lstm_last:  #TODO(yue) no policy - just LSTM(last)
+                output = lite_j_list[-1]
+                r = None
+            elif self.args.offline_lstm_all: #TODO(yue) no policy - just LSTM(average)
+                output = torch.stack(lite_j_list).mean(dim=0)
+                r = None
+            elif self.multi_models: #TODO(yue) policy
+
+                base_out_list = [backbone(argv[i], self.base_model_list[i], self.new_fc_list[i]) for i in
+                                 range(len(argv))]
+
+                if self.args.random_policy: #TODO(yue) random policy
+                    r = torch.zeros(batch_size,self.num_segments,self.action_dim).cuda()
+                    for i_bs in range(batch_size):
+                        for i_t in range(self.num_segments):
+                            r[i_bs, i_t, torch.randint(self.action_dim,[1])] = 1.0
+                else: #TODO(yue) online policy
+                    logits = torch.stack(logits_list, dim=1)  # N*T*K
+                    r = F.gumbel_softmax(logits=logits, tau=1.0, hard=True, eps=1e-10, dim=-1)
+                output = self.combine_logits(r, base_out_list)
+            else:
+                raise ValueError("Don't have this option for model.forward()")
+            # TODO(yue) - ALSO DEFINE LOSS FUNCTIONS
+            # base_out = backbone(input_0)
+            # output = self.consensus(base_out)
+
         else:
-            base_out_1 = backbone(input_1, self.base_model_1) #TODO N, T, C
+            base_out = backbone(argv[0], self.base_model, self.new_fc) #TODO N, T, C
+
+        # if self.two_models==False:
+        #     base_out_1 = backbone(input_1, self.base_model)  # TODO N, T, C
+        # else:
+        #     base_out_1 = backbone(input_1, self.base_model_1) #TODO N, T, C
 
         # TODO(yue) - RNN + GUMBEL + COMBINE
-        batch_size = input_0.shape[0]
-        hx = init_hidden(batch_size, 512)
-        cx = init_hidden(batch_size, 512)
 
-        logits_list = []
-        #print("feat_lite.shape", feat_lite.shape)
-        #print("hx.shape",hx.shape)
-        #print("cx.shape", cx.shape)
-        for t in range(self.num_segments):
-            hx, cx = self.rnn(feat_lite[:,t], (hx, cx))
-            p_t = self.linear(hx)
-            p_t = torch.log(F.softmax(p_t, dim=1))
-            logits_list.append(p_t)
-
-        logits = torch.stack(logits_list, dim=1) # N*T*3
-        r = F.gumbel_softmax(logits=logits, tau=1.0, hard=True, eps=1e-10, dim=-1)
-        output = self.combine_logits(r, base_out_0,base_out_1)
-
-        # TODO(yue) - ALSO DEFINE LOSS FUNCTIONS
-        # base_out = backbone(input_0)
-        # output = self.consensus(base_out)
         return output.squeeze(1), r
 
-    def combine_logits(self, r, base_out_0, base_out_1):
-        # TODO r           N, T, 3  (0-origin, 1-low, 2-skip)
-        # TODO base_out_0  N, T, C
-        # TODO base_out_1  N, T, C
+    def combine_logits(self, r, base_out_list):
+        # TODO r           N, T, K  (0-origin, 1-low, 2-skip)
+        # TODO base_out_list  <K * (N, T, C)
         offset = self.args.t_offset # 0
         batchsize = r.shape[0]
-        total_num = torch.sum(r[:,offset:,0:2], dim=[1,2]) + offset * batchsize
+        total_num = torch.sum(r[:,offset:, 0:self.reso_dim], dim=[1,2]) + offset * batchsize
 
         #print("r",r)
         #print("total_num", total_num)
-        r_like_base_0 = r[:, :, 0].unsqueeze(-1).expand_as(base_out_0)
-        r_like_base_1 = r[:, :, 1].unsqueeze(-1).expand_as(base_out_1)
-
-        if offset>0:
-            r_like_base_0[:, :offset, :] = 1
-            r_like_base_1[:, :offset, :] = 0
-
-        res_base_0 = torch.sum(r_like_base_0 * base_out_0, dim=1)
-        res_base_1 = torch.sum(r_like_base_1 * base_out_1, dim=1)
-        #print("res_bases:",res_base_0.shape, res_base_1.shape)
-        pred = (res_base_0 + res_base_1 ) / torch.clamp(total_num.unsqueeze(-1), 1)
+        res_base_list=[]
+        for i,base_out in enumerate(base_out_list):
+            r_like_base = r[:, :, 0].unsqueeze(-1).expand_as(base_out)
+            if offset>0:
+                if i==0:
+                    r_like_base[:, :offset, :] = 1
+                else:
+                    r_like_base[:, :offset, :] = 0
+            res_base = torch.sum(r_like_base * base_out, dim=1)
+            res_base_list.append(res_base)
+        pred = torch.stack(res_base_list).sum(dim=0) / torch.clamp(total_num.unsqueeze(-1), 1)
+        # r_like_base_0 = r[:, :, 0].unsqueeze(-1).expand_as(base_out_0)
+        # r_like_base_1 = r[:, :, 1].unsqueeze(-1).expand_as(base_out_1)
+        #
+        # if offset>0:
+        #     r_like_base_0[:, :offset, :] = 1
+        #     r_like_base_1[:, :offset, :] = 0
+        #
+        # res_base_0 = torch.sum(r_like_base_0 * base_out_0, dim=1)
+        # res_base_1 = torch.sum(r_like_base_1 * base_out_1, dim=1)
+        # #print("res_bases:",res_base_0.shape, res_base_1.shape)
+        # pred = (res_base_0 + res_base_1 ) / torch.clamp(total_num.unsqueeze(-1), 1)
         return pred
 
     def _get_diff(self, input, keep_rgb=False):

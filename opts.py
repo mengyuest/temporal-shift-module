@@ -83,8 +83,8 @@ parser.add_argument('--rescale_pattern', default="L", type=str, help='The offlin
 
 # TODO(yue) adaptive resolution and skipping (hardcoded version)
 parser.add_argument('--ada_reso_skip', action='store_true', help='adaptively select scale and choose to skip')
-parser.add_argument('--reso_list', default=[224, 112], type=int, nargs='+', help="list of resolutions")
-parser.add_argument('--skip_list', default=[1], type=int, nargs='+', help="list of frames to skip")
+parser.add_argument('--reso_list', default=[224], type=int, nargs='+', help="list of resolutions")
+parser.add_argument('--skip_list', default=[], type=int, nargs='+', help="list of frames to skip")
 parser.add_argument('--backbone_list', default=['resnet50'], type=str, nargs='+', help="backbones for diff resos")
 parser.add_argument('--shared_backbone', action='store_true', help="share same backbone weight")
 parser.add_argument('--accuracy_weight', default=1., type=float)
@@ -96,3 +96,13 @@ parser.add_argument('--t_offset', default=0, type=int)
 # TODO(yue) multi-label cases (for activity-net-v1.3)
 # Always provides (single + multi) mAPs. Difference is only in training
 parser.add_argument('--loss_type', type=str, default="nll", choices=['nll', 'bce'])
+
+# TODO(yue) for policy network:
+parser.add_argument('--policy_backbone', default='mobilenet_v2', type=str, help="backbones for policy network")
+parser.add_argument('--policy_input_offset', default=0, type=int, help="select which scale for policy network")
+parser.add_argument('--hidden_dim', default=512, type=int, help="dimension for hidden state and cell state")
+parser.add_argument('--offline_lstm_last', action='store_true', help="just using LSTM(last one), no policy")
+parser.add_argument('--offline_lstm_all', action='store_true', help="just using LSTM(all average), no policy")
+parser.add_argument('--folder_suffix', default="", type=str, help="suffix of frame dataset folder") #TODO (yue) bind with file list)
+parser.add_argument('--random_policy', action='store_true', help="just using random policy there")
+parser.add_argument('--eff_loss_after', default=-1, type=int, help="use eff loss after X epochs")

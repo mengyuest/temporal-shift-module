@@ -47,12 +47,12 @@ def return_fcvid(modality):
     return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
 
 def return_hmdb51(modality):
-    filename_categories = 51
+    filename_categories = ospj(common.HMDB51_META_PATH,'classInd.txt')
     if modality == 'RGB':
-        root_data = ROOT_DATASET + 'HMDB51/images'
-        filename_imglist_train = 'HMDB51/splits/hmdb51_rgb_train_split_1.txt'
-        filename_imglist_val = 'HMDB51/splits/hmdb51_rgb_val_split_1.txt'
-        prefix = 'img_{:05d}.jpg'
+        root_data = common.HMDB51_FRAMES
+        filename_imglist_train = ospj(common.HMDB51_META_PATH,'hmdb51_rgb_train_split_1.txt')
+        filename_imglist_val = ospj(common.HMDB51_META_PATH,'hmdb51_rgb_val_split_1.txt')
+        prefix = 'image_{:05d}.jpg'
     elif modality == 'Flow':
         root_data = ROOT_DATASET + 'HMDB51/images'
         filename_imglist_train = 'HMDB51/splits/hmdb51_flow_train_split_1.txt'

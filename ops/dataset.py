@@ -221,10 +221,19 @@ class TSNDataSet(data.Dataset):
 
         process_data = self.transform(images)
         if self.args.ada_reso_skip:
-            return tuple(
-                [process_data] +
-                [self.rescale(process_data, (x,x)) for x in self.args.reso_list[1:]] +
-                [record.label])
+            def check_scale_is_pyramid_indeed(reso_list):
+                for ii in range(len(reso_list)-1):
+                    if reso_list[ii] != reso_list[ii+1]*2:
+                        return False
+                return True
+
+            if self.args.pyramid_boost and check_scale_is_pyramid_indeed(self.args.reso_list):
+                return process_data, record.label
+            else:
+                return tuple(
+                    [process_data] +
+                    [self.rescale(process_data, (x,x)) for x in self.args.reso_list[1:]] +
+                    [record.label])
         else:
             return process_data, record.label
 

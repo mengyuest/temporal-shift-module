@@ -27,8 +27,8 @@ parser.add_argument('--pretrain', type=str, default='imagenet')
 parser.add_argument('--tune_from', type=str, default=None, help='fine-tune from checkpoint')
 
 # ========================= Learning Configs ==========================
-parser.add_argument('--epochs', default=120, type=int, metavar='N',
-                    help='number of total epochs to run')
+parser.add_argument('--epochs', default=50, type=int, metavar='N',
+                    help='number of total epochs to run') #TODO(changed from 120 to 50)
 parser.add_argument('-b', '--batch-size', default=128, type=int,
                     metavar='N', help='mini-batch size (default: 256)')
 parser.add_argument('--lr', '--learning-rate', default=0.001, type=float,
@@ -39,17 +39,17 @@ parser.add_argument('--lr_steps', default=[50, 100], type=float, nargs="+",
                     metavar='LRSteps', help='epochs to decay learning rate by 10')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
-parser.add_argument('--weight-decay', '--wd', default=5e-4, type=float,
-                    metavar='W', help='weight decay (default: 5e-4)')
+parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
+                    metavar='W', help='weight decay (default: 1e-4)') #TODO(changed from 5e-4 to 1e-4)
 parser.add_argument('--clip-gradient', '--gd', default=None, type=float,
-                    metavar='W', help='gradient norm clipping (default: disabled)')
+                    metavar='W', help='gradient norm clipping (default: disabled)') #TODO(changed from None to 20)
 parser.add_argument('--no_partialbn', '--npb', default=False, action="store_true")
 
 # ========================= Monitor Configs ==========================
 parser.add_argument('--print-freq', '-p', default=20, type=int,
                     metavar='N', help='print frequency (default: 10)')
-parser.add_argument('--eval-freq', '-ef', default=5, type=int,
-                    metavar='N', help='evaluation frequency (default: 5)')
+parser.add_argument('--eval-freq', '-ef', default=1, type=int,
+                    metavar='N', help='evaluation frequency (default: 1)') #TODO(changed from 5 to 1)
 
 
 # ========================= Runtime Configs ==========================
@@ -105,4 +105,28 @@ parser.add_argument('--offline_lstm_last', action='store_true', help="just using
 parser.add_argument('--offline_lstm_all', action='store_true', help="just using LSTM(all average), no policy")
 parser.add_argument('--folder_suffix', default="", type=str, help="suffix of frame dataset folder") #TODO (yue) bind with file list)
 parser.add_argument('--random_policy', action='store_true', help="just using random policy there")
+parser.add_argument('--all_policy', action='store_true', help="just using all feat there")
 parser.add_argument('--eff_loss_after', default=-1, type=int, help="use eff loss after X epochs")
+
+parser.add_argument('--save_freq', default=10, type=int,help="freq to save network model weight")# TODO(yue)
+parser.add_argument('--model_paths', default=[], type=str, nargs="+", help='path to load models for backbones')
+parser.add_argument('--policy_path', default="", type=str, help="path of the policy network")
+parser.add_argument('--pyramid_boost', action='store_true')
+# TODO(yue) maybe we want to use ImageNet pretrain or not, depending on the resolution
+
+# TODO(yue) annealing
+parser.add_argument('--exp_decay', action='store_true', help="type of annealing")
+parser.add_argument('--init_tau', default=5.0, type=float, help="annealing init temperature")
+parser.add_argument('--exp_decay_factor', default=-0.045, type=float, help="exp decay factor per epoch")
+
+# TODO(yue) small tweak
+parser.add_argument('--policy_from_scratch', action='store_true', help="policy network without pretraining")
+parser.add_argument('--frozen_list', default=[], type=str, nargs="+", help='list of frozen part')
+parser.add_argument('--policy_also_backbone', action='store_true', help="use policy as the last backbone")
+parser.add_argument('--uniform_loss_weight', type=float, default=1e-6, help="loss to constraints all uses equal")
+parser.add_argument('--lite_mode',action='store_true') # TODO(yue) for 2 gpus and batchsize=4
+
+
+# TODO: loading order: ImageNet->Joint Model->specific modules (better not using both joint and specific)
+
+# TODO: freezing

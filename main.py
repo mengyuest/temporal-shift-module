@@ -35,6 +35,43 @@ num_class = -1
 import common
 from os.path import join as ospj
 
+
+def load_to_sd(model_dict, model_path, module_name, fc_name, resolution):
+    if ".pth" in model_path:
+        print("done loading\t%s\t(res:%3d) from\t%s" % ("%-25s"%module_name, resolution, model_path))
+        sd = torch.load(common.EXPS_PATH+"/"+model_path)['state_dict']
+        replace_dict = []
+        nowhere_ks = []
+        notfind_ks = []
+
+        for k, v in sd.items():  # TODO(yue) base_model->base_model_list.i
+            new_k = k.replace("base_model", module_name)
+            new_k = new_k.replace("new_fc", fc_name)
+            if new_k in model_dict:
+                replace_dict.append((k, new_k))
+            else:
+                nowhere_ks.append(k)
+        for new_k, v in model_dict.items():
+            if module_name in new_k:
+                k = new_k.replace(module_name, "base_model")
+                if k not in sd:
+                    notfind_ks.append(k)
+            if fc_name in new_k:
+                k = new_k.replace(fc_name, "new_fc")
+                if k not in sd:
+                    notfind_ks.append(k)
+        if len(nowhere_ks) != 0:
+            print("Vars not in ada network, but are in pretrained weights\n" + ("\n%sNEW  "%module_name).join(nowhere_ks))
+        if len(notfind_ks) != 0:
+            print("Vars not in pretrained weights, but are needed in ada network\n" + ("\n%sLACK "%module_name).join(notfind_ks))
+        for k, k_new in replace_dict:
+            sd[k_new] = sd.pop(k)
+        return {k: v for k, v in sd.items() if k in model_dict}
+    else:
+        print("skip loading\t%s\t(res:%3d) from\t%s"%("%-25s"%module_name, resolution, model_path))
+        return {}
+
+
 def main():
     global args, best_prec1, num_class
     args = parser.parse_args()
@@ -129,6 +166,19 @@ def main():
 
     if args.temporal_pool and not args.resume:
         make_temporal_pool(model.module.base_model, args.num_segments)
+
+    # TODO(yue) ada_model loading process
+    if args.ada_reso_skip and len(args.model_paths)!=0:
+        model_dict=model.state_dict()
+        # TODO(yue) policy net
+        sd = load_to_sd(model_dict, args.policy_path, "lite_backbone", "lite_fc", args.reso_list[args.policy_input_offset])
+        model_dict.update(sd)
+        # TODO(yue) backbones
+        for i, tmp_path in enumerate(args.model_paths):
+            sd = load_to_sd(model_dict, tmp_path, "base_model_list.%d"%i, "new_fc_list.%d"%i, args.reso_list[i])
+            model_dict.update(sd)
+        model.load_state_dict(model_dict)
+        print()
 
     cudnn.benchmark = True
 
@@ -236,11 +286,21 @@ def cal_eff(r):
 
     r_loss=torch.tensor([4., 2., 1., 0.5, 0.25, 0.125, 0.0625,0.03125]).cuda()
 
-    return torch.sum(torch.mean(r, axis=[0,1]) * r_loss[:r.shape[2]])
+    loss = torch.sum(torch.mean(r, dim=[0,1]) * r_loss[:r.shape[2]])
+
+    if args.uniform_loss_weight > 1e-5:
+        usage_bias = torch.mean(r,dim=[0,1])-torch.mean(r,dim=[0,1,2])
+        #print(usage_bias)
+        #print(torch.norm(usage_bias, p=2))
+        loss = loss + torch.norm(usage_bias, p=2) * args.uniform_loss_weight
+
+    return loss
+
 
 
 def reverse_onehot(a):
-    return [np.where(r == 1)[0][0] for r in a]
+    #print(a)
+    return np.array([np.where(r > 0.5)[0][0] for r in a])
 
 
 def get_criterion_loss(criterion, output, target):
@@ -260,6 +320,30 @@ def compute_acc_eff_loss_with_weights(acc_loss, eff_loss, epoch):
         eff_weight = 0.0
     return acc_loss * acc_weight, eff_loss * eff_weight
 
+def elastic_list_print(l, limit=8):
+    l_output = "[%s," % (",".join([str(x) for x in l[:limit//2]]))
+    if l.shape[0] > limit:
+        l_output += "..."
+    l_output += "%s]" % (",".join([str(x) for x in l[-limit//2:]]))
+    return l_output
+
+def compute_exp_decay_tau(epoch):
+    return args.init_tau * np.exp(args.exp_decay_factor * epoch)
+
+def print_policy_usage(r_list, reso_dim):
+    rs = np.concatenate(r_list, axis=0)
+
+    tmp_cnt = [np.sum(rs[:, :, iii] == 1) for iii in range(rs.shape[2])]
+    tmp_total_cnt = sum(tmp_cnt)
+
+    for action_i in range(rs.shape[2]):
+        if action_i < reso_dim:
+            action_str = "r%d" % (action_i)
+            if action_i == reso_dim - 1 and args.policy_also_backbone:
+                action_str = "m0"
+        else:
+            action_str = "s%d" % (args.skip_list[action_i - reso_dim])
+        print("%s: %6d (%.2f%%)" % (action_str, tmp_cnt[action_i], 100 * tmp_cnt[action_i] / tmp_total_cnt))
 
 def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
     batch_time = AverageMeter()
@@ -268,9 +352,17 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
     top1 = AverageMeter()
     top5 = AverageMeter()
 
-    if args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False:
-        alosses = AverageMeter()
-        elosses = AverageMeter()
+    if args.ada_reso_skip:
+        # TODO(yue) annealing (exp decay)
+        if args.exp_decay:
+            tau = compute_exp_decay_tau(epoch)
+        else:
+            tau = args.init_tau
+
+        if  args.offline_lstm_last == False and args.offline_lstm_all == False:
+            alosses = AverageMeter()
+            elosses = AverageMeter()
+            r_list = []
 
     if args.no_partialbn:
         model.module.partialBN(False)
@@ -295,7 +387,7 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
             # input_var_1 = torch.autograd.Variable(input_tuple[1])
             #TODO(yue) + LOSS + validation part!
 
-            output, r = model(*input_var_list)
+            output, r = model(input=input_var_list, tau=tau)
             # output, r = model(input_var_0, input_var_1)
 
             acc_loss = get_criterion_loss(criterion, output, target_var)
@@ -331,8 +423,11 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
         batch_time.update(time.time() - end)
         end = time.time()
 
+        if args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False:
+            r_list.append(r.detach().cpu().numpy())
+
         if i % args.print_freq == 0:
-            print_output = ('Epoch: [{0}][{1}/{2}], lr: {lr:.5f}\t'
+            print_output = ('Epoch:[{0}][{1}/{2}] lr: {lr:.5f}\t'
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
@@ -342,14 +437,16 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
                 data_time=data_time, loss=losses, top1=top1, top5=top5, lr=optimizer.param_groups[-1]['lr'] * 0.1))  # TODO
 
             if args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False:
-                print_output += '\ta {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
-                    aloss = alosses, eloss =elosses, r=reverse_onehot(r[-1,:,:].detach().cpu().numpy())
+                print_output += '\ttau {tau:.4f} a {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
+                    tau=tau, aloss = alosses, eloss =elosses, r=elastic_list_print(reverse_onehot(r[-1,:,:].detach().cpu().numpy()))
                 )
 
             if args.show_pred:
-                print_output +="\tp {p}".format(p=output[-1,:].detach().cpu().numpy())
-
+                print_output += elastic_list_print(output[-1,:].detach().cpu().numpy())
             print(print_output)
+
+    if args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False:
+        print_policy_usage(r_list, model.module.reso_dim)
 
     tf_writer.add_scalar('loss/train', losses.avg, epoch)
     tf_writer.add_scalar('acc/train_top1', top1.avg, epoch)
@@ -368,10 +465,15 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
     all_results = []
     all_targets = []
 
-    if args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False:
-        alosses = AverageMeter()
-        elosses = AverageMeter()
-        r_list=[]
+    if args.ada_reso_skip:
+        if args.exp_decay:
+            tau = compute_exp_decay_tau(epoch)
+        else:
+            tau = args.init_tau
+        if args.offline_lstm_last == False and args.offline_lstm_all == False:
+            alosses = AverageMeter()
+            elosses = AverageMeter()
+            r_list = []
 
     # switch to evaluate mode
     model.eval()
@@ -385,7 +487,7 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
             # compute output
             if args.ada_reso_skip:
                 #output, r = model(input_tuple[0], input_tuple[1])
-                output, r = model(*input_tuple[:-1])
+                output, r = model(input=input_tuple[:-1], tau=tau)
                 acc_loss = get_criterion_loss(criterion, output, target)
                 if args.offline_lstm_last == False and args.offline_lstm_all == False:
                     eff_loss = cal_eff(r)
@@ -426,8 +528,8 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
                     i, len(val_loader), batch_time=batch_time, loss=losses,
                     top1=top1, top5=top5))
                 if args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False:
-                    output += '\ta {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
-                        aloss=alosses, eloss=elosses, r=reverse_onehot(r[-1, :, :].cpu().numpy())
+                    output += '\ttau {tau:.4f} a {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
+                        tau=tau, aloss=alosses, eloss=elosses, r=elastic_list_print(reverse_onehot(r[-1, :, :].cpu().numpy()))
                     )
 
                 print(output)
@@ -441,14 +543,7 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
     print(output)
 
     if args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False:
-        rs=np.concatenate(r_list, axis=0)
-
-        tmp_cnt = [np.sum(rs[:, :, iii]==1) for iii in range(rs.shape[2])]
-        tmp_total_cnt = sum(tmp_cnt)
-
-        for action_i in range(rs.shape[2]):
-            action_str = "scale_%d"%(action_i) if action_i<len(args.reso_list) else "skip__%d"%(action_i-len(args.reso_list)+1)
-            print("action %s: %5d (%.4f)"%(action_str,tmp_cnt[action_i],tmp_cnt[action_i]/tmp_total_cnt))
+        print_policy_usage(r_list, model.module.reso_dim)
 
     if tf_writer is not None:
         tf_writer.add_scalar('loss/test', losses.avg, epoch)
@@ -457,12 +552,12 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
 
     return mAP, mmAP, top1.avg
 
-
 def save_checkpoint(state, is_best, exp_full_path):
-    filename = '%s/models/ckpt.pth.tar' % (exp_full_path)
-    torch.save(state, filename)
+    filename = '%s/models/ckpt%04d.pth.tar' % (exp_full_path, state["epoch"])
+    if (state["epoch"]-1) % args.save_freq == 0 or state["epoch"] == 0:
+        torch.save(state, filename)
     if is_best:
-        shutil.copyfile(filename, filename.replace('pth.tar', 'best.pth.tar'))
+        torch.save(state, '%s/models/ckpt.best.pth.tar' % (exp_full_path))
 
 
 def adjust_learning_rate(optimizer, epoch, lr_type, lr_steps):

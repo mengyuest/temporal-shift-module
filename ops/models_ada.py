@@ -60,7 +60,7 @@ class TSN_Ada(nn.Module):
                             "resnet101": 2048,
                             "mobilenet_v2": 1280}
 
-            self.lite_backbone = getattr(torchvision.models, self.args.policy_backbone)(True)
+            self.lite_backbone = getattr(torchvision.models, self.args.policy_backbone)(not self.args.policy_from_scratch)
 
             self.lite_backbone.avgpool = nn.AdaptiveAvgPool2d(1)
             if "resnet" in self.args.policy_backbone:
@@ -79,6 +79,8 @@ class TSN_Ada(nn.Module):
                 self.new_fc_list = nn.ModuleList()#[]
 
             self.reso_dim = len(self.args.backbone_list)
+            if self.args.policy_also_backbone:
+                self.reso_dim += 1
             self.skip_dim = len(self.args.skip_list)
             self.action_dim = self.reso_dim + self.skip_dim
 
@@ -366,7 +368,6 @@ class TSN_Ada(nn.Module):
         ]
 
     def forward(self, *argv, **kwargs):
-        # if not no_reshape && self.dropout > 0 && no-shift:
         def backbone(input_data, the_base_model, new_fc):
             base_out = the_base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]))
             if new_fc is not None:
@@ -374,67 +375,91 @@ class TSN_Ada(nn.Module):
             base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
             return base_out
 
+        batch_size = kwargs["input"][0].shape[0] # TODO(yue) input[0] B*(TC)*H*W
 
-        batch_size = argv[0].shape[0]
-
-        # TODO(yue) - LITE-BACKBONE
-        #print("input_0",input_0.shape, "input_1", input_1.shape)
-        #feat_lite = self.lite_backbone(input_0.view((-1, 3 * self.new_length) + input_0.size()[-2:])) #TODO N*T, F
-        #feat_lite = feat_lite.view((-1, self.num_segments) + feat_lite.size()[1:])
-
-        if self.args.ada_reso_skip:
-            feat_lite = backbone(argv[self.args.policy_input_offset], self.lite_backbone, None)
-            hx = init_hidden(batch_size, self.args.hidden_dim)
-            cx = init_hidden(batch_size, self.args.hidden_dim)
-            logits_list = []
-            lite_j_list = []
-
-            for t in range(self.num_segments):
-                hx, cx = self.rnn(feat_lite[:, t], (hx, cx))
-                p_t = self.linear(hx)
-                p_t = torch.log(F.softmax(p_t, dim=1))
-                logits_list.append(p_t)
-
-                j_t = self.lite_fc(hx)
-                lite_j_list.append(j_t)
-
-            if self.args.offline_lstm_last:  #TODO(yue) no policy - just LSTM(last)
-                output = lite_j_list[-1]
-                r = None
-            elif self.args.offline_lstm_all: #TODO(yue) no policy - just LSTM(average)
-                output = torch.stack(lite_j_list).mean(dim=0)
-                r = None
-            elif self.multi_models: #TODO(yue) policy
-
-                base_out_list = [backbone(argv[i], self.base_model_list[i], self.new_fc_list[i]) for i in
-                                 range(len(argv))]
-
-                if self.args.random_policy: #TODO(yue) random policy
-                    r = torch.zeros(batch_size,self.num_segments,self.action_dim).cuda()
-                    for i_bs in range(batch_size):
-                        for i_t in range(self.num_segments):
-                            r[i_bs, i_t, torch.randint(self.action_dim,[1])] = 1.0
-                else: #TODO(yue) online policy
-                    logits = torch.stack(logits_list, dim=1)  # N*T*K
-                    r = F.gumbel_softmax(logits=logits, tau=1.0, hard=True, eps=1e-10, dim=-1)
-                output = self.combine_logits(r, base_out_list)
-            else:
-                raise ValueError("Don't have this option for model.forward()")
-            # TODO(yue) - ALSO DEFINE LOSS FUNCTIONS
-            # base_out = backbone(input_0)
-            # output = self.consensus(base_out)
-
+        if self.args.pyramid_boost:
+            input_list = []
+            _tmp_input = kwargs["input"][0]
+            for i in range(len(self.base_model_list)):
+                input_list.append(_tmp_input)
+                _tmp_input = _tmp_input[:, :, :2, ::2]
         else:
-            base_out = backbone(argv[0], self.base_model, self.new_fc) #TODO N, T, C
+            input_list = kwargs["input"]
 
-        # if self.two_models==False:
-        #     base_out_1 = backbone(input_1, self.base_model)  # TODO N, T, C
-        # else:
-        #     base_out_1 = backbone(input_1, self.base_model_1) #TODO N, T, C
+        feat_lite = backbone(input_list[self.args.policy_input_offset], self.lite_backbone, None)
+        hx = init_hidden(batch_size, self.args.hidden_dim)
+        cx = init_hidden(batch_size, self.args.hidden_dim)
+        logits_list = []
+        lite_j_list = []
 
-        # TODO(yue) - RNN + GUMBEL + COMBINE
+        remain_skips=0
 
-        return output.squeeze(1), r
+        if self.multi_models:
+            base_out_list = [backbone(input_list[i], self.base_model_list[i], self.new_fc_list[i]) for i in
+                             range(len(self.base_model_list))]
+
+        online_policy = False
+        if not any([self.args.offline_lstm_all, self.args.offline_lstm_last, self.args.random_policy,
+                    self.args.all_policy]):
+            online_policy = True
+            r_list=[]
+
+        remain_skip_vector = torch.zeros(batch_size,1)
+        old_hx = None
+        old_r_t = None
+
+        for t in range(self.num_segments):
+            hx, cx = self.rnn(feat_lite[:, t], (hx, cx))
+            p_t = torch.log(F.softmax(self.linear(hx), dim=1))
+            j_t = self.lite_fc(hx)
+            logits_list.append(p_t) #TODO as logit
+            lite_j_list.append(j_t) #TODO as pred
+
+            #TODO (yue) need a simple case to illustrate this
+            if online_policy:
+                #TODO gumbel_softmax
+                r_t = F.gumbel_softmax(logits=p_t, tau=kwargs["tau"], hard=True, eps=1e-10, dim=-1)
+                #TODO update states and r_t
+                if old_hx is not None:
+                    take_bool = remain_skip_vector > 0.5
+                    take_old = torch.tensor(take_bool, dtype=torch.float).cuda()
+                    take_curr = torch.tensor(1 - take_bool, dtype=torch.float).cuda()
+                    hx = old_hx * take_old + hx * take_curr
+                    r_t = old_r_t * take_old + r_t * take_curr
+                # TODO update skipping_vector
+                for batch_i in range(batch_size):
+                    for skip_i in range(self.action_dim-self.reso_dim):
+                        #TODO(yue) first condition to avoid valuing skip vector forever
+                        if remain_skip_vector[batch_i][0]<0.5 and r_t[batch_i][self.reso_dim + skip_i] > 0.5:
+                            remain_skip_vector[batch_i][0] = self.args.skip_list[skip_i]
+                old_hx = hx
+                old_r_t = r_t
+                r_list.append(r_t)  # TODO as decision
+                remain_skip_vector = (remain_skip_vector - 1).clamp(0)
+
+        if self.args.policy_also_backbone:
+            base_out_list.append(torch.stack(lite_j_list, dim=1))
+
+        if self.args.offline_lstm_last:  #TODO(yue) no policy - use policy net as backbone - just LSTM(last)
+            return lite_j_list[-1].squeeze(1), None
+        elif self.args.offline_lstm_all: #TODO(yue) no policy - use policy net as backbone - just LSTM(average)
+            return torch.stack(lite_j_list).mean(dim=0).squeeze(1), None
+
+        if self.args.random_policy: #TODO(yue) random policy
+            r_all = torch.zeros(batch_size,self.num_segments,self.action_dim).cuda()
+            for i_bs in range(batch_size):
+                for i_t in range(self.num_segments):
+                    r_all[i_bs, i_t, torch.randint(self.action_dim,[1])] = 1.0
+        elif self.args.all_policy: #TODO(yue) all policy: take all
+            r_all = torch.ones(batch_size, self.num_segments, self.action_dim).cuda()
+        else: #TODO(yue) online policy
+            # logits = torch.stack(logits_list, dim=1)  # N*T*K
+            # r_all = F.gumbel_softmax(logits=logits, tau=kwargs["tau"], hard=True, eps=1e-10, dim=-1)
+            r_all = torch.stack(r_list, dim=1)
+        output = self.combine_logits(r_all, base_out_list)
+
+
+        return output.squeeze(1), r_all
 
     def combine_logits(self, r, base_out_list):
         # TODO r           N, T, K  (0-origin, 1-low, 2-skip)
@@ -447,7 +472,7 @@ class TSN_Ada(nn.Module):
         #print("total_num", total_num)
         res_base_list=[]
         for i,base_out in enumerate(base_out_list):
-            r_like_base = r[:, :, 0].unsqueeze(-1).expand_as(base_out)
+            r_like_base = r[:, :, i].unsqueeze(-1).expand_as(base_out) #TODO r[:,:,0] used to be, but wrong 01-30-2020
             if offset>0:
                 if i==0:
                     r_like_base[:, :offset, :] = 1

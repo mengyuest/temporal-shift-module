@@ -51,7 +51,8 @@ def get_multi_hot(test_y, classes, assumes_starts_zero=True):
             if label_val >= 0:
                 test_y[test_y == label_val] = label_cnt
                 label_cnt += 1
-        assert label_cnt == classes
+        #TODO(DEBUG)
+        # assert label_cnt == classes
 
     gt = torch.zeros(bs, classes + 1)  # TODO(yue) +1 for -1 in multi-label case
     for i in range(test_y.shape[1]):

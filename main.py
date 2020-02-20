@@ -9,7 +9,6 @@ warnings.filterwarnings("ignore")
 import os
 import sys
 import time
-import shutil
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim
@@ -30,16 +29,27 @@ from ops.my_logger import Logger
 
 best_prec1 = 0
 num_class = -1
+use_ada_framework = False
+NUM_LOSSES=10
 
 # TODO(yue)
 import common
 from os.path import join as ospj
 
-
-def load_to_sd(model_dict, model_path, module_name, fc_name, resolution):
+def load_to_sd(model_dict, model_path, module_name, fc_name, resolution, apple_to_apple=False):
     if ".pth" in model_path:
         print("done loading\t%s\t(res:%3d) from\t%s" % ("%-25s"%module_name, resolution, model_path))
-        sd = torch.load(common.EXPS_PATH+"/"+model_path)['state_dict']
+        if os.path.exists(common.PRETRAIN_PATH+ "/" +model_path):
+            sd = torch.load(common.PRETRAIN_PATH+ "/" +model_path)['state_dict']
+        elif os.path.exists(common.EXPS_PATH+ "/" +model_path):
+            print("Didn't find in %s, check %s"%(common.PRETRAIN_PATH, common.EXPS_PATH))
+            sd = torch.load(common.EXPS_PATH + "/" + model_path)['state_dict']
+            print("Success~")
+        else:
+            exit("Cannot find model, exit")
+        if apple_to_apple:
+            return sd
+
         replace_dict = []
         nowhere_ks = []
         notfind_ks = []
@@ -71,10 +81,13 @@ def load_to_sd(model_dict, model_path, module_name, fc_name, resolution):
         print("skip loading\t%s\t(res:%3d) from\t%s"%("%-25s"%module_name, resolution, model_path))
         return {}
 
-
 def main():
-    global args, best_prec1, num_class
+    t_start = time.time()
+    global args, best_prec1, num_class, use_ada_framework
     args = parser.parse_args()
+
+    set_random_seed(args.random_seed)
+    use_ada_framework = args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False
 
     logger=Logger()
     sys.stdout = logger
@@ -114,6 +127,12 @@ def main():
     train_augmentation = model.get_augmentation(flip=False if 'something' in args.dataset or 'jester' in args.dataset else True)
 
     model = torch.nn.DataParallel(model, device_ids=args.gpus).cuda()
+
+    # TODO(yue) freeze some params in the policy+lstm layers
+    if args.freeze_policy:
+        for name, param in model.module.named_parameters():
+            if "lite_fc" in name or "lite_backbone" in name or "rnn" in name or "linear" in name:
+                param.requires_grad = False
 
     optimizer = torch.optim.SGD(policies,
                                 args.lr,
@@ -168,15 +187,33 @@ def main():
         make_temporal_pool(model.module.base_model, args.num_segments)
 
     # TODO(yue) ada_model loading process
-    if args.ada_reso_skip and len(args.model_paths)!=0:
-        model_dict=model.state_dict()
-        # TODO(yue) policy net
-        sd = load_to_sd(model_dict, args.policy_path, "lite_backbone", "lite_fc", args.reso_list[args.policy_input_offset])
-        model_dict.update(sd)
-        # TODO(yue) backbones
-        for i, tmp_path in enumerate(args.model_paths):
-            sd = load_to_sd(model_dict, tmp_path, "base_model_list.%d"%i, "new_fc_list.%d"%i, args.reso_list[i])
+    if args.ada_reso_skip:
+        if args.base_pretrained_from != "":
+            print("Adaptively load from pretrained whole")
+            model_dict = model.state_dict()
+            sd = load_to_sd(model_dict, args.base_pretrained_from, "foo", "bar", -1, apple_to_apple=True)
             model_dict.update(sd)
+            model.load_state_dict(model_dict)
+
+        elif len(args.model_paths)!=0:
+            print("Adaptively load from model_path_list")
+            model_dict=model.state_dict()
+            # TODO(yue) policy net
+            sd = load_to_sd(model_dict, args.policy_path, "lite_backbone", "lite_fc", args.reso_list[args.policy_input_offset])
+            model_dict.update(sd)
+            # TODO(yue) backbones
+            for i, tmp_path in enumerate(args.model_paths):
+                sd = load_to_sd(model_dict, tmp_path, "base_model_list.%d"%i, "new_fc_list.%d"%i, args.reso_list[i])
+                model_dict.update(sd)
+
+            model.load_state_dict(model_dict)
+        print()
+
+    if args.ada_reso_skip == False and args.base_pretrained_from != "":
+        print("Baseline: load from pretrained model")
+        model_dict = model.state_dict()
+        sd = load_to_sd(model_dict, args.base_pretrained_from, "base_model", "new_fc", 224)
+        model_dict.update(sd)
         model.load_state_dict(model_dict)
         print()
 
@@ -198,6 +235,7 @@ def main():
                    new_length=data_length,
                    modality=args.modality,
                    image_tmpl=prefix,
+                   partial_fcvid_eval=False,
                    transform=torchvision.transforms.Compose([
                        train_augmentation,
                        Stack(roll=(args.arch in ['BNInception', 'InceptionV3'])),
@@ -214,6 +252,7 @@ def main():
                    modality=args.modality,
                    image_tmpl=prefix,
                    random_shift=False,
+                   partial_fcvid_eval=args.partial_fcvid_eval,
                    transform=torchvision.transforms.Compose([
                        GroupScale(int(scale_size)),
                        GroupCenterCrop(crop_size),
@@ -250,57 +289,153 @@ def main():
     map_record = Recorder()
     mmap_record = Recorder()
     prec_record = Recorder()
+    best_train_usage_str = None
+    best_val_usage_str = None
 
     for epoch in range(args.start_epoch, args.epochs):
-        adjust_learning_rate(optimizer, epoch, args.lr_type, args.lr_steps)
-
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, tf_writer)
+        if not args.skip_training:
+            set_random_seed(args.random_seed+epoch)
+            adjust_learning_rate(optimizer, epoch, args.lr_type, args.lr_steps)
+            train_usage_str = train(train_loader, model, criterion, optimizer, epoch, tf_writer)
+        else:
+            train_usage_str = "No training usage stats (Eval Mode)"
 
         # evaluate on validation set
         if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
-            mAP, mmAP, prec1 = validate(val_loader, model, criterion, epoch, tf_writer)
+            set_random_seed(args.random_seed)
+            mAP, mmAP, prec1, val_usage_str = validate(val_loader, model, criterion, epoch, tf_writer)
 
             # remember best prec@1 and save checkpoint
             map_record.update(mAP)
             mmap_record.update(mmAP)
             prec_record.update(prec1)
 
-            tf_writer.add_scalar('acc/test_top1_best', prec_record.best_val, epoch)
+            if mmap_record.is_current_best():
+                best_train_usage_str = train_usage_str
+                best_val_usage_str = val_usage_str
 
             print('Best mAP: %.3f (epoch=%d)\t\tBest mmAP: %.3f(epoch=%d)\t\tBest Prec@1: %.3f (epoch=%d)\n' % (
                 map_record.best_val, map_record.best_at,
                 mmap_record.best_val, mmap_record.best_at,
                 prec_record.best_val, prec_record.best_at))
 
+            if args.skip_training:
+                break
+
+            tf_writer.add_scalar('acc/test_top1_best', prec_record.best_val, epoch)
             save_checkpoint({
                 'epoch': epoch + 1,
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'best_prec1': prec_record.best_val,
-            }, prec_record.is_current_best(), exp_full_path)
+            }, map_record.is_current_best(), exp_full_path)
+
+    if use_ada_framework:
+        print("Best train usage:")
+        print(best_train_usage_str)
+        print()
+        print("Best val usage:")
+        print(best_val_usage_str)
+
+    print("Finished in %.4f seconds"%(time.time() - t_start))
+
+def set_random_seed(the_seed):
+    if args.random_seed >= 0:
+        np.random.seed(the_seed)
+        torch.manual_seed(the_seed)
+
+
+def get_gflops_t_tt_vector():
+    x2_coeff = {"resnet18": 36144, "resnet34": 73008, "resnet50": 76848, "resnet101": 150832,
+                "efficientnet-b0":7772.6403, "efficientnet-b1":13950.8929, "efficientnet-b2":19929.8469,
+                "efficientnet-b3":35873.7245, "efficientnet-b4":83705.3571, "efficientnet-b5":197305.4847,
+                "shufflenet3d_0.5": 42, "shufflenet3d_1.0": 125, "shufflenet3d_1.5": 235, "shufflenet3d_2.0": 393,
+                "res3d18": 1143.89, "res3d34": 2022.11, "res3d50": 1500.74, "res3d101": 2266.04,
+                "mobilenet3dv2": 549.19
+                }
+    bias = {"resnet18":512000, "resnet34": 512000, "resnet50": 512000, "resnet101": 512000,
+                "efficientnet-b0":0, "efficientnet-b1":0, "efficientnet-b2":0,
+                "efficientnet-b3":0, "efficientnet-b4":0, "efficientnet-b5":0,
+                "shufflenet3d_0.5": 0, "shufflenet3d_1.0": 0, "shufflenet3d_1.5": 0, "shufflenet3d_2.0": 0,
+                "res3d18":0, "res3d34":0, "res3d50":0, "res3d101":0,
+                "mobilenet3dv2":0}
+    gflops_vec = []
+    t_vec = []
+    tt_vec = []
+
+    for i, backbone in enumerate(args.backbone_list):
+        if all([arch_name not in backbone for arch_name in ["resnet","efficientnet","shufflenet3d","mobilenet", "res3d"]]):
+            exit("We can only handle resnet/mobilenet/efficientnet/shufflenet3d as backbone, when computing FLOPS")
+        if args.cnn3d:
+            the_flops = x2_coeff[backbone] * args.reso_list[i] * args.reso_list[i] * args.seg_len / 112. / 112. / 16. / 1000.
+        else:
+            the_flops = (x2_coeff[backbone] * args.reso_list[i] * args.reso_list[i] + bias[backbone]) / 1000000000.0
+        gflops_vec.append(the_flops)
+        t_vec.append(1.)
+        tt_vec.append(1.)
+
+    if args.policy_also_backbone:
+        gflops_vec.append(0)
+        t_vec.append(1.)
+        tt_vec.append(1.)
+
+    for i,_ in enumerate(args.skip_list):
+        t_vec.append(1. if args.skip_list[i]==1 else 1./args.skip_list[i])
+        tt_vec.append(0)
+        gflops_vec.append(0)
+
+    return gflops_vec, t_vec, tt_vec
+
 
 def cal_eff(r):
-    # TODO r N, T, 3 or 2
+    each_losses=[]
+    # TODO r N * T * (#reso+#policy+#skips)
+    gflops_vec, t_vec, tt_vec = get_gflops_t_tt_vector()
+    t_vec = torch.tensor(t_vec).cuda()
+    if args.use_gflops_loss:
+        r_loss = torch.tensor(gflops_vec).cuda()
+    else:
+        r_loss = torch.tensor([4., 2., 1., 0.5, 0.25, 0.125, 0.0625,0.03125]).cuda()[:r.shape[2]]
 
-    r_loss=torch.tensor([4., 2., 1., 0.5, 0.25, 0.125, 0.0625,0.03125]).cuda()
+    loss = torch.sum(torch.mean(r, dim=[0,1]) * r_loss)
+    each_losses.append(loss.detach().cpu().item())
 
-    loss = torch.sum(torch.mean(r, dim=[0,1]) * r_loss[:r.shape[2]])
-
+    #TODO(yue) uniform loss
     if args.uniform_loss_weight > 1e-5:
         usage_bias = torch.mean(r,dim=[0,1])-torch.mean(r,dim=[0,1,2])
-        #print(usage_bias)
-        #print(torch.norm(usage_bias, p=2))
-        loss = loss + torch.norm(usage_bias, p=2) * args.uniform_loss_weight
+        uniform_loss = torch.norm(usage_bias, p=2) * args.uniform_loss_weight
+        loss = loss + uniform_loss
+        each_losses.append(uniform_loss.detach().cpu().item())
 
-    return loss
+    #TODO(yue) high-reso punish loss
+    if args.head_loss_weight > 1e-5:
+        head_usage = torch.mean(r[:, :, 0])
+        usage_threshold=0.2
+        head_loss = (head_usage - usage_threshold) * (head_usage - usage_threshold) * args.head_loss_weight
+        loss = loss + head_loss
+        each_losses.append(head_loss.detach().cpu().item())
 
+    #TODO(yue) frames loss
+    if args.frames_loss_weight > 1e-5:
+        num_frames = torch.mean(torch.mean(r, dim=[0,1]) * t_vec)
+        frames_loss = num_frames * num_frames * args.frames_loss_weight
+        loss = loss + frames_loss
+        each_losses.append(frames_loss.detach().cpu().item())
+
+    return loss, each_losses
 
 
 def reverse_onehot(a):
-    #print(a)
-    return np.array([np.where(r > 0.5)[0][0] for r in a])
+    try:
+        return np.array([np.where(r > 0.5)[0][0] for r in a])
+    except Exception as e:
+        print("error stack:",e)
+        print(a)
+        for i, r in enumerate(a):
+            print(i, r)
+        return None
 
 
 def get_criterion_loss(criterion, output, target):
@@ -311,16 +446,23 @@ def get_criterion_loss(criterion, output, target):
         return criterion(output, target[:, 0])
 
 
-def compute_acc_eff_loss_with_weights(acc_loss, eff_loss, epoch):
+def compute_acc_eff_loss_with_weights(acc_loss, eff_loss, each_losses, epoch):
     if epoch > args.eff_loss_after:
         acc_weight = args.accuracy_weight
         eff_weight = args.efficency_weight
     else:
         acc_weight = 1.0
         eff_weight = 0.0
-    return acc_loss * acc_weight, eff_loss * eff_weight
+    return acc_loss * acc_weight, eff_loss * eff_weight, [x * eff_weight for x in each_losses]
+
+def compute_every_losses(r, acc_loss, epoch):
+    eff_loss, each_losses = cal_eff(r)
+    acc_loss, eff_loss, each_losses = compute_acc_eff_loss_with_weights(acc_loss, eff_loss, each_losses, epoch)
+    return acc_loss, eff_loss, each_losses
+
 
 def elastic_list_print(l, limit=8):
+    limit = min(limit, len(l))
     l_output = "[%s," % (",".join([str(x) for x in l[:limit//2]]))
     if l.shape[0] > limit:
         l_output += "..."
@@ -330,72 +472,109 @@ def elastic_list_print(l, limit=8):
 def compute_exp_decay_tau(epoch):
     return args.init_tau * np.exp(args.exp_decay_factor * epoch)
 
-def print_policy_usage(r_list, reso_dim):
+def get_policy_usage_str(r_list, reso_dim):
+    printed_str=""
     rs = np.concatenate(r_list, axis=0)
+
+    gflops_vec, t_vec, tt_vec = get_gflops_t_tt_vector()
 
     tmp_cnt = [np.sum(rs[:, :, iii] == 1) for iii in range(rs.shape[2])]
     tmp_total_cnt = sum(tmp_cnt)
 
+    gflops = 0
+    avg_frame_ratio = 0
+    num_preds = 0
+
     for action_i in range(rs.shape[2]):
-        if action_i < reso_dim:
-            action_str = "r%d" % (action_i)
-            if action_i == reso_dim - 1 and args.policy_also_backbone:
-                action_str = "m0"
+        if args.policy_also_backbone and action_i == reso_dim - 1:
+            action_str = "m0(%s %dx%d)" % (args.policy_backbone, args.reso_list[args.policy_input_offset], args.reso_list[args.policy_input_offset])
+        elif action_i < reso_dim:
+            action_str = "r%d(%7s %dx%d)" % (action_i, args.backbone_list[action_i], args.reso_list[action_i], args.reso_list[action_i])
         else:
-            action_str = "s%d" % (args.skip_list[action_i - reso_dim])
-        print("%s: %6d (%.2f%%)" % (action_str, tmp_cnt[action_i], 100 * tmp_cnt[action_i] / tmp_total_cnt))
+            action_str = "s%d (skip %d frames)" % (action_i - reso_dim, args.skip_list[action_i - reso_dim])
+
+        usage_ratio = tmp_cnt[action_i] / tmp_total_cnt
+        printed_str += "%-22s: %6d (%.2f%%)\n" % (action_str, tmp_cnt[action_i], 100 * usage_ratio)
+
+        gflops += usage_ratio * gflops_vec[action_i]
+        avg_frame_ratio += usage_ratio * t_vec[action_i]
+        num_preds += usage_ratio * tt_vec[action_i]
+
+    if args.cnn3d:
+        if args.policy_backbone!="shufflenet3d_0.5":
+            exit("if cnn3d, only using shufflenet3d_0.5 as policy net")
+        # TODO (policy backbone-shufflenet3d)
+        gflops += 0.003 * avg_frame_ratio / 112 / 112 * args.reso_list[args.policy_input_offset] * args.reso_list[args.policy_input_offset]
+        gflops += 0.0004 * avg_frame_ratio  # TODO (lstm)
+        time_steps = args.num_segments // args.seg_len
+    else:
+        gflops += 0.08 * avg_frame_ratio #TODO (policy backbone)
+        gflops += 0.01 * avg_frame_ratio #TODO (lstm)
+        time_steps = args.num_segments
+
+    printed_str += "GFLOPS: %.6f  AVG_FRAMES: %.3f  NUM_PREDS: %.3f"%(gflops, avg_frame_ratio*args.num_segments, num_preds * time_steps)
+
+    return printed_str
+
+def extra_each_loss_str(each_terms):
+    loss_str_list = ["gf"]
+    s = ""
+    if args.uniform_loss_weight > 1e-5:
+        loss_str_list.append("u")
+    if args.head_loss_weight > 1e-5:
+        loss_str_list.append("h")
+    if args.frames_loss_weight > 1e-5:
+        loss_str_list.append("f")
+    for i in range(len(loss_str_list)):
+        s += " %s:%.4f" % (loss_str_list[i], each_terms[i].val)
+    return s
+
+def get_current_temperature(num_epoch):
+    if args.exp_decay:
+        tau = compute_exp_decay_tau(num_epoch)
+    else:
+        tau = args.init_tau
+    return tau
+
+def get_average_meters(number):
+    return [AverageMeter() for _ in range(number)]
 
 def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
-    batch_time = AverageMeter()
-    data_time = AverageMeter()
-    losses = AverageMeter()
-    top1 = AverageMeter()
-    top5 = AverageMeter()
+    batch_time, data_time, losses, top1, top5 = get_average_meters(5)
+    tau=0
+    if use_ada_framework:
+        tau = get_current_temperature(epoch)
+        alosses, elosses = get_average_meters(2)
+        each_terms = get_average_meters(NUM_LOSSES)
+        r_list = []
 
-    if args.ada_reso_skip:
-        # TODO(yue) annealing (exp decay)
-        if args.exp_decay:
-            tau = compute_exp_decay_tau(epoch)
-        else:
-            tau = args.init_tau
 
-        if  args.offline_lstm_last == False and args.offline_lstm_all == False:
-            alosses = AverageMeter()
-            elosses = AverageMeter()
-            r_list = []
-
-    if args.no_partialbn:
-        model.module.partialBN(False)
-    else:
-        model.module.partialBN(True)
+    model.module.partialBN(not args.no_partialbn)
 
     # switch to train mode
     model.train()
 
     end = time.time()
+    print("lr:%.4f\ttau:%.4f"%(optimizer.param_groups[-1]['lr'] * 0.1, tau if use_ada_framework else 0))
     for i, input_tuple in enumerate(train_loader):
-        target = input_tuple[-1]
-        # measure data loading time
-        data_time.update(time.time() - end)
 
-        target = target.cuda()
+        data_time.update(time.time() - end)  # TODO(yue) measure data loading time
+
+        target = input_tuple[-1].cuda()
         target_var = torch.autograd.Variable(target)
         input = input_tuple[0]
         if args.ada_reso_skip:
             input_var_list=[torch.autograd.Variable(input_item) for input_item in input_tuple[:-1]]
-            # input_var_0 = torch.autograd.Variable(input_tuple[0])
-            # input_var_1 = torch.autograd.Variable(input_tuple[1])
-            #TODO(yue) + LOSS + validation part!
 
             output, r = model(input=input_var_list, tau=tau)
-            # output, r = model(input_var_0, input_var_1)
 
             acc_loss = get_criterion_loss(criterion, output, target_var)
-            if args.offline_lstm_last == False and args.offline_lstm_all == False:
-                eff_loss = cal_eff(r)
-                acc_loss, eff_loss = compute_acc_eff_loss_with_weights(acc_loss, eff_loss, epoch)
+            if use_ada_framework:
+                acc_loss, eff_loss, each_losses = compute_every_losses(r, acc_loss, epoch)
                 alosses.update(acc_loss.item(), input.size(0))
                 elosses.update(eff_loss.item(), input.size(0))
+                for l_i, each_loss in enumerate(each_losses):
+                    each_terms[l_i].update(each_loss, input.size(0))
                 loss = acc_loss + eff_loss
             else:
                 loss = acc_loss
@@ -414,7 +593,7 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
         loss.backward()
 
         if args.clip_gradient is not None:
-            total_norm = clip_grad_norm_(model.parameters(), args.clip_gradient)
+            clip_grad_norm_(model.parameters(), args.clip_gradient)
 
         optimizer.step()
         optimizer.zero_grad()
@@ -423,57 +602,55 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
         batch_time.update(time.time() - end)
         end = time.time()
 
-        if args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False:
+        if use_ada_framework:
             r_list.append(r.detach().cpu().numpy())
 
         if i % args.print_freq == 0:
-            print_output = ('Epoch:[{0}][{1}/{2}] lr: {lr:.5f}\t'
-                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                      'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                      'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                      'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                      'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+            print_output = ('Epoch:[{0:02d}][{1:03d}/{2:03d}] '
+                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f}) '
+                      '{data_time.val:.3f} ({data_time.avg:.3f})\t'
+                      'Loss {loss.val:.4f} ({loss.avg:.4f}) '
+                      'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) '
+                      'Prec@5 {top5.val:.3f} ({top5.avg:.3f})\t'.format(
                 epoch, i, len(train_loader), batch_time=batch_time,
-                data_time=data_time, loss=losses, top1=top1, top5=top5, lr=optimizer.param_groups[-1]['lr'] * 0.1))  # TODO
+                data_time=data_time, loss=losses, top1=top1, top5=top5))  # TODO
 
-            if args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False:
-                print_output += '\ttau {tau:.4f} a {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
-                    tau=tau, aloss = alosses, eloss =elosses, r=elastic_list_print(reverse_onehot(r[-1,:,:].detach().cpu().numpy()))
+            if use_ada_framework:
+                print_output += ' a {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
+                    aloss = alosses, eloss =elosses, r=elastic_list_print(reverse_onehot(r[-1,:,:].detach().cpu().numpy()))
                 )
+                print_output += extra_each_loss_str(each_terms)
 
             if args.show_pred:
                 print_output += elastic_list_print(output[-1,:].detach().cpu().numpy())
             print(print_output)
 
-    if args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False:
-        print_policy_usage(r_list, model.module.reso_dim)
+    if use_ada_framework:
+        usage_str = get_policy_usage_str(r_list, model.module.reso_dim)
+        print(usage_str)
 
-    tf_writer.add_scalar('loss/train', losses.avg, epoch)
-    tf_writer.add_scalar('acc/train_top1', top1.avg, epoch)
-    tf_writer.add_scalar('acc/train_top5', top5.avg, epoch)
-    tf_writer.add_scalar('lr', optimizer.param_groups[-1]['lr'], epoch)
+    if tf_writer is not None:
+        tf_writer.add_scalar('loss/train', losses.avg, epoch)
+        tf_writer.add_scalar('acc/train_top1', top1.avg, epoch)
+        tf_writer.add_scalar('acc/train_top5', top5.avg, epoch)
+        tf_writer.add_scalar('lr', optimizer.param_groups[-1]['lr'], epoch)
+
+    return usage_str if use_ada_framework else None
 
 
 
 def validate(val_loader, model, criterion, epoch, tf_writer=None):
-    batch_time = AverageMeter()
-    losses = AverageMeter()
-    top1 = AverageMeter()
-    top5 = AverageMeter()
-
+    batch_time, losses, top1, top5 = get_average_meters(4)
+    tau=0
     # TODO(yue)
     all_results = []
     all_targets = []
 
-    if args.ada_reso_skip:
-        if args.exp_decay:
-            tau = compute_exp_decay_tau(epoch)
-        else:
-            tau = args.init_tau
-        if args.offline_lstm_last == False and args.offline_lstm_all == False:
-            alosses = AverageMeter()
-            elosses = AverageMeter()
-            r_list = []
+    if use_ada_framework:
+        tau = get_current_temperature(epoch)
+        alosses, elosses = get_average_meters(2)
+        each_terms = get_average_meters(NUM_LOSSES)
+        r_list = []
 
     # switch to evaluate mode
     model.eval()
@@ -486,16 +663,15 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
 
             # compute output
             if args.ada_reso_skip:
-                #output, r = model(input_tuple[0], input_tuple[1])
                 output, r = model(input=input_tuple[:-1], tau=tau)
                 acc_loss = get_criterion_loss(criterion, output, target)
-                if args.offline_lstm_last == False and args.offline_lstm_all == False:
-                    eff_loss = cal_eff(r)
-                    acc_loss, eff_loss = compute_acc_eff_loss_with_weights(acc_loss, eff_loss, epoch)
+                if use_ada_framework:
+                    acc_loss, eff_loss, each_losses = compute_every_losses(r, acc_loss, epoch)
                     alosses.update(acc_loss.item(), input.size(0))
                     elosses.update(eff_loss.item(), input.size(0))
+                    for l_i, each_loss in enumerate(each_losses):
+                        each_terms[l_i].update(each_loss, input.size(0))
                     loss = acc_loss + eff_loss
-
                 else:
                     loss = acc_loss
             else:
@@ -516,46 +692,48 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
             # measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
-            if args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False:
+            if use_ada_framework:
                 r_list.append(r.cpu().numpy())
 
             if i % args.print_freq == 0:
-                output = ('Test: [{0}/{1}]\t'
+                print_output = ('Test: [{0:03d}/{1:03d}] '
                           'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                          'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                          'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                          'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                          'Loss {loss.val:.4f} ({loss.avg:.4f})'
+                          'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) '
+                          'Prec@5 {top5.val:.3f} ({top5.avg:.3f})\t'.format(
                     i, len(val_loader), batch_time=batch_time, loss=losses,
                     top1=top1, top5=top5))
-                if args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False:
-                    output += '\ttau {tau:.4f} a {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
-                        tau=tau, aloss=alosses, eloss=elosses, r=elastic_list_print(reverse_onehot(r[-1, :, :].cpu().numpy()))
+                if use_ada_framework:
+                    print_output += ' a {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
+                        aloss=alosses, eloss=elosses, r=elastic_list_print(reverse_onehot(r[-1, :, :].cpu().numpy()))
                     )
 
-                print(output)
+                    print_output += extra_each_loss_str(each_terms)
+
+                print(print_output)
 
     # TODO(yue)
     mAP,_ = cal_map(torch.cat(all_results,0).cpu(), torch.cat(all_targets,0)[:,0:1].cpu()) # TODO(yue) single-label mAP
     mmAP, _ = cal_map(torch.cat(all_results, 0).cpu(), torch.cat(all_targets, 0).cpu())    # TODO(yue)  multi-label mAP
 
-    output = ('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
+    print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
               .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses))
-    print(output)
 
-    if args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False:
-        print_policy_usage(r_list, model.module.reso_dim)
+    if use_ada_framework:
+        usage_str = get_policy_usage_str(r_list, model.module.reso_dim)
+        print(usage_str)
 
     if tf_writer is not None:
         tf_writer.add_scalar('loss/test', losses.avg, epoch)
         tf_writer.add_scalar('acc/test_top1', top1.avg, epoch)
         tf_writer.add_scalar('acc/test_top5', top5.avg, epoch)
 
-    return mAP, mmAP, top1.avg
+    return mAP, mmAP, top1.avg, usage_str if use_ada_framework else None
 
 def save_checkpoint(state, is_best, exp_full_path):
     filename = '%s/models/ckpt%04d.pth.tar' % (exp_full_path, state["epoch"])
-    if (state["epoch"]-1) % args.save_freq == 0 or state["epoch"] == 0:
-        torch.save(state, filename)
+    # if (state["epoch"]-1) % args.save_freq == 0 or state["epoch"] == 0:
+    #     torch.save(state, filename)
     if is_best:
         torch.save(state, '%s/models/ckpt.best.pth.tar' % (exp_full_path))
 
@@ -579,11 +757,16 @@ def adjust_learning_rate(optimizer, epoch, lr_type, lr_steps):
 
 def setup_log_directory(logger, exp_header):
     exp_full_name = "g%s_%s"%(logger._timestr, exp_header)
+    if args.skip_training:
+        exp_full_name+="_test"
     exp_full_path = ospj(common.EXPS_PATH, exp_full_name)
     os.makedirs(exp_full_path)
     os.makedirs(ospj(exp_full_path,"models"))
     logger.create_log(exp_full_path)
     return exp_full_path
 
+
+
 if __name__ == '__main__':
     main()
+

@@ -38,7 +38,7 @@ class TSNDataSet(data.Dataset):
                  num_segments=3, new_length=1, modality='RGB',
                  image_tmpl='img_{:05d}.jpg', transform=None,
                  random_shift=True, test_mode=False,
-                 remove_missing=False, dense_sample=False, twice_sample=False, args=None):
+                 remove_missing=False, dense_sample=False, twice_sample=False, partial_fcvid_eval=False, args=None):
 
         self.root_path = root_path
         self.list_file = list_file
@@ -52,6 +52,7 @@ class TSNDataSet(data.Dataset):
         self.remove_missing = remove_missing
         self.dense_sample = dense_sample  # using dense sample as I3D
         self.twice_sample = twice_sample  # twice sample for more validation
+        self.partial_fcvid_eval = partial_fcvid_eval
         self.args=args
 
         # TODO(yue)
@@ -103,11 +104,15 @@ class TSNDataSet(data.Dataset):
 
     def _parse_list(self):
         # check the frame number is large >3:
-        splitter="," if self.args.dataset == "actnet" else " "
+        splitter="," if self.args.dataset in ["actnet","fcvid"] else " "
         tmp = [x.strip().split(splitter) for x in open(self.list_file)]
 
         if not self.test_mode or self.remove_missing:
             tmp = [item for item in tmp if int(item[1]) >= 3]
+
+        if self.partial_fcvid_eval and self.args.dataset=="fcvid":
+            tmp = tmp[:int(len(tmp)*self.args.partial_ratio)]
+
         self.video_list = [VideoRecord(item) for item in tmp]
 
         if self.image_tmpl == '{:06d}-{}_{:05d}.jpg':
@@ -227,8 +232,21 @@ class TSNDataSet(data.Dataset):
                         return False
                 return True
 
-            if self.args.pyramid_boost and check_scale_is_pyramid_indeed(self.args.reso_list):
+            if (not any([self.args.random_crop, self.args.center_crop])) and \
+                    self.args.pyramid_boost and check_scale_is_pyramid_indeed(self.args.reso_list):
                 return process_data, record.label
+            elif self.args.random_crop:
+                #TODO(debug)
+                return tuple(
+                    [process_data] +
+                    [self.random_crop(process_data, (x,x)) for x in self.args.reso_list[1:]] +
+                    [record.label])
+            elif self.args.center_crop:
+                # TODO(debug)
+                return tuple(
+                    [process_data] +
+                    [self.center_crop(process_data, (x,x)) for x in self.args.reso_list[1:]] +
+                    [record.label])
             else:
                 return tuple(
                     [process_data] +
@@ -241,6 +259,23 @@ class TSNDataSet(data.Dataset):
     # (NC, H, W)->(NC, H', W')
     def rescale(self, input_data, size):
         return torch.nn.functional.interpolate(input_data.unsqueeze(1), size=size, mode='nearest').squeeze(1)
+
+    def center_crop(self, input_data, size):
+        h = input_data.shape[1] // 2
+        w = input_data.shape[2] // 2
+        return input_data[:, h - size[0] // 2:h + size[0] // 2, w - size[1] // 2:w + size[1] // 2]
+
+    def random_crop(self, input_data, size):
+        H = input_data.shape[1]
+        W = input_data.shape[2]
+        input_data_nchw=input_data.view(-1, 3, H, W)
+        batchsize=input_data_nchw.shape[0]
+        return_list=[]
+        hs0 = np.random.randint(0, H-size[0], batchsize)
+        ws0 = np.random.randint(0, W-size[1], batchsize)
+        for i in range(batchsize):
+            return_list.append(input_data_nchw[i,:,hs0[i]:hs0[i]+size[0], ws0[i]:ws0[i]+size[1]])
+        return torch.stack(return_list).view(batchsize*3, size[0], size[1])
 
     def __len__(self):
         return len(self.video_list)

@@ -37,13 +37,24 @@ class SegmentConsensus(torch.autograd.Function):
 
 class ConsensusModule(torch.nn.Module):
 
-    def __init__(self, consensus_type, dim=1):
+    def __init__(self, consensus_type, dim=1, args=None):
         super(ConsensusModule, self).__init__()
         self.consensus_type = consensus_type if consensus_type != 'rnn' else 'identity'
         self.dim = dim
+        self.args=args
 
     def forward(self, input):
-        return SegmentConsensus(self.consensus_type, self.dim)(input)
+        if self.consensus_type=="scsampler": # TODO(yue)
+            res = []
+            ind = torch.topk(torch.max(input.detach(), dim=2).values, dim=1, k=self.args.top_k).indices
+            for bi in range(input.shape[0]):
+                res.append(torch.stack([input[bi, k, :] for k in ind[bi]]))
+            output = torch.mean(torch.stack(res), dim=1, keepdim=True)
+            return output
+        else:
+            return SegmentConsensus(self.consensus_type, self.dim)(input)
+
+
 
 
 # class ConsensusModule(torch.nn.Module):

@@ -11,3 +11,4 @@ coeff18 = np.array([512000, 0, 36144])
 coeff34 = np.array([512000, 0, 73008])
 coeff50 = np.array([512000, 0, 76848])
 coeff101 = np.array([512000, 0, 150832])
+

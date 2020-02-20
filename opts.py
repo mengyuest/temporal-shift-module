@@ -14,7 +14,7 @@ parser.add_argument('--store_name', type=str, default="")
 # ========================= Model Configs ==========================
 parser.add_argument('--arch', type=str, default="BNInception")
 parser.add_argument('--num_segments', type=int, default=3)
-parser.add_argument('--consensus_type', type=str, default='avg')
+# parser.add_argument('--consensus_type', type=str, default='avg')
 parser.add_argument('--k', type=int, default=3)
 
 parser.add_argument('--dropout', '--do', default=0.5, type=float,
@@ -41,7 +41,7 @@ parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
 parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
                     metavar='W', help='weight decay (default: 1e-4)') #TODO(changed from 5e-4 to 1e-4)
-parser.add_argument('--clip-gradient', '--gd', default=None, type=float,
+parser.add_argument('--clip-gradient', '--gd', default=20, type=float,
                     metavar='W', help='gradient norm clipping (default: disabled)') #TODO(changed from None to 20)
 parser.add_argument('--no_partialbn', '--npb', default=False, action="store_true")
 
@@ -130,3 +130,26 @@ parser.add_argument('--lite_mode',action='store_true') # TODO(yue) for 2 gpus an
 # TODO: loading order: ImageNet->Joint Model->specific modules (better not using both joint and specific)
 
 # TODO: freezing
+parser.add_argument('--use_gflops_loss', action='store_true') #TODO(yue) use flops as loss assignment
+parser.add_argument('--head_loss_weight', type=float, default=1e-6) #TODO(yue) punish to the high resolution selection
+parser.add_argument('--frames_loss_weight', type=float, default=1e-6) #TODO(yue) use num_frames as a loss assignment
+parser.add_argument('--consensus_type', type=str, default='avg') #TODO can also use scsampler!
+parser.add_argument('--top_k', type=int, default=5) #TODO can also use scsampler!
+
+parser.add_argument('--base_pretrained_from', type=str, default='', help='for base model pretrained path') #TODO can also use scsampler!
+parser.add_argument('--skip_training',action='store_true') #TODO(yue) just doing eval
+
+parser.add_argument('--freeze_policy', action='store_true') #TODO(yue) fix the policy
+parser.add_argument('--random_seed', type=int, default=1007)
+
+parser.add_argument('--stabilize_order', action='store_true')
+
+parser.add_argument('--partial_fcvid_eval', action='store_true')
+parser.add_argument('--partial_ratio', type=float, default=0.2)
+
+parser.add_argument('--cnn3d', action='store_true')
+parser.add_argument('--seg_len',type=int, default=16)
+
+parser.add_argument('--3d_pretrained_uses', type=str, default='inflation') # if not inflation, maybe jester
+parser.add_argument('--center_crop', action='store_true')
+parser.add_argument('--random_crop', action='store_true')

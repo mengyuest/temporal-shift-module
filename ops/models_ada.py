@@ -9,6 +9,10 @@ from ops.basic_ops import ConsensusModule
 from ops.transforms import *
 from torch.nn.init import normal_, constant_
 import torch.nn.functional as F
+from efficientnet_pytorch import EfficientNet
+from ops.cnn3d.shufflenet3d import ShuffleNet3D
+from ops.cnn3d.mobilenet3dv2 import MobileNet3DV2, mobilenet3d_v2
+from ops.cnn3d.i3d_resnet import  I3D_ResNet, i3d_resnet
 
 def init_hidden(batch_size, cell_size):
     init_cell = torch.Tensor(batch_size, cell_size).zero_()
@@ -51,23 +55,70 @@ class TSN_Ada(nn.Module):
         self.args = args
         base_model = self.args.backbone_list[0]
         self.base_model_name = base_model
+        self.num_class = num_class
+
+        #TODO (yue) for 3d-conv
+        self.time_steps = self.num_segments // self.args.seg_len if self.args.cnn3d else self.num_segments
 
         # TODO(yue)
         if self.args.ada_reso_skip:
             policy_feat_dim_dict={"resnet18": 512,
-                            "resnet34": 512,
-                            "resnet50": 2048,
-                            "resnet101": 2048,
-                            "mobilenet_v2": 1280}
+                                  "resnet34": 512,
+                                  "resnet50": 2048,
+                                  "resnet101": 2048,
+                                  "mobilenet_v2": 1280,
+                                  "efficientnet-b0": 1280,
+                                  "efficientnet-b1": 1280,
+                                  "efficientnet-b2": 1408,
+                                  "efficientnet-b3": 1536,
+                                  "efficientnet-b4": 1792,
+                                  "efficientnet-b5": 2048,
+                                  "shufflenet3d_0.5": 480,
+                                  "shufflenet3d_1.0": 960,
+                                  "shufflenet3d_1.5": 1440,
+                                  "shufflenet3d_2.0": 1920,
+                                  "mobilenet3dv2": 1280,
+                                  "res3d18": 512,
+                                  "res3d34": 512,
+                                  "res3d50": 2048,
+                                  "res3d101": 2048,
+                                  }
 
-            self.lite_backbone = getattr(torchvision.models, self.args.policy_backbone)(not self.args.policy_from_scratch)
+            shall_pretrain = not self.args.policy_from_scratch
+
+            if self.args.cnn3d:
+                if "shufflenet3d" in self.args.policy_backbone:
+                    self.lite_backbone = ShuffleNet3D(groups=3, width_mult=float(self.args.policy_backbone.split("_")[1]))
+                    if shall_pretrain:
+                        #TODO(debug) Not sure how to do this, inflation?
+                        a=1
+
+                elif "mobilenet3dv2" in self.args.policy_backbone:
+                    self.lite_backbone = mobilenet3d_v2(pretrained=shall_pretrain)
+                elif "res3d" in self.args.policy_backbone:
+                    self.lite_backbone = i3d_resnet(int(self.args.policy_backbone.split("res3d")[1]),pretrained=shall_pretrain)
+            elif "efficientnet" in self.args.policy_backbone:
+                if shall_pretrain:
+                    self.lite_backbone = EfficientNet.from_pretrained(self.args.policy_backbone)
+                else:
+                    self.lite_backbone = EfficientNet.from_named(self.args.policy_backbone)
+            else:
+                self.lite_backbone = getattr(torchvision.models, self.args.policy_backbone)(shall_pretrain)
 
             self.lite_backbone.avgpool = nn.AdaptiveAvgPool2d(1)
             if "resnet" in self.args.policy_backbone:
                 self.lite_backbone.last_layer_name = 'fc'
-            else:
+            elif "mobilenet_v2" in self.args.policy_backbone:
                 self.lite_backbone.last_layer_name = 'classifier'
-
+            elif "efficientnet" in self.args.policy_backbone:
+                self.lite_backbone.last_layer_name = '_fc'
+            elif self.args.cnn3d:
+                if "shufflenet3d" in self.args.policy_backbone:
+                    self.lite_backbone.last_layer_name = 'classifier'
+                elif self.args.policy_backbone=="mobilenet3dv2":
+                    self.lite_backbone.last_layer_name = 'classifier'
+                elif "res3d" in self.args.policy_backbone:
+                    self.lite_backbone.last_layer_name = 'fc'
 
             self.policy_feat_dim = policy_feat_dim_dict[self.args.policy_backbone]
             self.rnn = nn.LSTMCell(input_size=self.policy_feat_dim, hidden_size=self.args.hidden_dim, bias=True)
@@ -95,7 +146,7 @@ class TSN_Ada(nn.Module):
 
         self._do_if_flow_or_rgbdiff()
 
-        self.consensus = ConsensusModule(consensus_type)
+        self.consensus = ConsensusModule(consensus_type, args=self.args)
 
         if not self.before_softmax:
             self.softmax = nn.Softmax()
@@ -142,21 +193,51 @@ class TSN_Ada(nn.Module):
         self.input_mean = [0.485, 0.456, 0.406]
         self.input_std = [0.229, 0.224, 0.225]
 
-        if self.args.ada_reso_skip and len(self.args.backbone_list) > 1:
-            for backbone_name in self.args.backbone_list:
-                self.base_model_list.append(
-                    getattr(torchvision.models, backbone_name)(self.pretrain == 'imagenet'))
+        if self.args.ada_reso_skip and len(self.args.backbone_list) >= 1:
+            for bbi, backbone_name in enumerate(self.args.backbone_list):
+                shall_pretrain = len(self.args.model_paths) == 0 or self.args.model_paths[bbi].lower() != 'none'
 
+                if 'efficientnet' in backbone_name:  # TODO(yue) pretrained
+                    if shall_pretrain:
+                        self.base_model_list.append(EfficientNet.from_pretrained(backbone_name))
+                    else:  # TODO(yue) from scratch
+                        self.base_model_list.append(EfficientNet.from_named(backbone_name))
+
+                elif self.args.cnn3d:
+                    if "shufflenet3d" in backbone_name:
+                        self.base_model_list.append(ShuffleNet3D(3, width_mult=float(backbone_name.split("_")[1])))
+                        if shall_pretrain:
+                            #TODO(debug)
+                            # self.base_model_list.append(EfficientNet.from_pretrained(backbone_name))
+                            a=1
+                    elif "mobilenet3dv2" in backbone_name:
+                        self.base_model_list.append(mobilenet3d_v2(pretrained=shall_pretrain))
+                    elif "res3d" in backbone_name:
+                        self.base_model_list.append(i3d_resnet(depth=int(backbone_name.split("res3d")[1]), pretrained=shall_pretrain))
+                else:
+                    self.base_model_list.append(getattr(torchvision.models, backbone_name)(shall_pretrain))
+
+
+                self.base_model_list[-1].avgpool = nn.AdaptiveAvgPool2d(1)
                 if 'resnet' in backbone_name:
                     self.base_model_list[-1].last_layer_name = 'fc'
-                    self.base_model_list[-1].avgpool = nn.AdaptiveAvgPool2d(1)
                 elif backbone_name == 'mobilenet_v2':
                     self.base_model_list[-1].last_layer_name = 'classifier'
-                    self.base_model_list[-1].avgpool = nn.AdaptiveAvgPool2d(1)
+                elif 'efficientnet' in backbone_name:
+                    self.base_model_list[-1].last_layer_name = '_fc'
+                elif self.args.cnn3d:
+                    if 'shufflenet3d' in backbone_name:
+                        self.base_model_list[-1].last_layer_name = 'classifier'
+                    elif "mobilenet3dv2" in backbone_name:
+                        self.base_model_list[-1].last_layer_name = 'classifier'
+                    elif "res3d" in backbone_name:
+                        self.base_model_list[-1].last_layer_name = 'fc'
             return
 
+        shall_pretrain = self.pretrain == 'imagenet'
+
         if 'resnet' in base_model:
-            self.base_model = getattr(torchvision.models, base_model)(self.pretrain == 'imagenet')
+            self.base_model = getattr(torchvision.models, base_model)(shall_pretrain)
             if self.is_shift:
                 print('Adding temporal shift...')
                 from ops.temporal_shift import make_temporal_shift
@@ -179,7 +260,7 @@ class TSN_Ada(nn.Module):
 
         elif base_model == 'mobilenetv2':
             from archs.mobilenet_v2 import mobilenet_v2, InvertedResidual
-            self.base_model = mobilenet_v2(True if self.pretrain == 'imagenet' else False)
+            self.base_model = mobilenet_v2(shall_pretrain)
             self.base_model.last_layer_name = 'classifier'
             self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
             if self.is_shift:
@@ -195,6 +276,42 @@ class TSN_Ada(nn.Module):
             elif self.modality == 'RGBDiff':
                 self.input_mean = [0.485, 0.456, 0.406] + [0] * 3 * self.new_length
                 self.input_std = self.input_std + [np.mean(self.input_std) * 2] * 3 * self.new_length
+
+        elif 'efficientnet' in base_model:
+            if shall_pretrain:
+                self.base_model = EfficientNet.from_pretrained(base_model)
+            else:
+                self.base_model = EfficientNet.from_named(base_model)
+            self.base_model.last_layer_name = '_fc'
+            self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
+
+
+        elif self.args.cnn3d:
+            if'shufflenet3d' in base_model:
+                self.base_model = ShuffleNet3D(groups=3, width_mult=float(base_model.split("_")[1]))
+                self.base_model.last_layer_name = 'classifier'
+                self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
+                self.input_size = 224
+                self.input_mean = [0.485, 0.456, 0.406]
+                self.input_std = [0.229, 0.224, 0.225]
+
+            elif base_model == 'mobilenet3dv2':
+                self.base_model = mobilenet3d_v2(pretrained = shall_pretrain)
+                self.base_model.last_layer_name = 'classifier'
+                self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
+                self.input_size = 224
+                self.input_mean = [0.485, 0.456, 0.406]
+                self.input_std = [0.229, 0.224, 0.225]
+
+            elif "res3d" in base_model:
+                # TODO(yue) pretrained from ImageNet inflation
+                self.base_model = i3d_resnet(depth=int(base_model.split("res3d")[1]),
+                                             pretrained = shall_pretrain)
+                self.base_model.last_layer_name = 'fc'
+                self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
+                self.input_size = 224
+                self.input_mean = [0.485, 0.456, 0.406]
+                self.input_std = [0.229, 0.224, 0.225]
 
         elif base_model == 'BNInception':
             from archs.bn_inception import bninception
@@ -228,8 +345,15 @@ class TSN_Ada(nn.Module):
                 normal_(self.lite_fc.weight, 0, std)
                 constant_(self.lite_fc.bias, 0)
         if self.multi_models:
-            for base_model in self.base_model_list:
-                feature_dim = getattr(base_model, base_model.last_layer_name).in_features
+            for j,base_model in enumerate(self.base_model_list):
+                # feature_dim = getattr(base_model, base_model.last_layer_name).in_features
+
+                if self.args.cnn3d and ("mobilenet3dv2"==self.args.backbone_list[j] or "shufflenet3d"in self.args.backbone_list[j]):
+                    feature_dim = getattr(base_model, base_model.last_layer_name)[1].in_features
+                else:
+                    feature_dim = getattr(base_model, base_model.last_layer_name).in_features
+
+
                 setattr(base_model, base_model.last_layer_name, nn.Dropout(p=self.dropout))
                 new_fc = nn.Linear(feature_dim, num_class)
                 if hasattr(new_fc, 'weight'):
@@ -238,7 +362,11 @@ class TSN_Ada(nn.Module):
                 self.new_fc_list.append(new_fc)
             return None
 
-        feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
+        if self.args.cnn3d and ("mobilenet3dv2"==self.base_model_name or "shufflenet3d"in self.base_model_name):
+            feature_dim = getattr(self.base_model, self.base_model.last_layer_name)[1].in_features
+        else:
+            feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
+        # feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
         if self.dropout == 0:
             setattr(self.base_model, self.base_model.last_layer_name, nn.Linear(feature_dim, num_class))
             self.new_fc = None
@@ -276,7 +404,7 @@ class TSN_Ada(nn.Module):
             for the_model in models:
                 count = 0
                 for m in the_model.modules():
-                    if isinstance(m, nn.BatchNorm2d):
+                    if isinstance(m, nn.BatchNorm2d) or isinstance(m,nn.BatchNorm3d): #TODO(yue)
                         count += 1
                         if count >= (2 if self._enable_pbn else 1):
                             m.eval()
@@ -335,9 +463,7 @@ class TSN_Ada(nn.Module):
                     bn.extend(list(m.parameters()))
 
             elif isinstance(m, torch.nn.LSTMCell):
-                #print("m", m)
                 ps = list(m.parameters())
-                #print("ps",ps)
                 normal_weight.append(ps[0])
                 normal_weight.append(ps[1])
                 normal_bias.append(ps[2])
@@ -369,10 +495,24 @@ class TSN_Ada(nn.Module):
 
     def forward(self, *argv, **kwargs):
         def backbone(input_data, the_base_model, new_fc):
-            base_out = the_base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]))
+            if self.args.cnn3d:
+                # TODO(yue) input (B,T,C,H,W)
+                # TODO(yue) view (B, T1, T2, C, H, W) -> (B*T1, T2, C, H, W) -> (B*T1, C, T2, H, W)   !(-1, C, H, W)
+                # TODO(yue) base_out (B * T1, feat_dim)
+                input_3d = input_data.view(input_data.shape[0], self.time_steps, self.args.seg_len,
+                                      3, input_data.shape[-1], input_data.shape[-1])
+                input_3d = input_3d.view(
+                    (input_data.shape[0] * self.time_steps,) + input_3d.size()[2:])
+                input_3d = input_3d.transpose(2, 1)
+                base_out = the_base_model(input_3d)
+            else:
+                base_out = the_base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]))
+
             if new_fc is not None:
                 base_out = new_fc(base_out)
-            base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
+
+            base_out = base_out.view((-1, self.time_steps) + base_out.size()[1:])
+
             return base_out
 
         batch_size = kwargs["input"][0].shape[0] # TODO(yue) input[0] B*(TC)*H*W
@@ -392,8 +532,6 @@ class TSN_Ada(nn.Module):
         logits_list = []
         lite_j_list = []
 
-        remain_skips=0
-
         if self.multi_models:
             base_out_list = [backbone(input_list[i], self.base_model_list[i], self.new_fc_list[i]) for i in
                              range(len(self.base_model_list))]
@@ -408,54 +546,107 @@ class TSN_Ada(nn.Module):
         old_hx = None
         old_r_t = None
 
-        for t in range(self.num_segments):
-            hx, cx = self.rnn(feat_lite[:, t], (hx, cx))
-            p_t = torch.log(F.softmax(self.linear(hx), dim=1))
-            j_t = self.lite_fc(hx)
-            logits_list.append(p_t) #TODO as logit
-            lite_j_list.append(j_t) #TODO as pred
+        if self.args.stabilize_order == False or online_policy == False:
+            for t in range(self.time_steps):
+                hx, cx = self.rnn(feat_lite[:, t], (hx, cx))
+                p_t = torch.log(F.softmax(self.linear(hx), dim=1))
+                j_t = self.lite_fc(hx)
+                logits_list.append(p_t) #TODO as logit
+                lite_j_list.append(j_t) #TODO as pred
 
-            #TODO (yue) need a simple case to illustrate this
-            if online_policy:
-                #TODO gumbel_softmax
-                r_t = F.gumbel_softmax(logits=p_t, tau=kwargs["tau"], hard=True, eps=1e-10, dim=-1)
-                #TODO update states and r_t
-                if old_hx is not None:
-                    take_bool = remain_skip_vector > 0.5
-                    take_old = torch.tensor(take_bool, dtype=torch.float).cuda()
-                    take_curr = torch.tensor(1 - take_bool, dtype=torch.float).cuda()
-                    hx = old_hx * take_old + hx * take_curr
-                    r_t = old_r_t * take_old + r_t * take_curr
-                # TODO update skipping_vector
-                for batch_i in range(batch_size):
+                #TODO (yue) need a simple case to illustrate this
+                if online_policy:
+                    r_t_list=[]
+                    for b_i in range(p_t.shape[0]):
+                        r_t_item = F.gumbel_softmax(logits=p_t[b_i:b_i + 1], tau=kwargs["tau"], hard=True, eps=1e-10, dim=-1)
+                        r_t_list.append(r_t_item)
+
+                    r_t = torch.cat(r_t_list, dim=0)
+                    #r_t = F.gumbel_softmax(logits=p_t, tau=kwargs["tau"], hard=True, eps=1e-10, dim=-1) #TODO(old version)
+                    #TODO update states and r_t
+                    if old_hx is not None:
+                        take_bool = remain_skip_vector > 0.5
+                        take_old = torch.tensor(take_bool, dtype=torch.float).cuda()
+                        take_curr = torch.tensor(~take_bool, dtype=torch.float).cuda()
+                        hx = old_hx * take_old + hx * take_curr
+                        r_t = old_r_t * take_old + r_t * take_curr
+
+                    # TODO update skipping_vector
+                    for batch_i in range(batch_size):
+                        for skip_i in range(self.action_dim-self.reso_dim):
+                            #TODO(yue) first condition to avoid valuing skip vector forever
+                            if remain_skip_vector[batch_i][0]<0.5 and r_t[batch_i][self.reso_dim + skip_i] > 0.5:
+                                remain_skip_vector[batch_i][0] = self.args.skip_list[skip_i]
+                    old_hx = hx
+                    old_r_t = r_t
+                    r_list.append(r_t)  # TODO as decision
+
+                    remain_skip_vector = (remain_skip_vector - 1).clamp(0)
+
+        else:
+            for b_i in range(batch_size):
+                hx = init_hidden(1, self.args.hidden_dim)
+                cx = init_hidden(1, self.args.hidden_dim)
+                old_hx = None
+                old_r_t = None
+                remain_skip_vector = torch.zeros(1)
+
+                for t_i in range(self.time_steps):
+                    hx, cx = self.rnn(feat_lite[b_i:b_i+1, t_i], (hx,cx))
+                    p_t = torch.log(F.softmax(self.linear(hx), dim=1))
+                    j_t = self.lite_fc(hx)
+                    r_t_item = F.gumbel_softmax(logits=p_t, tau=kwargs["tau"], hard=True, eps=1e-10, dim=-1)
+
+                    if old_hx is not None:
+                        take_bool = remain_skip_vector[0] > 0.5
+                        take_old = torch.tensor(take_bool, dtype=torch.float).cuda()
+                        take_curr = torch.tensor(~take_bool, dtype=torch.float).cuda()
+                        hx = old_hx * take_old + hx * take_curr
+                        r_t_item = old_r_t * take_old + r_t_item * take_curr
+
                     for skip_i in range(self.action_dim-self.reso_dim):
-                        #TODO(yue) first condition to avoid valuing skip vector forever
-                        if remain_skip_vector[batch_i][0]<0.5 and r_t[batch_i][self.reso_dim + skip_i] > 0.5:
-                            remain_skip_vector[batch_i][0] = self.args.skip_list[skip_i]
-                old_hx = hx
-                old_r_t = r_t
-                r_list.append(r_t)  # TODO as decision
-                remain_skip_vector = (remain_skip_vector - 1).clamp(0)
+                        if remain_skip_vector[0]<0.5 and r_t_item[0,self.reso_dim+skip_i]>0.5:
+                            remain_skip_vector[0] = self.args.skip_list[skip_i]
+
+                    old_hx = hx
+                    old_r_t = r_t_item
+                    r_list.append(r_t_item)  # TODO as decision
+                    lite_j_list.append(j_t)  # TODO as pred
+                    remain_skip_vector = (remain_skip_vector - 1).clamp(0)
+
+            r_all = torch.cat(r_list, dim=0).reshape(batch_size, self.time_steps, self.action_dim)
+            lite_j_list = torch.cat(lite_j_list, dim=0).reshape(batch_size, self.time_steps, self.num_class)
 
         if self.args.policy_also_backbone:
-            base_out_list.append(torch.stack(lite_j_list, dim=1))
+            if self.args.stabilize_order == False or online_policy == False:
+                base_out_list.append(torch.stack(lite_j_list, dim=1))
+            else:
+                base_out_list.append(lite_j_list)
 
         if self.args.offline_lstm_last:  #TODO(yue) no policy - use policy net as backbone - just LSTM(last)
-            return lite_j_list[-1].squeeze(1), None
+            if self.args.stabilize_order == False or online_policy == False:
+                return lite_j_list[-1].squeeze(1), None
+            else:
+                return lite_j_list[:,-1], None
         elif self.args.offline_lstm_all: #TODO(yue) no policy - use policy net as backbone - just LSTM(average)
-            return torch.stack(lite_j_list).mean(dim=0).squeeze(1), None
+            if self.args.stabilize_order == False or online_policy == False:
+                return torch.stack(lite_j_list).mean(dim=0).squeeze(1), None
+            else:
+                return lite_j_list.mean(dim=1), None
 
         if self.args.random_policy: #TODO(yue) random policy
-            r_all = torch.zeros(batch_size,self.num_segments,self.action_dim).cuda()
+            r_all = torch.zeros(batch_size, self.time_steps, self.action_dim).cuda()
             for i_bs in range(batch_size):
-                for i_t in range(self.num_segments):
+                for i_t in range(self.time_steps):
                     r_all[i_bs, i_t, torch.randint(self.action_dim,[1])] = 1.0
         elif self.args.all_policy: #TODO(yue) all policy: take all
-            r_all = torch.ones(batch_size, self.num_segments, self.action_dim).cuda()
+            r_all = torch.ones(batch_size, self.time_steps, self.action_dim).cuda()
         else: #TODO(yue) online policy
             # logits = torch.stack(logits_list, dim=1)  # N*T*K
             # r_all = F.gumbel_softmax(logits=logits, tau=kwargs["tau"], hard=True, eps=1e-10, dim=-1)
-            r_all = torch.stack(r_list, dim=1)
+            if self.args.stabilize_order == False or online_policy == False:
+                r_all = torch.stack(r_list, dim=1)
+
         output = self.combine_logits(r_all, base_out_list)
 
 
@@ -468,8 +659,6 @@ class TSN_Ada(nn.Module):
         batchsize = r.shape[0]
         total_num = torch.sum(r[:,offset:, 0:self.reso_dim], dim=[1,2]) + offset * batchsize
 
-        #print("r",r)
-        #print("total_num", total_num)
         res_base_list=[]
         for i,base_out in enumerate(base_out_list):
             r_like_base = r[:, :, i].unsqueeze(-1).expand_as(base_out) #TODO r[:,:,0] used to be, but wrong 01-30-2020
@@ -480,18 +669,11 @@ class TSN_Ada(nn.Module):
                     r_like_base[:, :offset, :] = 0
             res_base = torch.sum(r_like_base * base_out, dim=1)
             res_base_list.append(res_base)
-        pred = torch.stack(res_base_list).sum(dim=0) / torch.clamp(total_num.unsqueeze(-1), 1)
-        # r_like_base_0 = r[:, :, 0].unsqueeze(-1).expand_as(base_out_0)
-        # r_like_base_1 = r[:, :, 1].unsqueeze(-1).expand_as(base_out_1)
-        #
-        # if offset>0:
-        #     r_like_base_0[:, :offset, :] = 1
-        #     r_like_base_1[:, :offset, :] = 0
-        #
-        # res_base_0 = torch.sum(r_like_base_0 * base_out_0, dim=1)
-        # res_base_1 = torch.sum(r_like_base_1 * base_out_1, dim=1)
-        # #print("res_bases:",res_base_0.shape, res_base_1.shape)
-        # pred = (res_base_0 + res_base_1 ) / torch.clamp(total_num.unsqueeze(-1), 1)
+        if self.consensus_type!="scsampler":
+            pred = torch.stack(res_base_list).sum(dim=0) / torch.clamp(total_num.unsqueeze(-1), 1)
+        else:
+            pred = self.consensus(torch.stack(res_base_list))
+            pred = pred.squeeze(1)
         return pred
 
     def _get_diff(self, input, keep_rgb=False):

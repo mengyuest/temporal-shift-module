@@ -8,7 +8,11 @@ from torch import nn
 from ops.basic_ops import ConsensusModule
 from ops.transforms import *
 from torch.nn.init import normal_, constant_
+from efficientnet_pytorch import EfficientNet
 
+from ops.cnn3d.shufflenet3d import ShuffleNet3D
+from ops.cnn3d.mobilenet3dv2 import MobileNet3DV2, mobilenet3d_v2
+from ops.cnn3d.i3d_resnet import  I3D_ResNet, i3d_resnet
 
 class TSN(nn.Module):
     def __init__(self, num_class, num_segments, modality,
@@ -75,7 +79,7 @@ class TSN(nn.Module):
             self.base_model = self._construct_diff_model(self.base_model)
             print("Done. RGBDiff model ready.")
 
-        self.consensus = ConsensusModule(consensus_type)
+        self.consensus = ConsensusModule(consensus_type, args=self.args)
 
         if not self.before_softmax:
             self.softmax = nn.Softmax()
@@ -85,7 +89,10 @@ class TSN(nn.Module):
             self.partialBN(True)
 
     def _prepare_tsn(self, num_class):
-        feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
+        if self.args.cnn3d and ("mobilenet3dv2"==self.base_model_name or "shufflenet3d"in self.base_model_name):
+            feature_dim = getattr(self.base_model, self.base_model.last_layer_name)[1].in_features
+        else:
+            feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
         if self.dropout == 0:
             setattr(self.base_model, self.base_model.last_layer_name, nn.Linear(feature_dim, num_class))
             self.new_fc = None
@@ -106,8 +113,10 @@ class TSN(nn.Module):
     def _prepare_base_model(self, base_model):
         print('=> base model: {}'.format(base_model))
 
+        shall_pretrain = True if self.pretrain == 'imagenet' else False
+
         if 'resnet' in base_model:
-            self.base_model = getattr(torchvision.models, base_model)(True if self.pretrain == 'imagenet' else False)
+            self.base_model = getattr(torchvision.models, base_model)(shall_pretrain)
             if self.is_shift:
                 print('Adding temporal shift...')
                 from ops.temporal_shift import make_temporal_shift
@@ -135,7 +144,7 @@ class TSN(nn.Module):
 
         elif base_model == 'mobilenetv2':
             from archs.mobilenet_v2 import mobilenet_v2, InvertedResidual
-            self.base_model = mobilenet_v2(True if self.pretrain == 'imagenet' else False)
+            self.base_model = mobilenet_v2(shall_pretrain)
 
             self.base_model.last_layer_name = 'classifier'
             self.input_size = 224
@@ -156,6 +165,46 @@ class TSN(nn.Module):
             elif self.modality == 'RGBDiff':
                 self.input_mean = [0.485, 0.456, 0.406] + [0] * 3 * self.new_length
                 self.input_std = self.input_std + [np.mean(self.input_std) * 2] * 3 * self.new_length
+
+        elif 'efficientnet' in base_model:
+            if shall_pretrain:
+                self.base_model = EfficientNet.from_pretrained(base_model)
+            else:
+                self.base_model = EfficientNet.from_named(base_model)
+            self.base_model.last_layer_name = '_fc'
+            self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
+            self.input_size = 224
+            self.input_mean = [0.485, 0.456, 0.406]
+            self.input_std = [0.229, 0.224, 0.225]
+
+        elif self.args.cnn3d:
+            if 'shufflenet3d' in base_model:
+                self.base_model = ShuffleNet3D(groups=3, width_mult=float(base_model.split("_")[1]))
+                self.base_model.last_layer_name = 'classifier'
+                self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
+                self.input_size = 224
+                self.input_mean = [0.485, 0.456, 0.406]
+                self.input_std = [0.229, 0.224, 0.225]
+
+            elif base_model == 'mobilenet3dv2':
+                self.base_model = mobilenet3d_v2(pretrained = shall_pretrain)
+                self.base_model.last_layer_name = 'classifier'
+                self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
+                self.input_size = 224
+                self.input_mean = [0.485, 0.456, 0.406]
+                self.input_std = [0.229, 0.224, 0.225]
+
+            elif "res3d" in base_model:
+                # TODO(yue) pretrained from ImageNet inflation
+                self.base_model = i3d_resnet(depth=int(base_model.split("res3d")[1]),
+                                             pretrained = shall_pretrain)
+                self.base_model.last_layer_name = 'fc'
+                self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
+                self.input_size = 224
+                self.input_mean = [0.485, 0.456, 0.406]
+                self.input_std = [0.229, 0.224, 0.225]
+
+        # TODO(NEW)
 
         elif base_model == 'BNInception':
             from archs.bn_inception import bninception
@@ -185,13 +234,14 @@ class TSN(nn.Module):
         if self._enable_pbn and mode:
             print("Freezing BatchNorm2D except the first one.")
             for m in self.base_model.modules():
-                if isinstance(m, nn.BatchNorm2d):
+                if isinstance(m, nn.BatchNorm2d) or isinstance(m,nn.BatchNorm3d): #TODO(yue)
                     count += 1
                     if count >= (2 if self._enable_pbn else 1):
                         m.eval()
                         # shutdown update in frozen mode
                         m.weight.requires_grad = False
                         m.bias.requires_grad = False
+
 
     def partialBN(self, enable):
         self._enable_pbn = enable
@@ -324,7 +374,18 @@ class TSN(nn.Module):
                     sample_len = 3 * self.new_length
                     input = self._get_diff(input)
 
-                base_out = self.base_model(input.view((-1, sample_len) + input.size()[-2:]))
+                if self.args.cnn3d:
+                    #TODO(yue) input (B,T,C,H,W)
+                    #TODO(yue) view (B, T1, T2, C, H, W) -> (B*T1, T2, C, H, W) -> (B*T1, C, T2, H, W)   !(-1, C, H, W)
+                    #TODO(yue) base_out (B * T1, feat_dim)
+                    input_3d = input.view(input.shape[0], self.args.num_segments//self.args.seg_len, self.args.seg_len,
+                                          3, input.shape[-1], input.shape[-1])
+                    input_3d = input_3d.view((input.shape[0]*(self.args.num_segments//self.args.seg_len),)+input_3d.size()[2:])
+                    input_3d = input_3d.transpose(2, 1)
+                    base_out = self.base_model(input_3d)
+
+                else:
+                    base_out = self.base_model(input.view((-1, sample_len) + input.size()[-2:]))
             else:
                 base_out = self.base_model(input)
 
@@ -338,7 +399,10 @@ class TSN(nn.Module):
             if self.is_shift and self.temporal_pool:
                 base_out = base_out.view((-1, self.num_segments // 2) + base_out.size()[1:])
             else:
-                base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
+                if self.args.cnn3d:
+                    base_out = base_out.view((-1, self.args.num_segments//self.args.seg_len) + base_out.size()[1:])
+                else:
+                    base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
             output = self.consensus(base_out)
             return output.squeeze(1)
 
@@ -448,3 +512,4 @@ class TSN(nn.Module):
         elif self.modality == 'RGBDiff':
             return torchvision.transforms.Compose([GroupMultiScaleCrop(self.input_size, [1, .875, .75]),
                                                    GroupRandomHorizontalFlip(is_flow=False)])
+

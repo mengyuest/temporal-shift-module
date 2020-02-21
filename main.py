@@ -26,6 +26,7 @@ from ops.temporal_shift import make_temporal_pool
 from tensorboardX import SummaryWriter
 from ops.my_logger import Logger
 
+from ops.sal_rank_loss import cal_sal_rank_loss
 
 best_prec1 = 0
 num_class = -1
@@ -84,10 +85,9 @@ def load_to_sd(model_dict, model_path, module_name, fc_name, resolution, apple_t
 def main():
     t_start = time.time()
     global args, best_prec1, num_class, use_ada_framework
-    args = parser.parse_args()
 
     set_random_seed(args.random_seed)
-    use_ada_framework = args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False
+    use_ada_framework = args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False and args.real_scsampler == False
 
     logger=Logger()
     sys.stdout = logger
@@ -132,6 +132,11 @@ def main():
     if args.freeze_policy:
         for name, param in model.module.named_parameters():
             if "lite_fc" in name or "lite_backbone" in name or "rnn" in name or "linear" in name:
+                param.requires_grad = False
+
+    if args.freeze_backbone:
+        for name, param in model.module.named_parameters():
+            if "base_model" in name:
                 param.requires_grad = False
 
     optimizer = torch.optim.SGD(policies,
@@ -188,7 +193,16 @@ def main():
 
     # TODO(yue) ada_model loading process
     if args.ada_reso_skip:
-        if args.base_pretrained_from != "":
+        if test_mode:
+            print("Test mode load from pretrained model")
+            the_model_path = args.test_from
+            if ".pth.tar" not in the_model_path:
+                the_model_path = ospj(the_model_path,"models","ckpt.best.pth.tar")
+            model_dict = model.state_dict()
+            sd = load_to_sd(model_dict, the_model_path, "foo", "bar", -1, apple_to_apple=True)
+            model_dict.update(sd)
+            model.load_state_dict(model_dict)
+        elif args.base_pretrained_from != "":
             print("Adaptively load from pretrained whole")
             model_dict = model.state_dict()
             sd = load_to_sd(model_dict, args.base_pretrained_from, "foo", "bar", -1, apple_to_apple=True)
@@ -281,8 +295,9 @@ def main():
 
     exp_full_path = setup_log_directory(logger, args.exp_header)
 
-    with open(os.path.join(exp_full_path, 'args.txt'), 'w') as f:
-        f.write(str(args))
+    if not test_mode:
+        with open(os.path.join(exp_full_path, 'args.txt'), 'w') as f:
+            f.write(str(args))
     tf_writer = SummaryWriter(log_dir=exp_full_path)
 
     # TODO(yue)
@@ -291,6 +306,7 @@ def main():
     prec_record = Recorder()
     best_train_usage_str = None
     best_val_usage_str = None
+    val_gflops=-1
 
     for epoch in range(args.start_epoch, args.epochs):
         # train for one epoch
@@ -304,7 +320,7 @@ def main():
         # evaluate on validation set
         if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
             set_random_seed(args.random_seed)
-            mAP, mmAP, prec1, val_usage_str = validate(val_loader, model, criterion, epoch, tf_writer)
+            mAP, mmAP, prec1, val_usage_str, val_gflops = validate(val_loader, model, criterion, epoch, tf_writer)
 
             # remember best prec@1 and save checkpoint
             map_record.update(mAP)
@@ -340,6 +356,14 @@ def main():
         print(best_val_usage_str)
 
     print("Finished in %.4f seconds"%(time.time() - t_start))
+
+    if test_mode:
+        logger.close_log()
+        os.rename(logger._log_path, ospj(logger._log_dir_name, logger._log_file_name[:-4] +
+                                     "mAP%.2f_acc%.2f_%.6f.txt"%(map_record.best_val, prec_record.best_val, val_gflops
+                                                                 )))
+
+
 
 def set_random_seed(the_seed):
     if args.random_seed >= 0:
@@ -501,11 +525,17 @@ def get_policy_usage_str(r_list, reso_dim):
         num_preds += usage_ratio * tt_vec[action_i]
 
     if args.cnn3d:
-        if args.policy_backbone!="shufflenet3d_0.5":
-            exit("if cnn3d, only using shufflenet3d_0.5 as policy net")
+        if args.policy_backbone!="shufflenet3d_0.5" and args.policy_backbone!="mobilenet3dv2":
+            exit("if cnn3d, only using shufflenet3d_0.5/mobilenet3dv2 as policy net")
         # TODO (policy backbone-shufflenet3d)
-        gflops += 0.003 * avg_frame_ratio / 112 / 112 * args.reso_list[args.policy_input_offset] * args.reso_list[args.policy_input_offset]
-        gflops += 0.0004 * avg_frame_ratio  # TODO (lstm)
+        if args.policy_backbone == "shufflenet3d_0.5":
+            gflops += 42 * avg_frame_ratio / 112 / 112 / 16 / 1000 * args.reso_list[args.policy_input_offset] * args.reso_list[args.policy_input_offset]
+            gflops += 0.0004 * avg_frame_ratio  # TODO (lstm)
+        else:
+            gflops += 549 * avg_frame_ratio / 112 / 112 / 16 / 1000 * args.reso_list[args.policy_input_offset] * args.reso_list[
+                args.policy_input_offset]
+            gflops += 0.0004 * avg_frame_ratio  # TODO (lstm)
+
         time_steps = args.num_segments // args.seg_len
     else:
         gflops += 0.08 * avg_frame_ratio #TODO (policy backbone)
@@ -514,7 +544,7 @@ def get_policy_usage_str(r_list, reso_dim):
 
     printed_str += "GFLOPS: %.6f  AVG_FRAMES: %.3f  NUM_PREDS: %.3f"%(gflops, avg_frame_ratio*args.num_segments, num_preds * time_steps)
 
-    return printed_str
+    return printed_str, gflops
 
 def extra_each_loss_str(each_terms):
     loss_str_list = ["gf"]
@@ -562,13 +592,21 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
 
         target = input_tuple[-1].cuda()
         target_var = torch.autograd.Variable(target)
+
         input = input_tuple[0]
         if args.ada_reso_skip:
             input_var_list=[torch.autograd.Variable(input_item) for input_item in input_tuple[:-1]]
 
-            output, r = model(input=input_var_list, tau=tau)
+            if args.real_scsampler:
+                output, r, real_pred, lite_pred = model(input=input_var_list, tau=tau)
+                if args.sal_rank_loss:
+                    acc_loss = cal_sal_rank_loss(real_pred, lite_pred, target_var)
+                else:
+                    acc_loss = get_criterion_loss(criterion, lite_pred.mean(dim=1), target_var)
+            else:
+                output, r = model(input=input_var_list, tau=tau)
+                acc_loss = get_criterion_loss(criterion, output, target_var)
 
-            acc_loss = get_criterion_loss(criterion, output, target_var)
             if use_ada_framework:
                 acc_loss, eff_loss, each_losses = compute_every_losses(r, acc_loss, epoch)
                 alosses.update(acc_loss.item(), input.size(0))
@@ -582,6 +620,8 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
             input_var = torch.autograd.Variable(input)
             output = model(input_var)
             loss = get_criterion_loss(criterion, output, target_var)
+
+        # print(output.shape)
 
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target[:,0], topk=(1, 5))
@@ -626,7 +666,7 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
             print(print_output)
 
     if use_ada_framework:
-        usage_str = get_policy_usage_str(r_list, model.module.reso_dim)
+        usage_str, gflops = get_policy_usage_str(r_list, model.module.reso_dim)
         print(usage_str)
 
     if tf_writer is not None:
@@ -663,8 +703,15 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
 
             # compute output
             if args.ada_reso_skip:
-                output, r = model(input=input_tuple[:-1], tau=tau)
-                acc_loss = get_criterion_loss(criterion, output, target)
+                if args.real_scsampler:
+                    output, r, real_pred, lite_pred = model(input=input_tuple[:-1], tau=tau)
+                    if args.sal_rank_loss:
+                        acc_loss = cal_sal_rank_loss(real_pred, lite_pred, target)
+                    else:
+                        acc_loss = get_criterion_loss(criterion, lite_pred.mean(dim=1), target)
+                else:
+                    output, r = model(input=input_tuple[:-1], tau=tau)
+                    acc_loss = get_criterion_loss(criterion, output, target)
                 if use_ada_framework:
                     acc_loss, eff_loss, each_losses = compute_every_losses(r, acc_loss, epoch)
                     alosses.update(acc_loss.item(), input.size(0))
@@ -719,8 +766,10 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
     print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
               .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses))
 
+    gflops = 0
+
     if use_ada_framework:
-        usage_str = get_policy_usage_str(r_list, model.module.reso_dim)
+        usage_str, gflops = get_policy_usage_str(r_list, model.module.reso_dim)
         print(usage_str)
 
     if tf_writer is not None:
@@ -728,7 +777,7 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
         tf_writer.add_scalar('acc/test_top1', top1.avg, epoch)
         tf_writer.add_scalar('acc/test_top5', top5.avg, epoch)
 
-    return mAP, mmAP, top1.avg, usage_str if use_ada_framework else None
+    return mAP, mmAP, top1.avg, usage_str if use_ada_framework else None, gflops
 
 def save_checkpoint(state, is_best, exp_full_path):
     filename = '%s/models/ckpt%04d.pth.tar' % (exp_full_path, state["epoch"])
@@ -759,14 +808,39 @@ def setup_log_directory(logger, exp_header):
     exp_full_name = "g%s_%s"%(logger._timestr, exp_header)
     if args.skip_training:
         exp_full_name+="_test"
-    exp_full_path = ospj(common.EXPS_PATH, exp_full_name)
-    os.makedirs(exp_full_path)
-    os.makedirs(ospj(exp_full_path,"models"))
-    logger.create_log(exp_full_path)
+    if test_mode:
+        exp_full_path = ospj(common.EXPS_PATH, args.test_from)
+    else:
+        exp_full_path = ospj(common.EXPS_PATH, exp_full_name)
+        os.makedirs(exp_full_path)
+        os.makedirs(ospj(exp_full_path,"models"))
+    logger.create_log(exp_full_path, test_mode, args.num_segments, args.batch_size, args.top_k)
     return exp_full_path
 
 
-
 if __name__ == '__main__':
-    main()
+    args = parser.parse_args()
+    test_mode = (args.test_from != "")
+    if test_mode: #TODO test mode
+        print("TEST MODE")
+        if args.skip_training == False:
+            print("Set args.skip_training to True...")
+            args.skip_training = True
+        #TODO(debug) try check batchsize and init tau
+        t_list = [8, 16, 25]
+        bs_list = [args.batch_size, args.batch_size, args.batch_size//2+1]
+        k_list=[args.top_k]
+        if args.real_scsampler:
+            k_list = [1, 4, 8, 10, 12]
 
+        for t_i, t in enumerate(t_list):
+            args.num_segments = t
+            args.batch_size = bs_list[t_i]
+            for k in k_list:
+                if k>t:
+                    continue
+                print("TEST t:%d bs:%d k:%d"%(t, bs_list[t_i], k))
+                args.top_k = k
+                main()
+    else: #TODO normal mode
+        main()

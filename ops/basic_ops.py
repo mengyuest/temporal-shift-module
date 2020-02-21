@@ -43,19 +43,32 @@ class ConsensusModule(torch.nn.Module):
         self.dim = dim
         self.args=args
 
-    def forward(self, input):
+    def forward(self, input, lite_input=None):
         if self.consensus_type=="scsampler": # TODO(yue)
+            # res = []
+            # ind = torch.topk(torch.max(input.detach(), dim=2).values, dim=1, k=self.args.top_k).indices
+            # for bi in range(input.shape[0]):
+            #     res.append(torch.stack([input[bi, k, :] for k in ind[bi]]))
+            # output = torch.mean(torch.stack(res), dim=1, keepdim=True)
+
+            if lite_input is None:
+                lite_input = input
+
+            # print(lite_input.shape)
+            # print(input.shape)
+
             res = []
-            ind = torch.topk(torch.max(input.detach(), dim=2).values, dim=1, k=self.args.top_k).indices
-            for bi in range(input.shape[0]):
+            ind = torch.topk(torch.max(lite_input.detach(), dim=2).values, dim=1, k=self.args.top_k).indices
+            for bi in range(lite_input.shape[0]):
                 res.append(torch.stack([input[bi, k, :] for k in ind[bi]]))
             output = torch.mean(torch.stack(res), dim=1, keepdim=True)
+
+            if self.args.real_scsampler:
+                return output, ind
+
             return output
         else:
             return SegmentConsensus(self.consensus_type, self.dim)(input)
-
-
-
 
 # class ConsensusModule(torch.nn.Module):
 #

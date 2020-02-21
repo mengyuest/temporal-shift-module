@@ -173,3 +173,4 @@ if __name__ == "__main__":
     model = get_model(groups=3, num_classes=600, width_mult=1)
     flops, params = profile(model, inputs=(dummy_data,))
     print("shuffle", flops / 1e9, params / 1e6)
+

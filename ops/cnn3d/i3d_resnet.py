@@ -250,4 +250,3 @@ if __name__ == '__main__':
         res3d[depth] = i3d_resnet(depth, 200, without_t_stride=False)
         flops, params = profile(res3d[depth], inputs=(dummy_data,))
         print("res3d%d"%(depth),flops/ 1e9, params / 1e6)
-

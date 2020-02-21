@@ -35,7 +35,7 @@ parser.add_argument('--lr', '--learning-rate', default=0.001, type=float,
                     metavar='LR', help='initial learning rate')
 parser.add_argument('--lr_type', default='step', type=str,
                     metavar='LRtype', help='learning rate type')
-parser.add_argument('--lr_steps', default=[50, 100], type=float, nargs="+",
+parser.add_argument('--lr_steps', default=[20, 40], type=float, nargs="+",  #TODO(changed from [50,100] to [20,40])
                     metavar='LRSteps', help='epochs to decay learning rate by 10')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
@@ -85,7 +85,7 @@ parser.add_argument('--rescale_pattern', default="L", type=str, help='The offlin
 parser.add_argument('--ada_reso_skip', action='store_true', help='adaptively select scale and choose to skip')
 parser.add_argument('--reso_list', default=[224], type=int, nargs='+', help="list of resolutions")
 parser.add_argument('--skip_list', default=[], type=int, nargs='+', help="list of frames to skip")
-parser.add_argument('--backbone_list', default=['resnet50'], type=str, nargs='+', help="backbones for diff resos")
+parser.add_argument('--backbone_list', default=[], type=str, nargs='+', help="backbones for diff resos")
 parser.add_argument('--shared_backbone', action='store_true', help="share same backbone weight")
 parser.add_argument('--accuracy_weight', default=1., type=float)
 parser.add_argument('--efficency_weight', default=0., type=float)
@@ -129,27 +129,51 @@ parser.add_argument('--lite_mode',action='store_true') # TODO(yue) for 2 gpus an
 
 # TODO: loading order: ImageNet->Joint Model->specific modules (better not using both joint and specific)
 
-# TODO: freezing
+# TODO(yue) try different losses for efficiency terms
 parser.add_argument('--use_gflops_loss', action='store_true') #TODO(yue) use flops as loss assignment
 parser.add_argument('--head_loss_weight', type=float, default=1e-6) #TODO(yue) punish to the high resolution selection
 parser.add_argument('--frames_loss_weight', type=float, default=1e-6) #TODO(yue) use num_frames as a loss assignment
-parser.add_argument('--consensus_type', type=str, default='avg') #TODO can also use scsampler!
-parser.add_argument('--top_k', type=int, default=5) #TODO can also use scsampler!
 
+# TODO(yue) oracle scsampler (from ListenToLook ideas)
+parser.add_argument('--consensus_type', type=str, default='avg') #TODO can also use scsampler!
+parser.add_argument('--top_k', type=int, default=10) #TODO can also use scsampler!
+
+#TODO(yue) finetuning and testing
 parser.add_argument('--base_pretrained_from', type=str, default='', help='for base model pretrained path') #TODO can also use scsampler!
 parser.add_argument('--skip_training',action='store_true') #TODO(yue) just doing eval
-
 parser.add_argument('--freeze_policy', action='store_true') #TODO(yue) fix the policy
-parser.add_argument('--random_seed', type=int, default=1007)
 
+#TODO(yue) for reproducibility
+parser.add_argument('--random_seed', type=int, default=1007)
 parser.add_argument('--stabilize_order', action='store_true')
 
+#TODO(yue) for FCVID or datasets where eval is too heavy
 parser.add_argument('--partial_fcvid_eval', action='store_true')
 parser.add_argument('--partial_ratio', type=float, default=0.2)
 
+#TODO(yue) 3d-cnn
 parser.add_argument('--cnn3d', action='store_true')
 parser.add_argument('--seg_len',type=int, default=16)
-
 parser.add_argument('--3d_pretrained_uses', type=str, default='inflation') # if not inflation, maybe jester
+
 parser.add_argument('--center_crop', action='store_true')
 parser.add_argument('--random_crop', action='store_true')
+
+#TODO(yue) real SCSampler (we also use --top_k to select frames, and use consensus type=='scsampler')
+# parser.add_argument('--top_k', type=int, default=5) #TODO can also use scsampler!
+parser.add_argument('--real_scsampler', action='store_true')
+parser.add_argument('--sal_rank_loss', action='store_true')
+parser.add_argument('--frame_independent', action='store_true') #TODO use tsn in models_ada
+parser.add_argument('--freeze_backbone', action='store_true')
+
+#TODO(yue)
+# 1. reproduciable
+# 2. t=8,16,25
+# 3. dense/uniform sampling
+# 4. in-place writing(also write inside the file name for FLOPS, mAP and accuracy)
+parser.add_argument('--test_from', type=str, default="")
+
+
+#TODO(yue) mask
+
+#TODO(yue) visualizations

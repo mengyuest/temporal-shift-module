@@ -53,7 +53,7 @@ class TSN_Ada(nn.Module):
         self.rescale_to = rescale_to
         self.rescale_pattern = rescale_pattern
         self.args = args
-        base_model = self.args.backbone_list[0]
+        base_model = self.args.backbone_list[0] if len(self.args.backbone_list)>=1 else None
         self.base_model_name = base_model
         self.num_class = num_class
 
@@ -193,7 +193,7 @@ class TSN_Ada(nn.Module):
         self.input_mean = [0.485, 0.456, 0.406]
         self.input_std = [0.229, 0.224, 0.225]
 
-        if self.args.ada_reso_skip and len(self.args.backbone_list) >= 1:
+        if self.args.ada_reso_skip:# and len(self.args.backbone_list) >= 1:
             for bbi, backbone_name in enumerate(self.args.backbone_list):
                 shall_pretrain = len(self.args.model_paths) == 0 or self.args.model_paths[bbi].lower() != 'none'
 
@@ -336,8 +336,13 @@ class TSN_Ada(nn.Module):
         std = 0.001
         if self.args.ada_reso_skip:
             setattr(self.lite_backbone, self.lite_backbone.last_layer_name, nn.Dropout(p=self.dropout))
-            self.linear = nn.Linear(self.args.hidden_dim, self.action_dim)
-            self.lite_fc = nn.Linear(self.args.hidden_dim, num_class)
+
+            if self.args.frame_independent:
+                self.linear = nn.Linear(self.policy_feat_dim, self.action_dim)
+                self.lite_fc = nn.Linear(self.policy_feat_dim, num_class)
+            else:
+                self.linear = nn.Linear(self.args.hidden_dim, self.action_dim)
+                self.lite_fc = nn.Linear(self.args.hidden_dim, num_class)
             if hasattr(self.linear, 'weight'):
                 normal_(self.linear.weight, 0, std)
                 constant_(self.linear.bias, 0)
@@ -360,6 +365,9 @@ class TSN_Ada(nn.Module):
                     normal_(new_fc.weight, 0, std)
                     constant_(new_fc.bias, 0)
                 self.new_fc_list.append(new_fc)
+            return None
+
+        if self.base_model_name == None:
             return None
 
         if self.args.cnn3d and ("mobilenet3dv2"==self.base_model_name or "shufflenet3d"in self.base_model_name):
@@ -538,7 +546,7 @@ class TSN_Ada(nn.Module):
 
         online_policy = False
         if not any([self.args.offline_lstm_all, self.args.offline_lstm_last, self.args.random_policy,
-                    self.args.all_policy]):
+                    self.args.all_policy, self.args.real_scsampler]):
             online_policy = True
             r_list=[]
 
@@ -549,8 +557,12 @@ class TSN_Ada(nn.Module):
         if self.args.stabilize_order == False or online_policy == False:
             for t in range(self.time_steps):
                 hx, cx = self.rnn(feat_lite[:, t], (hx, cx))
-                p_t = torch.log(F.softmax(self.linear(hx), dim=1))
-                j_t = self.lite_fc(hx)
+                if self.args.frame_independent:
+                    p_t = torch.log(F.softmax(self.linear(feat_lite[:, t]), dim=1))
+                    j_t = self.lite_fc(feat_lite[:, t])
+                else:
+                    p_t = torch.log(F.softmax(self.linear(hx), dim=1))
+                    j_t = self.lite_fc(hx)
                 logits_list.append(p_t) #TODO as logit
                 lite_j_list.append(j_t) #TODO as pred
 
@@ -634,23 +646,27 @@ class TSN_Ada(nn.Module):
             else:
                 return lite_j_list.mean(dim=1), None
 
-        if self.args.random_policy: #TODO(yue) random policy
-            r_all = torch.zeros(batch_size, self.time_steps, self.action_dim).cuda()
-            for i_bs in range(batch_size):
-                for i_t in range(self.time_steps):
-                    r_all[i_bs, i_t, torch.randint(self.action_dim,[1])] = 1.0
-        elif self.args.all_policy: #TODO(yue) all policy: take all
-            r_all = torch.ones(batch_size, self.time_steps, self.action_dim).cuda()
-        else: #TODO(yue) online policy
-            # logits = torch.stack(logits_list, dim=1)  # N*T*K
-            # r_all = F.gumbel_softmax(logits=logits, tau=kwargs["tau"], hard=True, eps=1e-10, dim=-1)
-            if self.args.stabilize_order == False or online_policy == False:
-                r_all = torch.stack(r_list, dim=1)
+        if self.args.real_scsampler:
+            real_pred = base_out_list[0]
+            lite_pred = torch.stack(lite_j_list, dim=1)
+            output, ind = self.consensus(real_pred, lite_pred)
+            return output.squeeze(1), ind, real_pred, lite_pred
+        else:
+            if self.args.random_policy: #TODO(yue) random policy
+                r_all = torch.zeros(batch_size, self.time_steps, self.action_dim).cuda()
+                for i_bs in range(batch_size):
+                    for i_t in range(self.time_steps):
+                        r_all[i_bs, i_t, torch.randint(self.action_dim,[1])] = 1.0
+            elif self.args.all_policy: #TODO(yue) all policy: take all
+                r_all = torch.ones(batch_size, self.time_steps, self.action_dim).cuda()
+            else: #TODO(yue) online policy
+                # logits = torch.stack(logits_list, dim=1)  # N*T*K
+                # r_all = F.gumbel_softmax(logits=logits, tau=kwargs["tau"], hard=True, eps=1e-10, dim=-1)
+                if self.args.stabilize_order == False or online_policy == False:
+                    r_all = torch.stack(r_list, dim=1)
 
-        output = self.combine_logits(r_all, base_out_list)
-
-
-        return output.squeeze(1), r_all
+            output = self.combine_logits(r_all, base_out_list)
+            return output.squeeze(1), r_all
 
     def combine_logits(self, r, base_out_list):
         # TODO r           N, T, K  (0-origin, 1-low, 2-skip)
@@ -782,3 +798,4 @@ class TSN_Ada(nn.Module):
         elif self.modality == 'RGBDiff':
             return torchvision.transforms.Compose([GroupMultiScaleCrop(self.input_size, [1, .875, .75]),
                                                    GroupRandomHorizontalFlip(is_flow=False)])
+

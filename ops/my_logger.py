@@ -8,9 +8,10 @@ class Logger(object):
         self._terminal = sys.stdout
         self._timestr = datetime.fromtimestamp(time.time()).strftime("%m%d-%H%M%S")
         self._log_path = None
+        self._log_dir_name = None
+        self._log_file_name = None
         self._history_records = [" ".join(["python"] + sys.argv + ["\n"])]  # TODO(yue) remember the CLI input
         self._write_mode = "bear_in_mind"
-
         self._prefix = log_prefix
         # TODO(yue) implement the breakpoint reloading
 
@@ -21,8 +22,13 @@ class Logger(object):
     # take_notes:     RAM->FILE
     # normal:         terminal->FILE
 
-    def create_log(self, log_path):
-        self._log_path = log_path + "/log-%s.txt" % self._timestr
+    def create_log(self, log_path, test_mode, t, bs, k):
+        self._log_dir_name = log_path
+        if test_mode:
+            self._log_file_name = "test-%s-t%d-bz%d-k%d.txt" % (self._timestr, t, bs, k)
+        else:
+            self._log_file_name ="log-%s.txt" % self._timestr
+        self._log_path = log_path + "/" + self._log_file_name
         self.log = open(self._log_path, "a", 1)
         self._write_mode = "take_notes"
         for record in self._history_records:
@@ -43,3 +49,7 @@ class Logger(object):
 
     def flush(self):
         pass
+
+    def close_log(self):
+        a=1
+        #self.log.close()

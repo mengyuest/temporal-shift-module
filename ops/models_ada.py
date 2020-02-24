@@ -821,3 +821,4 @@ class TSN_Ada(nn.Module):
         elif self.modality == 'RGBDiff':
             return torchvision.transforms.Compose([GroupMultiScaleCrop(self.input_size, [1, .875, .75]),
                                                    GroupRandomHorizontalFlip(is_flow=False)])
+

@@ -35,7 +35,7 @@ parser.add_argument('--lr', '--learning-rate', default=0.001, type=float,
                     metavar='LR', help='initial learning rate')
 parser.add_argument('--lr_type', default='step', type=str,
                     metavar='LRtype', help='learning rate type')
-parser.add_argument('--lr_steps', default=[20, 40], type=float, nargs="+",  #TODO(changed from [50,100] to [20,40])
+parser.add_argument('--lr_steps', default=[50, 100], type=float, nargs="+",  #TODO(changed from [50,100] to [20,40])
                     metavar='LRSteps', help='epochs to decay learning rate by 10')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
@@ -182,3 +182,4 @@ parser.add_argument('--ada_crop_list', default=[], type=int, nargs="+", help='nu
 
 #TODO(yue) visualizations
 parser.add_argument('--save_meta', action='store_true')
+

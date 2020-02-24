@@ -102,6 +102,29 @@ def return_somethingv2(modality):
         raise NotImplementedError('no such modality:'+modality)
     return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
 
+def return_ministh(modality):
+    filename_categories = ospj(common.MINISTH_META_PATH, 'classIndMiniSth2.txt')
+    if modality == 'RGB':
+        root_data = common.MINISTH_FRAMES
+        filename_imglist_train = ospj(common.MINISTH_META_PATH, 'mini_train_videofolder.txt')
+        filename_imglist_val = ospj(common.MINISTH_META_PATH, 'mini_val_videofolder.txt')
+        prefix = '{:05d}.jpg'
+    else:
+        raise NotImplementedError('no such modality:' + modality)
+    return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
+
+
+def return_minik(modality):
+    filename_categories = ospj(common.MINIK_META_PATH, 'classIndMiniK.txt')
+    if modality == 'RGB':
+        root_data = common.MINIK_FRAMES
+        filename_imglist_train = ospj(common.MINIK_META_PATH, 'mini_train_videofolder.txt')
+        filename_imglist_val = ospj(common.MINIK_META_PATH, 'mini_val_videofolder.txt')
+        prefix = '{:05d}.jpg'
+    else:
+        raise NotImplementedError('no such modality:' + modality)
+    return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
+
 
 def return_jester(modality):
     filename_categories = 'jester/category.txt'
@@ -131,7 +154,8 @@ def return_dataset(dataset, modality):
     dict_single = {'jester': return_jester, 'something': return_something, 'somethingv2': return_somethingv2,
                    'ucf101': return_ucf101, 'hmdb51': return_hmdb51,
                    'kinetics': return_kinetics,
-                   'actnet': return_actnet, 'fcvid':return_fcvid} # TODO(yue)
+                   'actnet': return_actnet, 'fcvid':return_fcvid,
+                   'ministh': return_ministh, 'minik': return_minik} # TODO(yue)
     if dataset in dict_single:
         file_categories, file_imglist_train, file_imglist_val, root_data, prefix = dict_single[dataset](modality)
     else:

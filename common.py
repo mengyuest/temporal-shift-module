@@ -13,6 +13,13 @@ if "c699" in host_name and user_name in ["sunxm"]:
     DATA_PREFIX="data"
     LOG_PREFIX="snippets"
     PRETRAIN_PATH =ospj(ROOT_DIR, LOG_PREFIX,"logs_tsm")
+# TODO WSC (power machines)
+elif "c699" in host_name and user_name in ["cvpr"]:
+    ROOT_DIR="/gpfs/wscgpfs02/cvpr"
+    CODE_PREFIX = "code/"
+    DATA_PREFIX="datasets"
+    LOG_PREFIX=""
+    PRETRAIN_PATH =ospj(ROOT_DIR, LOG_PREFIX,"logs_tsm")
 
 # TODO DIVA [01-05]
 elif "diva0" in host_name and user_name in ["meng", "cclin", "rameswar"]:
@@ -38,10 +45,18 @@ CODE_PATH=ospj(ROOT_DIR, CODE_PREFIX,"temporal-shift-module")
 DATA_PATH = ospj(ROOT_DIR, DATA_PREFIX)
 STHV2_PATH=ospj(DATA_PATH, "something/v2")
 STHV2_FRAMES=ospj(STHV2_PATH, '20bn-something-something-v2-frames')
+
+#TODO(yue) UCF101
 UCF101_PATH=ospj(DATA_PATH, "UCF101")
 UCF101_META_PATH = ospj(UCF101_PATH, "file_list")
 UCF101_FRAMES=ospj(UCF101_PATH, 'frame')
 
+#TODO(yue) HMDB51
+HMDB51_PATH=ospj(DATA_PATH, "HMDB51")
+HMDB51_META_PATH = ospj(HMDB51_PATH, "split")
+HMDB51_FRAMES=ospj(HMDB51_PATH, 'frame')
+
+#TODO(yue) activity-net-v1.3
 ACTNET_PATH=ospj(DATA_PATH, "activity-net-v1.3")
 if "dcc" in host_name:
     ACTNET_PATH = ACTNET_PATH.replace("longxun/datasets","multimodalvideo")
@@ -55,9 +70,18 @@ if "dcc" in host_name:
 FCVID_META_PATH = FCVID_PATH
 FCVID_FRAMES=ospj(FCVID_PATH, 'frames')
 
-HMDB51_PATH=ospj(DATA_PATH, "HMDB51")
-HMDB51_META_PATH = ospj(HMDB51_PATH, "split")
-HMDB51_FRAMES=ospj(HMDB51_PATH, 'frame')
+#TODO(yue) mini-something
+MINISTH_PATH=ospj(DATA_PATH, "something2something-v2")
+if "dcc" in host_name:
+    MINISTH_PATH = MINISTH_PATH.replace("longxun/datasets","multimodalvideo")
+MINISTH_META_PATH = MINISTH_PATH
+MINISTH_FRAMES=ospj(MINISTH_PATH, 'frames')
+
+#TODO(yue) mini-kinetics
+MINIK_PATH=ospj(DATA_PATH, "kinetics-qf")
+if "dcc" in host_name:
+    MINIK_PATH = MINIK_PATH.replace("longxun/datasets","multimodalvideo")
+MINIK_META_PATH = MINIK_PATH
+MINIK_FRAMES=ospj(MINIK_PATH, 'images')
 
 EXPS_PATH=ospj(ROOT_DIR, LOG_PREFIX,"logs_tsm")
-

@@ -91,6 +91,8 @@ class TSN(nn.Module):
     def _prepare_tsn(self, num_class):
         if self.args.cnn3d and ("mobilenet3dv2"==self.base_model_name or "shufflenet3d"in self.base_model_name):
             feature_dim = getattr(self.base_model, self.base_model.last_layer_name)[1].in_features
+        elif "mobilenet_v2"==self.base_model_name:
+            feature_dim = getattr(self.base_model, self.base_model.last_layer_name)[1].in_features
         else:
             feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
         if self.dropout == 0:
@@ -99,7 +101,7 @@ class TSN(nn.Module):
         else:
             setattr(self.base_model, self.base_model.last_layer_name, nn.Dropout(p=self.dropout))
             self.new_fc = nn.Linear(feature_dim, num_class)
-
+        # print(self.new_fc, feature_dim, num_class)
         std = 0.001
         if self.new_fc is None:
             normal_(getattr(self.base_model, self.base_model.last_layer_name).weight, 0, std)
@@ -142,9 +144,12 @@ class TSN(nn.Module):
                 self.input_mean = [0.485, 0.456, 0.406] + [0] * 3 * self.new_length
                 self.input_std = self.input_std + [np.mean(self.input_std) * 2] * 3 * self.new_length
 
-        elif base_model == 'mobilenetv2':
-            from archs.mobilenet_v2 import mobilenet_v2, InvertedResidual
-            self.base_model = mobilenet_v2(shall_pretrain)
+        elif base_model == 'mobilenet_v2':
+            #TODO(mobilenet)
+            # from archs.mobilenet_v2 import mobilenet_v2, InvertedResidual
+            # self.base_model = mobilenet_v2(shall_pretrain)
+            from archs.mobilenet_v2 import InvertedResidual
+            self.base_model = getattr(torchvision.models, base_model)(shall_pretrain)
 
             self.base_model.last_layer_name = 'classifier'
             self.input_size = 224
@@ -512,4 +517,3 @@ class TSN(nn.Module):
         elif self.modality == 'RGBDiff':
             return torchvision.transforms.Compose([GroupMultiScaleCrop(self.input_size, [1, .875, .75]),
                                                    GroupRandomHorizontalFlip(is_flow=False)])
-

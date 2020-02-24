@@ -173,7 +173,12 @@ parser.add_argument('--freeze_backbone', action='store_true')
 # 4. in-place writing(also write inside the file name for FLOPS, mAP and accuracy)
 parser.add_argument('--test_from', type=str, default="")
 
+parser.add_argument('--with_test', action='store_true')
+
+#TODO(yue) adaptive-cropping (only 1, 5, 9)
+parser.add_argument('--ada_crop_list', default=[], type=int, nargs="+", help='num of anchor points per scaling')
 
 #TODO(yue) mask
 
 #TODO(yue) visualizations
+parser.add_argument('--save_meta', action='store_true')

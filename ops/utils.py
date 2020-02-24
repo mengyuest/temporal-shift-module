@@ -105,3 +105,6 @@ class Recorder:
 
     def is_current_best(self):
         return self.best_at == len(self.history)-1
+
+
+

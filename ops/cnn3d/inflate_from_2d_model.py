@@ -1,23 +1,39 @@
 import torch
 from collections import OrderedDict
-def inflate_from_2d_model(state_dict_2d, state_dict_3d, skipped_keys=None, inflated_dim=2, is_mobilenet3d_v2=False):
-    #TODO(yue)
-    if is_mobilenet3d_v2:
-        # TODO(DEBUG)
-        pairs = [
-            ["conv.0.0", "conv.0"],
-            ["conv.0.1", "conv.1"],
-            ["conv.1.0", "conv.3"],
-            ["conv.1.1", "conv.4"],
-            ["conv.2", "conv.6"],
-            ["conv.3", "conv.7"],
-            ["conv.1", "conv.3"],
-            # ["conv.2", "conv.4"],
-        ]
 
-        old_keys_del = []
-        new_keys_add = []
-        for old_key in state_dict_2d.keys():
+def get_mobv2_new_sd(old_sd, reverse=False):
+    # TODO(DEBUG)
+    pairs = [
+        ["conv.0.0", "conv.0"],
+        ["conv.0.1", "conv.1"],
+        ["conv.1.0", "conv.3"],
+        ["conv.1.1", "conv.4"],
+        ["conv.2", "conv.6"],
+        ["conv.3", "conv.7"],
+        ["conv.1", "conv.3"],
+        # ["conv.2", "conv.4"],
+    ]
+
+    old_keys_del = []
+    new_keys_add = []
+    if reverse:
+        for old_key in old_sd.keys():
+            if "features.0" not in old_key:
+                for pair in pairs:
+                    if pair[1] in old_key:
+                        if pair[1] in ["conv.4", "conv.3"]:
+                            idx = int(pair[1].split(".")[1])
+                            if "features.1." in old_key:
+                                new_key = old_key.replace(pair[1], "conv.%d" % (idx - 2))
+                            else:
+                                new_key = old_key.replace(pair[1], "conv.1.%d" % (idx - 3))
+                        else:
+                            new_key = old_key.replace(pair[1], pair[0])
+                        old_keys_del.append(old_key)
+                        new_keys_add.append(new_key)
+                        break
+    else:
+        for old_key in old_sd.keys():
             if "features.0" not in old_key:
                 for pair in pairs:
                     if pair[0] in old_key:
@@ -28,16 +44,20 @@ def inflate_from_2d_model(state_dict_2d, state_dict_3d, skipped_keys=None, infla
                         old_keys_del.append(old_key)
                         new_keys_add.append(new_key)
                         break
-        state_dict_2d_new = {}
-        for key in state_dict_2d:
-            if key not in old_keys_del:
-                state_dict_2d_new[key] = state_dict_2d[key]
+    state_dict_2d_new = {}
+    for key in old_sd:
+        if key not in old_keys_del:
+            state_dict_2d_new[key] = old_sd[key]
 
-        for i in range(len(old_keys_del)):
-            state_dict_2d_new[new_keys_add[i]] = state_dict_2d[old_keys_del[i]]
+    for i in range(len(old_keys_del)):
+        state_dict_2d_new[new_keys_add[i]] = old_sd[old_keys_del[i]]
 
-        state_dict_2d = state_dict_2d_new
+    return state_dict_2d_new
 
+def inflate_from_2d_model(state_dict_2d, state_dict_3d, skipped_keys=None, inflated_dim=2, is_mobilenet3d_v2=False):
+    #TODO(yue)
+    if is_mobilenet3d_v2:
+        state_dict_2d = get_mobv2_new_sd(state_dict_2d)
 
     if skipped_keys is None:
         skipped_keys = []

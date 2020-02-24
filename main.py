@@ -12,6 +12,7 @@ import time
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim
+import thop
 from torch.nn.utils import clip_grad_norm_
 
 from ops.dataset import TSNDataSet
@@ -28,14 +29,29 @@ from ops.my_logger import Logger
 
 from ops.sal_rank_loss import cal_sal_rank_loss
 
-best_prec1 = 0
-num_class = -1
-use_ada_framework = False
-NUM_LOSSES=10
+from tools.net_flops_table import get_gflops_params, feat_dim_dict
+# from ops.utils import get_mobv2_new_sd
 
 # TODO(yue)
 import common
 from os.path import join as ospj
+
+
+
+best_prec1 = 0
+num_class = -1
+use_ada_framework = False
+NUM_LOSSES=10
+gflops_table = {}
+test_mode = None
+def reset_global_variables():
+    global best_prec1, num_class, use_ada_framework, NUM_LOSSES, gflops_table, test_mode
+    best_prec1 = 0
+    num_class = -1
+    use_ada_framework = False
+    NUM_LOSSES = 10
+    gflops_table = {}
+    test_mode = None
 
 def load_to_sd(model_dict, model_path, module_name, fc_name, resolution, apple_to_apple=False):
     if ".pth" in model_path:
@@ -55,6 +71,13 @@ def load_to_sd(model_dict, model_path, module_name, fc_name, resolution, apple_t
         nowhere_ks = []
         notfind_ks = []
 
+        #TODO(need to change the naming for layers IDKY for mobv2, similar to 3d case)
+        # if "lite_backbone" in module_name:
+        #     if args.policy_backbone=="mobilenet_v2":
+        #         sd = get_mobv2_new_sd(sd, reverse=True)
+        #         print(model.module.lite_fc)
+        #         print(sd.keys())
+
         for k, v in sd.items():  # TODO(yue) base_model->base_model_list.i
             new_k = k.replace("base_model", module_name)
             new_k = new_k.replace("new_fc", fc_name)
@@ -72,11 +95,19 @@ def load_to_sd(model_dict, model_path, module_name, fc_name, resolution, apple_t
                 if k not in sd:
                     notfind_ks.append(k)
         if len(nowhere_ks) != 0:
-            print("Vars not in ada network, but are in pretrained weights\n" + ("\n%sNEW  "%module_name).join(nowhere_ks))
+            print("Vars not in ada network, but are in pretrained weights\n" + ("\n%s NEW  "%module_name).join(nowhere_ks))
         if len(notfind_ks) != 0:
-            print("Vars not in pretrained weights, but are needed in ada network\n" + ("\n%sLACK "%module_name).join(notfind_ks))
+            print("Vars not in pretrained weights, but are needed in ada network\n" + ("\n%s LACK "%module_name).join(notfind_ks))
         for k, k_new in replace_dict:
             sd[k_new] = sd.pop(k)
+
+        #print(sd.keys())
+
+        if "lite_backbone" in module_name:
+            #TODO not loading new_fc in this case, because we are using hidden_dim
+            if args.frame_independent==False:
+                del sd["module.lite_fc.weight"]
+                del sd["module.lite_fc.bias"]
         return {k: v for k, v in sd.items() if k in model_dict}
     else:
         print("skip loading\t%s\t(res:%3d) from\t%s"%("%-25s"%module_name, resolution, model_path))
@@ -84,7 +115,7 @@ def load_to_sd(model_dict, model_path, module_name, fc_name, resolution, apple_t
 
 def main():
     t_start = time.time()
-    global args, best_prec1, num_class, use_ada_framework
+    global args, best_prec1, num_class, use_ada_framework #, model
 
     set_random_seed(args.random_seed)
     use_ada_framework = args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False and args.real_scsampler == False
@@ -99,6 +130,11 @@ def main():
         full_arch_name += '_shift{}_{}'.format(args.shift_div, args.shift_place)
     if args.temporal_pool:
         full_arch_name += '_tpool'
+
+    if use_ada_framework:
+        init_gflops_table()
+        if len(args.ada_crop_list)==0:
+            args.ada_crop_list=[1 for _ in args.reso_list]
 
     if args.ada_reso_skip:
         MODEL_NAME = TSN_Ada
@@ -306,6 +342,7 @@ def main():
     prec_record = Recorder()
     best_train_usage_str = None
     best_val_usage_str = None
+    best_tau = args.init_tau
     val_gflops=-1
 
     for epoch in range(args.start_epoch, args.epochs):
@@ -313,14 +350,14 @@ def main():
         if not args.skip_training:
             set_random_seed(args.random_seed+epoch)
             adjust_learning_rate(optimizer, epoch, args.lr_type, args.lr_steps)
-            train_usage_str = train(train_loader, model, criterion, optimizer, epoch, tf_writer)
+            train_usage_str = train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_path, tf_writer)
         else:
             train_usage_str = "No training usage stats (Eval Mode)"
 
         # evaluate on validation set
         if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
             set_random_seed(args.random_seed)
-            mAP, mmAP, prec1, val_usage_str, val_gflops = validate(val_loader, model, criterion, epoch, tf_writer)
+            mAP, mmAP, prec1, val_usage_str, val_gflops = validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writer)
 
             # remember best prec@1 and save checkpoint
             map_record.update(mAP)
@@ -348,6 +385,9 @@ def main():
                 'best_prec1': prec_record.best_val,
             }, map_record.is_current_best(), exp_full_path)
 
+            if map_record.is_current_best():
+                best_tau = get_current_temperature(epoch)
+
     if use_ada_framework:
         print("Best train usage:")
         print(best_train_usage_str)
@@ -358,10 +398,37 @@ def main():
     print("Finished in %.4f seconds"%(time.time() - t_start))
 
     if test_mode:
-        logger.close_log()
         os.rename(logger._log_path, ospj(logger._log_dir_name, logger._log_file_name[:-4] +
-                                     "mAP%.2f_acc%.2f_%.6f.txt"%(map_record.best_val, prec_record.best_val, val_gflops
+                                     "_m_%.2f_a_%.2f_f_%.4f.txt"%(map_record.best_val*100, prec_record.best_val*100, val_gflops
                                                                  )))
+
+    if args.with_test:
+        if args.test_from != "": #TODO(yue) if any program uses test_from, we won't use this part of code
+            return
+
+        # TODO(yue) go back to shell() and multiple times to main()
+        reset_global_variables()
+
+        args.policy_path = ""
+        args.model_paths = []
+        args.partial_fcvid_eval = False
+        args.skip_training = True
+        args.test_from = exp_full_path.split("/")[-1]
+        args.init_tau = best_tau
+
+        # TODO default we use t=16
+        # TODO if t<16, then we should decrease batchsize to handle t=8/16/25
+        # TODO in extreme cases we cannot handle it
+        if args.num_segments < 16:
+            args.batch_size = max(args.batch_size * args.num_segments // 16, 1)
+
+        print("======== Now come to after-train stage ========")
+        print("args.test_from:", args.test_from)
+        print("args.init_tau:", args.init_tau)
+        print("args.batch_size:", args.batch_size)
+        print()
+
+        shell()
 
 
 
@@ -370,21 +437,30 @@ def set_random_seed(the_seed):
         np.random.seed(the_seed)
         torch.manual_seed(the_seed)
 
+def init_gflops_table():
+    global gflops_table
+    gflops_table = {}
+    seg_len = args.seg_len if args.cnn3d else -1
+    for i, backbone in enumerate(args.backbone_list):
+        gflops_table[backbone+str(args.reso_list[i])] = get_gflops_params(backbone, args.reso_list[i], num_class, seg_len)[0]
+    gflops_table["policy"] = get_gflops_params(args.policy_backbone, args.reso_list[args.policy_input_offset], num_class, seg_len)[0]
+    gflops_table["lstm"] = 2 * (feat_dim_dict[args.policy_backbone] ** 2) /1000000000
+
 
 def get_gflops_t_tt_vector():
-    x2_coeff = {"resnet18": 36144, "resnet34": 73008, "resnet50": 76848, "resnet101": 150832,
-                "efficientnet-b0":7772.6403, "efficientnet-b1":13950.8929, "efficientnet-b2":19929.8469,
-                "efficientnet-b3":35873.7245, "efficientnet-b4":83705.3571, "efficientnet-b5":197305.4847,
-                "shufflenet3d_0.5": 42, "shufflenet3d_1.0": 125, "shufflenet3d_1.5": 235, "shufflenet3d_2.0": 393,
-                "res3d18": 1143.89, "res3d34": 2022.11, "res3d50": 1500.74, "res3d101": 2266.04,
-                "mobilenet3dv2": 549.19
-                }
-    bias = {"resnet18":512000, "resnet34": 512000, "resnet50": 512000, "resnet101": 512000,
-                "efficientnet-b0":0, "efficientnet-b1":0, "efficientnet-b2":0,
-                "efficientnet-b3":0, "efficientnet-b4":0, "efficientnet-b5":0,
-                "shufflenet3d_0.5": 0, "shufflenet3d_1.0": 0, "shufflenet3d_1.5": 0, "shufflenet3d_2.0": 0,
-                "res3d18":0, "res3d34":0, "res3d50":0, "res3d101":0,
-                "mobilenet3dv2":0}
+    # x2_coeff = {"resnet18": 36144, "resnet34": 73008, "resnet50": 76848, "resnet101": 150832,
+    #             "efficientnet-b0":7772.6403, "efficientnet-b1":13950.8929, "efficientnet-b2":19929.8469,
+    #             "efficientnet-b3":35873.7245, "efficientnet-b4":83705.3571, "efficientnet-b5":197305.4847,
+    #             "shufflenet3d_0.5": 42, "shufflenet3d_1.0": 125, "shufflenet3d_1.5": 235, "shufflenet3d_2.0": 393,
+    #             "res3d18": 1143.89, "res3d34": 2022.11, "res3d50": 1500.74, "res3d101": 2266.04,
+    #             "mobilenet3dv2": 549.19
+    #             }
+    # bias = {"resnet18":512000, "resnet34": 512000, "resnet50": 512000, "resnet101": 512000,
+    #             "efficientnet-b0":0, "efficientnet-b1":0, "efficientnet-b2":0,
+    #             "efficientnet-b3":0, "efficientnet-b4":0, "efficientnet-b5":0,
+    #             "shufflenet3d_0.5": 0, "shufflenet3d_1.0": 0, "shufflenet3d_1.5": 0, "shufflenet3d_2.0": 0,
+    #             "res3d18":0, "res3d34":0, "res3d50":0, "res3d101":0,
+    #             "mobilenet3dv2":0}
     gflops_vec = []
     t_vec = []
     tt_vec = []
@@ -392,13 +468,16 @@ def get_gflops_t_tt_vector():
     for i, backbone in enumerate(args.backbone_list):
         if all([arch_name not in backbone for arch_name in ["resnet","efficientnet","shufflenet3d","mobilenet", "res3d"]]):
             exit("We can only handle resnet/mobilenet/efficientnet/shufflenet3d as backbone, when computing FLOPS")
-        if args.cnn3d:
-            the_flops = x2_coeff[backbone] * args.reso_list[i] * args.reso_list[i] * args.seg_len / 112. / 112. / 16. / 1000.
-        else:
-            the_flops = (x2_coeff[backbone] * args.reso_list[i] * args.reso_list[i] + bias[backbone]) / 1000000000.0
-        gflops_vec.append(the_flops)
-        t_vec.append(1.)
-        tt_vec.append(1.)
+        # if args.cnn3d:
+        #     the_flops = x2_coeff[backbone] * args.reso_list[i] * args.reso_list[i] * args.seg_len / 112. / 112. / 16. / 1000.
+        # else:
+        #     the_flops = (x2_coeff[backbone] * args.reso_list[i] * args.reso_list[i] + bias[backbone]) / 1000000000.0
+
+        for crop_i in range(args.ada_crop_list[i]):
+            the_flops = gflops_table[backbone+str(args.reso_list[i])]
+            gflops_vec.append(the_flops)
+            t_vec.append(1.)
+            tt_vec.append(1.)
 
     if args.policy_also_backbone:
         gflops_vec.append(0)
@@ -428,7 +507,25 @@ def cal_eff(r):
 
     #TODO(yue) uniform loss
     if args.uniform_loss_weight > 1e-5:
-        usage_bias = torch.mean(r,dim=[0,1])-torch.mean(r,dim=[0,1,2])
+        if_policy_backbone = 1 if args.policy_also_backbone else 0
+        reso_skip_vec=torch.zeros(len(args.backbone_list)+if_policy_backbone+len(args.skip_list)).cuda()
+
+        #TODO
+        offset=0
+        #TODO reso/ada_crops
+        for b_i in range(len(args.backbone_list)):
+            interval = args.ada_crop_list[b_i]
+            reso_skip_vec[b_i] += torch.sum(r[:, :, offset:offset+interval])
+            offset = offset + interval
+
+        #TODO mobilenet + skips
+        for b_i in range(len(args.backbone_list), reso_skip_vec.shape[0]):
+            reso_skip_vec[b_i] = torch.sum(r[:, :, b_i])
+        reso_skip_vec = reso_skip_vec / torch.sum(reso_skip_vec)
+
+        usage_bias = reso_skip_vec - torch.mean(reso_skip_vec)
+
+        # usage_bias = torch.mean(r,dim=[0,1])-torch.mean(r,dim=[0,1,2])
         uniform_loss = torch.norm(usage_bias, p=2) * args.uniform_loss_weight
         loss = loss + uniform_loss
         each_losses.append(uniform_loss.detach().cpu().item())
@@ -507,13 +604,20 @@ def get_policy_usage_str(r_list, reso_dim):
 
     gflops = 0
     avg_frame_ratio = 0
-    num_preds = 0
+    avg_pred_ratio = 0
+
+    backbone_list=[]
+    reso_list=[]
+    for i in range(len(args.backbone_list)):
+        backbone_list += [args.backbone_list[i]] * args.ada_crop_list[i]
+        reso_list += [args.reso_list[i]] * args.ada_crop_list[i]
 
     for action_i in range(rs.shape[2]):
         if args.policy_also_backbone and action_i == reso_dim - 1:
             action_str = "m0(%s %dx%d)" % (args.policy_backbone, args.reso_list[args.policy_input_offset], args.reso_list[args.policy_input_offset])
         elif action_i < reso_dim:
-            action_str = "r%d(%7s %dx%d)" % (action_i, args.backbone_list[action_i], args.reso_list[action_i], args.reso_list[action_i])
+            action_str = "r%d(%7s %dx%d)" % (action_i, backbone_list[action_i], reso_list[action_i], reso_list[action_i])
+            #action_str = "r%d(%7s %dx%d)" % (action_i, args.backbone_list[action_i], args.reso_list[action_i], args.reso_list[action_i])
         else:
             action_str = "s%d (skip %d frames)" % (action_i - reso_dim, args.skip_list[action_i - reso_dim])
 
@@ -522,28 +626,13 @@ def get_policy_usage_str(r_list, reso_dim):
 
         gflops += usage_ratio * gflops_vec[action_i]
         avg_frame_ratio += usage_ratio * t_vec[action_i]
-        num_preds += usage_ratio * tt_vec[action_i]
+        avg_pred_ratio += usage_ratio * tt_vec[action_i]
 
+    num_clips = args.num_segments
     if args.cnn3d:
-        if args.policy_backbone!="shufflenet3d_0.5" and args.policy_backbone!="mobilenet3dv2":
-            exit("if cnn3d, only using shufflenet3d_0.5/mobilenet3dv2 as policy net")
-        # TODO (policy backbone-shufflenet3d)
-        if args.policy_backbone == "shufflenet3d_0.5":
-            gflops += 42 * avg_frame_ratio / 112 / 112 / 16 / 1000 * args.reso_list[args.policy_input_offset] * args.reso_list[args.policy_input_offset]
-            gflops += 0.0004 * avg_frame_ratio  # TODO (lstm)
-        else:
-            gflops += 549 * avg_frame_ratio / 112 / 112 / 16 / 1000 * args.reso_list[args.policy_input_offset] * args.reso_list[
-                args.policy_input_offset]
-            gflops += 0.0004 * avg_frame_ratio  # TODO (lstm)
-
-        time_steps = args.num_segments // args.seg_len
-    else:
-        gflops += 0.08 * avg_frame_ratio #TODO (policy backbone)
-        gflops += 0.01 * avg_frame_ratio #TODO (lstm)
-        time_steps = args.num_segments
-
-    printed_str += "GFLOPS: %.6f  AVG_FRAMES: %.3f  NUM_PREDS: %.3f"%(gflops, avg_frame_ratio*args.num_segments, num_preds * time_steps)
-
+        num_clips = num_clips // args.seg_len
+    gflops += (gflops_table["policy"] + gflops_table["lstm"]) * avg_frame_ratio
+    printed_str += "GFLOPS: %.6f  AVG_FRAMES: %.3f  NUM_PREDS: %.3f"%(gflops, avg_frame_ratio*args.num_segments, avg_pred_ratio * num_clips)
     return printed_str, gflops
 
 def extra_each_loss_str(each_terms):
@@ -569,7 +658,7 @@ def get_current_temperature(num_epoch):
 def get_average_meters(number):
     return [AverageMeter() for _ in range(number)]
 
-def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
+def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_path, tf_writer):
     batch_time, data_time, losses, top1, top5 = get_average_meters(5)
     tau=0
     if use_ada_framework:
@@ -578,6 +667,7 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
         each_terms = get_average_meters(NUM_LOSSES)
         r_list = []
 
+    meta_offset = -1 if args.save_meta else 0
 
     model.module.partialBN(not args.no_partialbn)
 
@@ -595,7 +685,7 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
 
         input = input_tuple[0]
         if args.ada_reso_skip:
-            input_var_list=[torch.autograd.Variable(input_item) for input_item in input_tuple[:-1]]
+            input_var_list=[torch.autograd.Variable(input_item) for input_item in input_tuple[:-1+meta_offset]]
 
             if args.real_scsampler:
                 output, r, real_pred, lite_pred = model(input=input_var_list, tau=tau)
@@ -679,18 +769,23 @@ def train(train_loader, model, criterion, optimizer, epoch, tf_writer):
 
 
 
-def validate(val_loader, model, criterion, epoch, tf_writer=None):
+def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writer=None):
     batch_time, losses, top1, top5 = get_average_meters(4)
     tau=0
     # TODO(yue)
     all_results = []
     all_targets = []
 
+
     if use_ada_framework:
         tau = get_current_temperature(epoch)
         alosses, elosses = get_average_meters(2)
         each_terms = get_average_meters(NUM_LOSSES)
         r_list = []
+        if args.save_meta:
+            name_list = []
+
+    meta_offset = -1 if args.save_meta else 0
 
     # switch to evaluate mode
     model.eval()
@@ -704,13 +799,13 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
             # compute output
             if args.ada_reso_skip:
                 if args.real_scsampler:
-                    output, r, real_pred, lite_pred = model(input=input_tuple[:-1], tau=tau)
+                    output, r, real_pred, lite_pred = model(input=input_tuple[:-1+meta_offset], tau=tau)
                     if args.sal_rank_loss:
                         acc_loss = cal_sal_rank_loss(real_pred, lite_pred, target)
                     else:
                         acc_loss = get_criterion_loss(criterion, lite_pred.mean(dim=1), target)
                 else:
-                    output, r = model(input=input_tuple[:-1], tau=tau)
+                    output, r = model(input=input_tuple[:-1+meta_offset], tau=tau)
                     acc_loss = get_criterion_loss(criterion, output, target)
                 if use_ada_framework:
                     acc_loss, eff_loss, each_losses = compute_every_losses(r, acc_loss, epoch)
@@ -741,6 +836,8 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
             end = time.time()
             if use_ada_framework:
                 r_list.append(r.cpu().numpy())
+                if args.save_meta:
+                    name_list += input_tuple[-2]
 
             if i % args.print_freq == 0:
                 print_output = ('Test: [{0:03d}/{1:03d}] '
@@ -771,6 +868,17 @@ def validate(val_loader, model, criterion, epoch, tf_writer=None):
     if use_ada_framework:
         usage_str, gflops = get_policy_usage_str(r_list, model.module.reso_dim)
         print(usage_str)
+
+        if args.save_meta: #TODO save name, label, r, result
+
+            npa=np.concatenate(r_list)
+            npb=np.stack(name_list)
+            npc=torch.cat(all_results).cpu().numpy()
+            npd=torch.cat(all_targets).cpu().numpy()
+
+
+            np.savez("%s/meta-val-%s.npy"%(exp_full_path, logger._timestr),
+                     a=npa, b=npb, c=npc, d=npd)
 
     if tf_writer is not None:
         tf_writer.add_scalar('loss/test', losses.avg, epoch)
@@ -818,16 +926,24 @@ def setup_log_directory(logger, exp_header):
     return exp_full_path
 
 
-if __name__ == '__main__':
-    args = parser.parse_args()
+def shell():
+    global test_mode
     test_mode = (args.test_from != "")
     if test_mode: #TODO test mode
-        print("TEST MODE")
+        print("======== TEST MODE ========")
         if args.skip_training == False:
             print("Set args.skip_training to True...")
             args.skip_training = True
-        #TODO(debug) try check batchsize and init tau
-        t_list = [8, 16, 25]
+        #TODO(debug) try check batch size and init tau
+        if args.cnn3d:
+            k_clips=args.num_segments // args.seg_len
+            t_list = []
+            if k_clips >=2:
+                t_list.append(k_clips//2 * args.seg_len)
+            t_list.append(args.num_segments)
+            t_list.append(args.num_segments * 2)
+        else:
+            t_list = [8, 16, 25]
         bs_list = [args.batch_size, args.batch_size, args.batch_size//2+1]
         k_list=[args.top_k]
         if args.real_scsampler:
@@ -837,10 +953,15 @@ if __name__ == '__main__':
             args.num_segments = t
             args.batch_size = bs_list[t_i]
             for k in k_list:
-                if k>t:
+                if args.real_scsampler and k > t:
                     continue
-                print("TEST t:%d bs:%d k:%d"%(t, bs_list[t_i], k))
+                print("======== TEST t:%d bs:%d k:%d ========"%(t, bs_list[t_i], k))
                 args.top_k = k
                 main()
     else: #TODO normal mode
         main()
+
+if __name__ == '__main__':
+    args = parser.parse_args()
+    shell()
+

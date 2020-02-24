@@ -14,6 +14,8 @@ from ops.cnn3d.shufflenet3d import ShuffleNet3D
 from ops.cnn3d.mobilenet3dv2 import MobileNet3DV2, mobilenet3d_v2
 from ops.cnn3d.i3d_resnet import  I3D_ResNet, i3d_resnet
 
+from tools.net_flops_table import feat_dim_dict
+
 def init_hidden(batch_size, cell_size):
     init_cell = torch.Tensor(batch_size, cell_size).zero_()
     if torch.cuda.is_available():
@@ -62,27 +64,6 @@ class TSN_Ada(nn.Module):
 
         # TODO(yue)
         if self.args.ada_reso_skip:
-            policy_feat_dim_dict={"resnet18": 512,
-                                  "resnet34": 512,
-                                  "resnet50": 2048,
-                                  "resnet101": 2048,
-                                  "mobilenet_v2": 1280,
-                                  "efficientnet-b0": 1280,
-                                  "efficientnet-b1": 1280,
-                                  "efficientnet-b2": 1408,
-                                  "efficientnet-b3": 1536,
-                                  "efficientnet-b4": 1792,
-                                  "efficientnet-b5": 2048,
-                                  "shufflenet3d_0.5": 480,
-                                  "shufflenet3d_1.0": 960,
-                                  "shufflenet3d_1.5": 1440,
-                                  "shufflenet3d_2.0": 1920,
-                                  "mobilenet3dv2": 1280,
-                                  "res3d18": 512,
-                                  "res3d34": 512,
-                                  "res3d50": 2048,
-                                  "res3d101": 2048,
-                                  }
 
             shall_pretrain = not self.args.policy_from_scratch
 
@@ -104,6 +85,7 @@ class TSN_Ada(nn.Module):
                     self.lite_backbone = EfficientNet.from_named(self.args.policy_backbone)
             else:
                 self.lite_backbone = getattr(torchvision.models, self.args.policy_backbone)(shall_pretrain)
+                #print(self.lite_backbone)
 
             self.lite_backbone.avgpool = nn.AdaptiveAvgPool2d(1)
             if "resnet" in self.args.policy_backbone:
@@ -120,7 +102,7 @@ class TSN_Ada(nn.Module):
                 elif "res3d" in self.args.policy_backbone:
                     self.lite_backbone.last_layer_name = 'fc'
 
-            self.policy_feat_dim = policy_feat_dim_dict[self.args.policy_backbone]
+            self.policy_feat_dim = feat_dim_dict[self.args.policy_backbone]
             self.rnn = nn.LSTMCell(input_size=self.policy_feat_dim, hidden_size=self.args.hidden_dim, bias=True)
 
             self.multi_models = False
@@ -129,7 +111,11 @@ class TSN_Ada(nn.Module):
                 self.base_model_list = nn.ModuleList() #[]
                 self.new_fc_list = nn.ModuleList()#[]
 
-            self.reso_dim = len(self.args.backbone_list)
+            #self.reso_dim = len(self.args.backbone_list)
+            self.reso_dim = 0
+            for i in range(len(self.args.backbone_list)):
+                self.reso_dim += self.args.ada_crop_list[i]
+
             if self.args.policy_also_backbone:
                 self.reso_dim += 1
             self.skip_dim = len(self.args.skip_list)
@@ -258,9 +244,13 @@ class TSN_Ada(nn.Module):
                 self.input_mean = [0.485, 0.456, 0.406] + [0] * 3 * self.new_length
                 self.input_std = self.input_std + [np.mean(self.input_std) * 2] * 3 * self.new_length
 
-        elif base_model == 'mobilenetv2':
-            from archs.mobilenet_v2 import mobilenet_v2, InvertedResidual
-            self.base_model = mobilenet_v2(shall_pretrain)
+        elif base_model == "mobilenet_v2":
+            #TODO(mobilenet)
+            # from archs.mobilenet_v2 import mobilenet_v2, InvertedResidual
+            # self.base_model = mobilenet_v2(shall_pretrain)
+            from archs.mobilenet_v2 import InvertedResidual
+            self.base_model = getattr(torchvision.models, base_model)(shall_pretrain)
+
             self.base_model.last_layer_name = 'classifier'
             self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
             if self.is_shift:
@@ -355,6 +345,8 @@ class TSN_Ada(nn.Module):
 
                 if self.args.cnn3d and ("mobilenet3dv2"==self.args.backbone_list[j] or "shufflenet3d"in self.args.backbone_list[j]):
                     feature_dim = getattr(base_model, base_model.last_layer_name)[1].in_features
+                elif "mobilenet_v2"==self.args.backbone_list[j]:
+                    feature_dim = getattr(base_model, base_model.last_layer_name)[1].in_features
                 else:
                     feature_dim = getattr(base_model, base_model.last_layer_name).in_features
 
@@ -371,6 +363,8 @@ class TSN_Ada(nn.Module):
             return None
 
         if self.args.cnn3d and ("mobilenet3dv2"==self.base_model_name or "shufflenet3d"in self.base_model_name):
+            feature_dim = getattr(self.base_model, self.base_model.last_layer_name)[1].in_features
+        elif "mobilenet_v2"==self.base_model_name:
             feature_dim = getattr(self.base_model, self.base_model.last_layer_name)[1].in_features
         else:
             feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
@@ -534,15 +528,44 @@ class TSN_Ada(nn.Module):
         else:
             input_list = kwargs["input"]
 
-        feat_lite = backbone(input_list[self.args.policy_input_offset], self.lite_backbone, None)
+        new_policy_input_offset = self.args.policy_input_offset
+        for reso_i in range(self.args.policy_input_offset):
+            if self.args.ada_crop_list[reso_i]>1:
+                new_policy_input_offset -= 1
+        #print(self.args.policy_input_offset, new_policy_input_offset)
+        feat_lite = backbone(input_list[new_policy_input_offset], self.lite_backbone, None)
         hx = init_hidden(batch_size, self.args.hidden_dim)
         cx = init_hidden(batch_size, self.args.hidden_dim)
         logits_list = []
         lite_j_list = []
 
+        base_out_list = []
         if self.multi_models:
-            base_out_list = [backbone(input_list[i], self.base_model_list[i], self.new_fc_list[i]) for i in
-                             range(len(self.base_model_list))]
+            input_offset=0
+
+            #print(input_list[0].shape)
+
+            for bb_i,the_backbone in enumerate(self.base_model_list):
+                if self.args.ada_crop_list[bb_i]==1:
+                    base_out_list.append(backbone(input_list[input_offset], the_backbone, self.new_fc_list[bb_i]))
+                    input_offset+=1
+                else:
+                    reso = self.args.reso_list[bb_i]
+                    if self.args.ada_crop_list[bb_i]==5:
+                        x_list=[0, 224-reso, 112-reso//2, 0, 224-reso]
+                        y_list=[0, 0, 112-reso//2, 224-reso, 224-reso]
+                    elif self.args.ada_crop_list[bb_i]==9:
+                        x_list = [0, 112-reso//2, 224 - reso, 0, 112 - reso // 2, 224 - reso, 0, 112 - reso // 2, 224 - reso]
+                        y_list = [0, 0, 0, 112-reso//2, 112-reso//2, 112-reso//2, 224 - reso, 224 - reso, 224 - reso]
+
+
+                    for x,y in zip(x_list, y_list): #(B*T,C,H,W)
+                        crop_input = input_list[0][:, :,  x:x+reso, y:y+reso] # crop
+                        #print(reso, crop_input.shape)
+                        base_out_list.append(backbone(crop_input, the_backbone, self.new_fc_list[bb_i]))
+
+            # base_out_list = [backbone(input_list[i], self.base_model_list[i], self.new_fc_list[i]) for i in
+            #                  range(len(self.base_model_list))]
 
         online_policy = False
         if not any([self.args.offline_lstm_all, self.args.offline_lstm_last, self.args.random_policy,
@@ -798,4 +821,3 @@ class TSN_Ada(nn.Module):
         elif self.modality == 'RGBDiff':
             return torchvision.transforms.Compose([GroupMultiScaleCrop(self.input_size, [1, .875, .75]),
                                                    GroupRandomHorizontalFlip(is_flow=False)])
-

@@ -140,7 +140,8 @@ class TSNDataSet(data.Dataset):
             elif record.num_frames > self.num_segments:
                 offsets = np.sort(randint(record.num_frames - self.new_length + 1, size=self.num_segments))
             else:
-                offsets = np.zeros((self.num_segments,))
+                #offsets = np.zeros((self.num_segments,)) #TODO(yue) do this for mini-sth
+                offsets = np.array(list(range(record.num_frames)) + [record.num_frames - 1] * (self.num_segments - record.num_frames))
             return offsets + 1
 
     def _get_val_indices(self, record):
@@ -155,7 +156,8 @@ class TSNDataSet(data.Dataset):
                 tick = (record.num_frames - self.new_length + 1) / float(self.num_segments)
                 offsets = np.array([int(tick / 2.0 + tick * x) for x in range(self.num_segments)])
             else:
-                offsets = np.zeros((self.num_segments,))
+                #offsets = np.zeros((self.num_segments,)) #TODO(yue) do this for mini-sth
+                offsets = np.array(list(range(record.num_frames)) + [record.num_frames-1]*(self.num_segments - record.num_frames))
             return offsets + 1
 
     def _get_test_indices(self, record):
@@ -235,23 +237,20 @@ class TSNDataSet(data.Dataset):
             if (not any([self.args.random_crop, self.args.center_crop])) and \
                     self.args.pyramid_boost and check_scale_is_pyramid_indeed(self.args.reso_list):
                 return process_data, record.label
-            elif self.args.random_crop:
-                #TODO(debug)
-                return tuple(
-                    [process_data] +
-                    [self.random_crop(process_data, (x,x)) for x in self.args.reso_list[1:]] +
-                    [record.label])
-            elif self.args.center_crop:
-                # TODO(debug)
-                return tuple(
-                    [process_data] +
-                    [self.center_crop(process_data, (x,x)) for x in self.args.reso_list[1:]] +
-                    [record.label])
             else:
-                return tuple(
-                    [process_data] +
-                    [self.rescale(process_data, (x,x)) for x in self.args.reso_list[1:]] +
-                    [record.label])
+                return_items = [process_data]
+                if self.args.random_crop:
+                    rescaled = [self.random_crop(process_data, (x,x)) for x in self.args.reso_list[1:]]
+                elif self.args.center_crop:
+                    rescaled = [self.center_crop(process_data, (x, x)) for x in self.args.reso_list[1:]]
+                else:
+                    rescaled = [self.rescale(process_data, (x,x)) for xi,x in enumerate(self.args.reso_list[1:]) if (self.args.ada_crop_list[xi+1]==1 or xi+1==self.args.policy_input_offset)]
+                return_items = return_items + rescaled
+                if self.args.save_meta:
+                    return_items = return_items + [record.path]
+                return_items = return_items + [record.label]
+
+                return tuple(return_items)
         else:
             return process_data, record.label
 

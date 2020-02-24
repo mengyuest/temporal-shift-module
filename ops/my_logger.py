@@ -25,7 +25,7 @@ class Logger(object):
     def create_log(self, log_path, test_mode, t, bs, k):
         self._log_dir_name = log_path
         if test_mode:
-            self._log_file_name = "test-%s-t%d-bz%d-k%d.txt" % (self._timestr, t, bs, k)
+            self._log_file_name = "test-%s-t%02d-bz%02d-k%02d.txt" % (self._timestr, t, bs, k)
         else:
             self._log_file_name ="log-%s.txt" % self._timestr
         self._log_path = log_path + "/" + self._log_file_name

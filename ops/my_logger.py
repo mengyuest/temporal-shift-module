@@ -2,6 +2,7 @@ import sys
 import time
 from datetime import datetime
 
+
 # TODO(Yue) Overrided the logger
 class Logger(object):
     def __init__(self, log_prefix=""):
@@ -52,4 +53,5 @@ class Logger(object):
 
     def close_log(self):
         a=1
-        #self.log.close()
+        self.log.close()
+        return sys.stdout

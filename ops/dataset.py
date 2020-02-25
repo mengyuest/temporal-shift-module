@@ -234,6 +234,7 @@ class TSNDataSet(data.Dataset):
                         return False
                 return True
 
+
             if (not any([self.args.random_crop, self.args.center_crop])) and \
                     self.args.pyramid_boost and check_scale_is_pyramid_indeed(self.args.reso_list):
                 return process_data, record.label

@@ -120,8 +120,11 @@ def main():
     set_random_seed(args.random_seed)
     use_ada_framework = args.ada_reso_skip and args.offline_lstm_last == False and args.offline_lstm_all == False and args.real_scsampler == False
 
-    logger=Logger()
-    sys.stdout = logger
+    if args.ablation:
+        logger = None
+    else:
+        logger = Logger()
+        sys.stdout = logger
 
     num_class, args.train_list, args.val_list, args.root_path, prefix = dataset_config.return_dataset(args.dataset,
                                                                                                       args.modality)
@@ -258,6 +261,15 @@ def main():
 
             model.load_state_dict(model_dict)
         print()
+    else:
+        if test_mode:
+            the_model_path = args.test_from
+            if ".pth.tar" not in the_model_path:
+                the_model_path = ospj(the_model_path,"models","ckpt.best.pth.tar")
+            model_dict = model.state_dict()
+            sd = load_to_sd(model_dict, the_model_path, "foo", "bar", -1, apple_to_apple=True)
+            model_dict.update(sd)
+            model.load_state_dict(model_dict)
 
     if args.ada_reso_skip == False and args.base_pretrained_from != "":
         print("Baseline: load from pretrained model")
@@ -331,10 +343,13 @@ def main():
 
     exp_full_path = setup_log_directory(logger, args.exp_header)
 
-    if not test_mode:
-        with open(os.path.join(exp_full_path, 'args.txt'), 'w') as f:
-            f.write(str(args))
-    tf_writer = SummaryWriter(log_dir=exp_full_path)
+    if not args.ablation:
+        if not test_mode:
+            with open(os.path.join(exp_full_path, 'args.txt'), 'w') as f:
+                f.write(str(args))
+        tf_writer = SummaryWriter(log_dir=exp_full_path)
+    else:
+        tf_writer = None
 
     # TODO(yue)
     map_record = Recorder()
@@ -376,16 +391,17 @@ def main():
             if args.skip_training:
                 break
 
-            tf_writer.add_scalar('acc/test_top1_best', prec_record.best_val, epoch)
-            save_checkpoint({
-                'epoch': epoch + 1,
-                'arch': args.arch,
-                'state_dict': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'best_prec1': prec_record.best_val,
-            }, map_record.is_current_best(), exp_full_path)
+            if not args.ablation:
+                tf_writer.add_scalar('acc/test_top1_best', prec_record.best_val, epoch)
+                save_checkpoint({
+                    'epoch': epoch + 1,
+                    'arch': args.arch,
+                    'state_dict': model.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'best_prec1': prec_record.best_val,
+                }, mmap_record.is_current_best(), exp_full_path)
 
-            if map_record.is_current_best():
+            if mmap_record.is_current_best():
                 best_tau = get_current_temperature(epoch)
 
     if use_ada_framework:
@@ -399,8 +415,9 @@ def main():
 
     if test_mode:
         os.rename(logger._log_path, ospj(logger._log_dir_name, logger._log_file_name[:-4] +
-                                     "_m_%.2f_a_%.2f_f_%.4f.txt"%(map_record.best_val*100, prec_record.best_val*100, val_gflops
+                                     "_mm_%.2f_a_%.2f_f_%.4f.txt"%(mmap_record.best_val, prec_record.best_val, val_gflops
                                                                  )))
+        #sys.stdout = logger.close_log()
 
     if args.with_test:
         if args.test_from != "": #TODO(yue) if any program uses test_from, we won't use this part of code
@@ -913,6 +930,9 @@ def adjust_learning_rate(optimizer, epoch, lr_type, lr_steps):
 
 
 def setup_log_directory(logger, exp_header):
+    if args.ablation:
+        return None
+
     exp_full_name = "g%s_%s"%(logger._timestr, exp_header)
     if args.skip_training:
         exp_full_name+="_test"

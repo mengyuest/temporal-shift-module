@@ -111,4 +111,3 @@ if __name__ == "__main__":
 
     for s in str_list:
         print(s)
-

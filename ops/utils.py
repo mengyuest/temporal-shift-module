@@ -80,7 +80,8 @@ def cal_map(output, old_test_y):
         precision = tp.div(rg)
 
         ap[k] = precision[truth.byte()].sum() / max(float(truth.sum()), 1)
-
+        #print(k, ap[k])
+    #print()
     return ap.mean()*100, ap*100
 
 

@@ -5,6 +5,7 @@ import getpass
 host_name = socket.gethostname()
 user_name = getpass.getuser()
 
+
 # TODO(yue) path
 # TODO WSC (power machines)
 if "c699" in host_name and user_name in ["sunxm"]:
@@ -37,6 +38,15 @@ elif "dcc" in host_name and user_name in ["cvpr", "ieee", "sc071139"]:
     #DATA_PREFIX = "../multimodalvideo"
     LOG_PREFIX = "../multimodalvideo/yue"
     PRETRAIN_PATH =ospj(ROOT_DIR,"logs_tsm")
+
+elif ("node" in host_name or "service" in host_name )and user_name == "mengyue":
+    "/nobackup/users/mengyue/datasets/activity-net-v1.3"
+    ROOT_DIR = "/nobackup/users/mengyue"
+    CODE_PREFIX = "code"
+    DATA_PREFIX = "datasets"
+    # DATA_PREFIX = "../multimodalvideo"
+    LOG_PREFIX = ""
+    PRETRAIN_PATH = ospj(ROOT_DIR, "logs_tsm")
 
 else:
     exit("unauthorized user@host '%s@%s'" % (user_name, host_name))

@@ -182,4 +182,6 @@ parser.add_argument('--ada_crop_list', default=[], type=int, nargs="+", help='nu
 
 #TODO(yue) visualizations
 parser.add_argument('--save_meta', action='store_true')
+parser.add_argument('--ablation', action='store_true')
+
 

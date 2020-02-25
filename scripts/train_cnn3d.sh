@@ -32,3 +32,4 @@ python main.py MINISTH RGB --arch res3d50 --num_segments 40 --lr 0.001 --epochs 
 
 #TODO 9. finetuning adaptive policy (remove model_paths, add base_pretrain_from, change lr=0.0005, change init_tau corr. to the best model from pretrained ones, e.g. 0.6600)
 python main.py actnet RGB --arch res3d50 --num_segments 40 --lr 0.0005 --epochs 50 --lr_steps 50 100 --batch-size 48 -j 12 --npb --gpus 0 1 2 3 --exp_header ms2_t40_3m124_a.9e.1_ed5_ft10ds_lr.001_gu3_ft_lr.0005_debug --ada_reso_skip --policy_backbone mobilenet3dv2 --reso_list 224 168 112 84 --backbone_list res3d50 res3d34 res3d18 --skip_list 1 2 4 --accuracy_weight 0.9 --efficency_weight 0.1 --folder_suffix _self --exp_decay --init_tau 0.6600 --policy_also_backbone --policy_input_offset 3 --uniform_loss_weight 3.0 --use_gflops_loss --cnn3d --seg_len 8 --freeze_policy --base_pretrained_from JOINT/models/ckpt.best.pth
+

@@ -350,7 +350,6 @@ class TSN_Ada(nn.Module):
                 else:
                     feature_dim = getattr(base_model, base_model.last_layer_name).in_features
 
-
                 setattr(base_model, base_model.last_layer_name, nn.Dropout(p=self.dropout))
                 new_fc = nn.Linear(feature_dim, num_class)
                 if hasattr(new_fc, 'weight'):

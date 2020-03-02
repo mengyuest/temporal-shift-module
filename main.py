@@ -134,10 +134,12 @@ def main():
     if args.temporal_pool:
         full_arch_name += '_tpool'
 
-    if use_ada_framework:
-        init_gflops_table()
+    if args.ada_reso_skip:
         if len(args.ada_crop_list)==0:
             args.ada_crop_list=[1 for _ in args.reso_list]
+
+    if use_ada_framework:
+        init_gflops_table()
 
     if args.ada_reso_skip:
         MODEL_NAME = TSN_Ada
@@ -617,7 +619,11 @@ def get_policy_usage_str(r_list, reso_dim):
     gflops_vec, t_vec, tt_vec = get_gflops_t_tt_vector()
 
     tmp_cnt = [np.sum(rs[:, :, iii] == 1) for iii in range(rs.shape[2])]
-    tmp_total_cnt = sum(tmp_cnt)
+
+    if args.all_policy:
+        tmp_total_cnt = tmp_cnt[0]
+    else:
+        tmp_total_cnt = sum(tmp_cnt)
 
     gflops = 0
     avg_frame_ratio = 0
@@ -641,6 +647,7 @@ def get_policy_usage_str(r_list, reso_dim):
         usage_ratio = tmp_cnt[action_i] / tmp_total_cnt
         printed_str += "%-22s: %6d (%.2f%%)\n" % (action_str, tmp_cnt[action_i], 100 * usage_ratio)
 
+        #print("gflops",gflops, "ratio", usage_ratio, "vec",gflops_vec[action_i])
         gflops += usage_ratio * gflops_vec[action_i]
         avg_frame_ratio += usage_ratio * t_vec[action_i]
         avg_pred_ratio += usage_ratio * tt_vec[action_i]

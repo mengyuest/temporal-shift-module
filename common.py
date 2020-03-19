@@ -58,6 +58,8 @@ STHV2_FRAMES=ospj(STHV2_PATH, '20bn-something-something-v2-frames')
 
 #TODO(yue) UCF101
 UCF101_PATH=ospj(DATA_PATH, "UCF101")
+if "dcc" in host_name:
+    UCF101_PATH = UCF101_PATH.replace("longxun/datasets", "multimodalvideo")
 UCF101_META_PATH = ospj(UCF101_PATH, "file_list")
 UCF101_FRAMES=ospj(UCF101_PATH, 'frame')
 
@@ -92,6 +94,9 @@ MINIK_PATH=ospj(DATA_PATH, "kinetics-qf")
 if "dcc" in host_name:
     MINIK_PATH = MINIK_PATH.replace("longxun/datasets","multimodalvideo")
 MINIK_META_PATH = MINIK_PATH
-MINIK_FRAMES=ospj(MINIK_PATH, 'images')
+if "diva" in host_name:
+    MINIK_META_PATH = MINIK_PATH.replace("kinetics-qf","kinetics-100")
+# print(MINIK_META_PATH)
+MINIK_FRAMES=ospj(MINIK_PATH)
 
 EXPS_PATH=ospj(ROOT_DIR, LOG_PREFIX,"logs_tsm")

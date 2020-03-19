@@ -30,12 +30,11 @@ from ops.my_logger import Logger
 from ops.sal_rank_loss import cal_sal_rank_loss
 
 from tools.net_flops_table import get_gflops_params, feat_dim_dict
-# from ops.utils import get_mobv2_new_sd
+from ops.cnn3d.inflate_from_2d_model import get_mobv2_new_sd
 
 # TODO(yue)
 import common
 from os.path import join as ospj
-
 
 
 best_prec1 = 0
@@ -54,6 +53,7 @@ def reset_global_variables():
     test_mode = None
 
 def load_to_sd(model_dict, model_path, module_name, fc_name, resolution, apple_to_apple=False):
+
     if ".pth" in model_path:
         print("done loading\t%s\t(res:%3d) from\t%s" % ("%-25s"%module_name, resolution, model_path))
         if os.path.exists(common.PRETRAIN_PATH+ "/" +model_path):
@@ -64,7 +64,25 @@ def load_to_sd(model_dict, model_path, module_name, fc_name, resolution, apple_t
             print("Success~")
         else:
             exit("Cannot find model, exit")
+
+        new_version_detected=False
+        for k in sd:
+            if "lite_backbone.features.1.conv.4." in k:
+                new_version_detected=True
+                break
+        if new_version_detected:
+            sd = get_mobv2_new_sd(sd, reverse=True)
+
+
         if apple_to_apple:
+            if args.remove_all_base_0:
+                del_keys=[]
+                for key in sd:
+                    if "module.base_model_list.0" in key or "new_fc_list.0" in key or "linear." in key:
+                        del_keys.append(key)
+
+                for key in del_keys:
+                    del sd[key]
             return sd
 
         replace_dict = []
@@ -691,7 +709,7 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
         each_terms = get_average_meters(NUM_LOSSES)
         r_list = []
 
-    meta_offset = -1 if args.save_meta else 0
+    meta_offset = -2 if args.save_meta else 0
 
     model.module.partialBN(not args.no_partialbn)
 
@@ -799,6 +817,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     # TODO(yue)
     all_results = []
     all_targets = []
+    all_all_preds=[]
 
 
     if use_ada_framework:
@@ -808,8 +827,9 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
         r_list = []
         if args.save_meta:
             name_list = []
+            indices_list = []
 
-    meta_offset = -1 if args.save_meta else 0
+    meta_offset = -2 if args.save_meta else 0
 
     # switch to evaluate mode
     model.eval()
@@ -817,6 +837,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     end = time.time()
     with torch.no_grad():
         for i, input_tuple in enumerate(val_loader):
+
             target = input_tuple[-1].cuda()
             input = input_tuple[0]
 
@@ -829,7 +850,10 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                     else:
                         acc_loss = get_criterion_loss(criterion, lite_pred.mean(dim=1), target)
                 else:
-                    output, r = model(input=input_tuple[:-1+meta_offset], tau=tau)
+                    if args.save_meta and args.save_all_preds:
+                        output, r, all_preds = model(input=input_tuple[:-1 + meta_offset], tau=tau)
+                    else:
+                        output, r = model(input=input_tuple[:-1+meta_offset], tau=tau)
                     acc_loss = get_criterion_loss(criterion, output, target)
                 if use_ada_framework:
                     acc_loss, eff_loss, each_losses = compute_every_losses(r, acc_loss, epoch)
@@ -847,6 +871,8 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
             # TODO(yue)
             all_results.append(output)
             all_targets.append(target)
+            if args.save_meta and args.save_all_preds:
+                all_all_preds.append(all_preds)
 
             # measure accuracy and record loss
             prec1, prec5 = accuracy(output.data, target[:,0], topk=(1, 5))
@@ -861,7 +887,9 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
             if use_ada_framework:
                 r_list.append(r.cpu().numpy())
                 if args.save_meta:
-                    name_list += input_tuple[-2]
+                    #print(input_tuple[-3],input_tuple[-2])
+                    name_list += input_tuple[-3]
+                    indices_list.append(input_tuple[-2])
 
             if i % args.print_freq == 0:
                 print_output = ('Test: [{0:03d}/{1:03d}] '
@@ -899,10 +927,15 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
             npb=np.stack(name_list)
             npc=torch.cat(all_results).cpu().numpy()
             npd=torch.cat(all_targets).cpu().numpy()
+            if args.save_all_preds:
+                npe=torch.cat(all_all_preds).cpu().numpy()
+            else:
+                npe=np.zeros(1)
 
+            npf=torch.cat(indices_list).cpu().numpy()
 
             np.savez("%s/meta-val-%s.npy"%(exp_full_path, logger._timestr),
-                     a=npa, b=npb, c=npc, d=npd)
+                     rs=npa, names=npb, results=npc, targets=npd, all_preds=npe, indices=npf)
 
     if tf_writer is not None:
         tf_writer.add_scalar('loss/test', losses.avg, epoch)
@@ -970,8 +1003,13 @@ def shell():
             t_list.append(args.num_segments)
             t_list.append(args.num_segments * 2)
         else:
-            t_list = [8, 16, 25]
-        bs_list = [args.batch_size, args.batch_size, args.batch_size//2+1]
+            if args.uno_time:
+                t_list = [args.num_segments]
+            elif args.many_times:
+                t_list = [4, 8, 16, 25, 32, 48, 64]
+            else:
+                t_list = [8, 16, 25]
+        bs_list = [args.batch_size, args.batch_size, args.batch_size//2+1, args.batch_size//4+1, args.batch_size//4+1, args.batch_size//8+1, args.batch_size//8+1]
         k_list=[args.top_k]
         if args.real_scsampler:
             k_list = [1, 4, 8, 10, 12]

@@ -115,7 +115,8 @@ def return_ministh(modality):
 
 
 def return_minik(modality):
-    filename_categories = ospj(common.MINIK_META_PATH, 'classIndMiniK.txt')
+    filename_categories = 200
+    #filename_categories = ospj(common.MINIK_META_PATH, 'classIndMiniK.txt')
     if modality == 'RGB':
         root_data = common.MINIK_FRAMES
         filename_imglist_train = ospj(common.MINIK_META_PATH, 'mini_train_videofolder.txt')

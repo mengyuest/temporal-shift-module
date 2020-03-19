@@ -107,6 +107,9 @@ class TSNDataSet(data.Dataset):
         splitter="," if self.args.dataset in ["actnet","fcvid"] else " "
         tmp = [x.strip().split(splitter) for x in open(self.list_file)]
 
+        if any(len(items)>=3 for items in tmp) and self.args.dataset=="minik":
+            tmp = [[splitter.join(x[:-2]), x[-2], x[-1]] for x in tmp]
+
         if not self.test_mode or self.remove_missing:
             tmp = [item for item in tmp if int(item[1]) >= 3]
 
@@ -248,7 +251,7 @@ class TSNDataSet(data.Dataset):
                     rescaled = [self.rescale(process_data, (x,x)) for xi,x in enumerate(self.args.reso_list[1:]) if (self.args.ada_crop_list[xi+1]==1 or xi+1==self.args.policy_input_offset)]
                 return_items = return_items + rescaled
                 if self.args.save_meta:
-                    return_items = return_items + [record.path]
+                    return_items = return_items + [record.path] + [indices] #[torch.tensor(indices)]
                 return_items = return_items + [record.label]
 
                 return tuple(return_items)

@@ -339,6 +339,8 @@ class TSN_Ada(nn.Module):
             if hasattr(self.lite_fc, 'weight'):
                 normal_(self.lite_fc.weight, 0, std)
                 constant_(self.lite_fc.bias, 0)
+            # print(self.args.hidden_dim, self.action_dim)
+            # print(self.linear.weight.shape)
         if self.multi_models:
             for j,base_model in enumerate(self.base_model_list):
                 # feature_dim = getattr(base_model, base_model.last_layer_name).in_features
@@ -688,7 +690,10 @@ class TSN_Ada(nn.Module):
                     r_all = torch.stack(r_list, dim=1)
 
             output = self.combine_logits(r_all, base_out_list)
-            return output.squeeze(1), r_all
+            if self.args.save_meta and self.args.save_all_preds:
+                return output.squeeze(1), r_all, torch.stack(base_out_list,dim=1)
+            else:
+                return output.squeeze(1), r_all
 
     def combine_logits(self, r, base_out_list):
         # TODO r           N, T, K  (0-origin, 1-low, 2-skip)

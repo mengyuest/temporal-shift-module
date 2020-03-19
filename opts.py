@@ -172,6 +172,8 @@ parser.add_argument('--freeze_backbone', action='store_true')
 # 3. dense/uniform sampling
 # 4. in-place writing(also write inside the file name for FLOPS, mAP and accuracy)
 parser.add_argument('--test_from', type=str, default="")
+parser.add_argument('--many_times', action='store_true')
+parser.add_argument('--uno_time', action='store_true')
 
 parser.add_argument('--with_test', action='store_true')
 
@@ -183,5 +185,8 @@ parser.add_argument('--ada_crop_list', default=[], type=int, nargs="+", help='nu
 #TODO(yue) visualizations
 parser.add_argument('--save_meta', action='store_true')
 parser.add_argument('--ablation', action='store_true')
+parser.add_argument('--remove_all_base_0', action='store_true')
 
+
+parser.add_argument('--save_all_preds', action='store_true')
 

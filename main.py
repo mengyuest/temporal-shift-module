@@ -12,16 +12,14 @@ import time
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim
-import thop
 from torch.nn.utils import clip_grad_norm_
 
 from ops.dataset import TSNDataSet
-from ops.models import TSN
 from ops.models_ada import TSN_Ada
 from ops.transforms import *
 from opts import parser
 from ops import dataset_config
-from ops.utils import AverageMeter, accuracy, cal_map, Recorder, get_multi_hot
+from ops.utils import AverageMeter, accuracy, cal_map, Recorder
 from ops.temporal_shift import make_temporal_pool
 
 from tensorboardX import SummaryWriter
@@ -89,13 +87,6 @@ def load_to_sd(model_dict, model_path, module_name, fc_name, resolution, apple_t
         nowhere_ks = []
         notfind_ks = []
 
-        #TODO(need to change the naming for layers IDKY for mobv2, similar to 3d case)
-        # if "lite_backbone" in module_name:
-        #     if args.policy_backbone=="mobilenet_v2":
-        #         sd = get_mobv2_new_sd(sd, reverse=True)
-        #         print(model.module.lite_fc)
-        #         print(sd.keys())
-
         for k, v in sd.items():  # TODO(yue) base_model->base_model_list.i
             new_k = k.replace("base_model", module_name)
             new_k = new_k.replace("new_fc", fc_name)
@@ -118,8 +109,6 @@ def load_to_sd(model_dict, model_path, module_name, fc_name, resolution, apple_t
             print("Vars not in pretrained weights, but are needed in ada network\n" + ("\n%s LACK "%module_name).join(notfind_ks))
         for k, k_new in replace_dict:
             sd[k_new] = sd.pop(k)
-
-        #print(sd.keys())
 
         if "lite_backbone" in module_name:
             #TODO not loading new_fc in this case, because we are using hidden_dim
@@ -144,8 +133,7 @@ def main():
         logger = Logger()
         sys.stdout = logger
 
-    num_class, args.train_list, args.val_list, args.root_path, prefix = dataset_config.return_dataset(args.dataset,
-                                                                                                      args.modality)
+    num_class, args.train_list, args.val_list, args.root_path, prefix = dataset_config.return_dataset(args.dataset)
     full_arch_name = args.arch
     if args.shift:
         full_arch_name += '_shift{}_{}'.format(args.shift_div, args.shift_place)
@@ -159,11 +147,9 @@ def main():
     if use_ada_framework:
         init_gflops_table()
 
-    if args.ada_reso_skip:
-        MODEL_NAME = TSN_Ada
-    else:
-        MODEL_NAME = TSN
-    model = MODEL_NAME(num_class, args.num_segments, args.modality,
+    # if args.ada_reso_skip:
+    MODEL_NAME = TSN_Ada
+    model = MODEL_NAME(num_class, args.num_segments,
                 base_model=args.arch,
                 consensus_type=args.consensus_type,
                 dropout=args.dropout,
@@ -174,8 +160,6 @@ def main():
                 fc_lr5=not (args.tune_from and args.dataset in args.tune_from),
                 temporal_pool=args.temporal_pool,
                 non_local=args.non_local,
-                rescale_to=args.rescale_to,
-                rescale_pattern = args.rescale_pattern,
                 args = args)
 
     crop_size = model.crop_size
@@ -242,8 +226,6 @@ def main():
         if args.dataset not in args.tune_from:  # new dataset
             print('=> New dataset, do not load fc weights')
             sd = {k: v for k, v in sd.items() if 'fc' not in k}
-        if args.modality == 'Flow' and 'Flow' not in args.tune_from:
-            sd = {k: v for k, v in sd.items() if 'conv1.weight' not in k}
         model_dict.update(sd)
         model.load_state_dict(model_dict)
 
@@ -280,7 +262,6 @@ def main():
                 model_dict.update(sd)
 
             model.load_state_dict(model_dict)
-        print()
     else:
         if test_mode:
             the_model_path = args.test_from
@@ -297,31 +278,21 @@ def main():
         sd = load_to_sd(model_dict, args.base_pretrained_from, "base_model", "new_fc", 224)
         model_dict.update(sd)
         model.load_state_dict(model_dict)
-        print()
 
     cudnn.benchmark = True
 
     # Data loading code
-    if args.modality != 'RGBDiff':
-        normalize = GroupNormalize(input_mean, input_std)
-    else:
-        normalize = IdentityTransform()
-
-    if args.modality == 'RGB':
-        data_length = 1
-    elif args.modality in ['Flow', 'RGBDiff']:
-        data_length = 5
-
+    normalize = GroupNormalize(input_mean, input_std)
+    data_length = 1
     train_loader = torch.utils.data.DataLoader(
         TSNDataSet(args.root_path, args.train_list, num_segments=args.num_segments,
                    new_length=data_length,
-                   modality=args.modality,
                    image_tmpl=prefix,
                    partial_fcvid_eval=False,
                    transform=torchvision.transforms.Compose([
                        train_augmentation,
-                       Stack(roll=(args.arch in ['BNInception', 'InceptionV3'])),
-                       ToTorchFormatTensor(div=(args.arch not in ['BNInception', 'InceptionV3'])),
+                       Stack(roll=False),
+                       ToTorchFormatTensor(div=True),
                        normalize,
                    ]), dense_sample=args.dense_sample, args=args),
         batch_size=args.batch_size, shuffle=True,
@@ -331,31 +302,21 @@ def main():
     val_loader = torch.utils.data.DataLoader(
         TSNDataSet(args.root_path, args.val_list, num_segments=args.num_segments,
                    new_length=data_length,
-                   modality=args.modality,
                    image_tmpl=prefix,
                    random_shift=False,
                    partial_fcvid_eval=args.partial_fcvid_eval,
                    transform=torchvision.transforms.Compose([
                        GroupScale(int(scale_size)),
                        GroupCenterCrop(crop_size),
-                       Stack(roll=(args.arch in ['BNInception', 'InceptionV3'])),
-                       ToTorchFormatTensor(div=(args.arch not in ['BNInception', 'InceptionV3'])),
+                       Stack(roll=False),
+                       ToTorchFormatTensor(div=True),
                        normalize,
                    ]), dense_sample=args.dense_sample, args=args),
         batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True)
 
     # define loss function (criterion) and optimizer
-    if args.loss_type == 'nll':
-        criterion = torch.nn.CrossEntropyLoss().cuda()
-    elif args.loss_type == "bce":
-        criterion = torch.nn.BCEWithLogitsLoss().cuda()
-    else:
-        raise ValueError("Unknown loss type")
-
-    for group in policies:
-        print(('group: {} has {} params, lr_mult: {}, decay_mult: {}'.format(
-            group['name'], len(group['params']), group['lr_mult'], group['decay_mult'])))
+    criterion = torch.nn.CrossEntropyLoss().cuda()
 
     if args.evaluate:
         validate(val_loader, model, criterion, 0)
@@ -403,7 +364,7 @@ def main():
                 best_train_usage_str = train_usage_str
                 best_val_usage_str = val_usage_str
 
-            print('Best mAP: %.3f (epoch=%d)\t\tBest mmAP: %.3f(epoch=%d)\t\tBest Prec@1: %.3f (epoch=%d)\n' % (
+            print('Best mAP: %.3f (epoch=%d)\t\tBest mmAP: %.3f(epoch=%d)\t\tBest Prec@1: %.3f (epoch=%d)' % (
                 map_record.best_val, map_record.best_at,
                 mmap_record.best_val, mmap_record.best_at,
                 prec_record.best_val, prec_record.best_at))
@@ -424,20 +385,19 @@ def main():
             if mmap_record.is_current_best():
                 best_tau = get_current_temperature(epoch)
 
-    if use_ada_framework:
+    if use_ada_framework and not test_mode:
         print("Best train usage:")
         print(best_train_usage_str)
         print()
         print("Best val usage:")
         print(best_val_usage_str)
 
-    print("Finished in %.4f seconds"%(time.time() - t_start))
+    print("Finished in %.4f seconds\n"%(time.time() - t_start))
 
     if test_mode:
         os.rename(logger._log_path, ospj(logger._log_dir_name, logger._log_file_name[:-4] +
                                      "_mm_%.2f_a_%.2f_f_%.4f.txt"%(mmap_record.best_val, prec_record.best_val, val_gflops
                                                                  )))
-        #sys.stdout = logger.close_log()
 
     if args.with_test:
         if args.test_from != "": #TODO(yue) if any program uses test_from, we won't use this part of code
@@ -485,30 +445,13 @@ def init_gflops_table():
 
 
 def get_gflops_t_tt_vector():
-    # x2_coeff = {"resnet18": 36144, "resnet34": 73008, "resnet50": 76848, "resnet101": 150832,
-    #             "efficientnet-b0":7772.6403, "efficientnet-b1":13950.8929, "efficientnet-b2":19929.8469,
-    #             "efficientnet-b3":35873.7245, "efficientnet-b4":83705.3571, "efficientnet-b5":197305.4847,
-    #             "shufflenet3d_0.5": 42, "shufflenet3d_1.0": 125, "shufflenet3d_1.5": 235, "shufflenet3d_2.0": 393,
-    #             "res3d18": 1143.89, "res3d34": 2022.11, "res3d50": 1500.74, "res3d101": 2266.04,
-    #             "mobilenet3dv2": 549.19
-    #             }
-    # bias = {"resnet18":512000, "resnet34": 512000, "resnet50": 512000, "resnet101": 512000,
-    #             "efficientnet-b0":0, "efficientnet-b1":0, "efficientnet-b2":0,
-    #             "efficientnet-b3":0, "efficientnet-b4":0, "efficientnet-b5":0,
-    #             "shufflenet3d_0.5": 0, "shufflenet3d_1.0": 0, "shufflenet3d_1.5": 0, "shufflenet3d_2.0": 0,
-    #             "res3d18":0, "res3d34":0, "res3d50":0, "res3d101":0,
-    #             "mobilenet3dv2":0}
     gflops_vec = []
     t_vec = []
     tt_vec = []
 
     for i, backbone in enumerate(args.backbone_list):
-        if all([arch_name not in backbone for arch_name in ["resnet","efficientnet","shufflenet3d","mobilenet", "res3d"]]):
-            exit("We can only handle resnet/mobilenet/efficientnet/shufflenet3d as backbone, when computing FLOPS")
-        # if args.cnn3d:
-        #     the_flops = x2_coeff[backbone] * args.reso_list[i] * args.reso_list[i] * args.seg_len / 112. / 112. / 16. / 1000.
-        # else:
-        #     the_flops = (x2_coeff[backbone] * args.reso_list[i] * args.reso_list[i] + bias[backbone]) / 1000000000.0
+        if all([arch_name not in backbone for arch_name in ["resnet","efficientnet","mobilenet", "res3d"]]):
+            exit("We can only handle resnet/mobilenet/efficientnet as backbone, when computing FLOPS")
 
         for crop_i in range(args.ada_crop_list[i]):
             the_flops = gflops_table[backbone+str(args.reso_list[i])]
@@ -562,7 +505,6 @@ def cal_eff(r):
 
         usage_bias = reso_skip_vec - torch.mean(reso_skip_vec)
 
-        # usage_bias = torch.mean(r,dim=[0,1])-torch.mean(r,dim=[0,1,2])
         uniform_loss = torch.norm(usage_bias, p=2) * args.uniform_loss_weight
         loss = loss + uniform_loss
         each_losses.append(uniform_loss.detach().cpu().item())
@@ -597,11 +539,7 @@ def reverse_onehot(a):
 
 
 def get_criterion_loss(criterion, output, target):
-    if args.loss_type == "bce":
-        multi_hot_target = get_multi_hot(target, num_class).cuda()
-        return criterion(output, multi_hot_target)
-    else:
-        return criterion(output, target[:, 0])
+    return criterion(output, target[:, 0])
 
 
 def compute_acc_eff_loss_with_weights(acc_loss, eff_loss, each_losses, epoch):
@@ -658,14 +596,12 @@ def get_policy_usage_str(r_list, reso_dim):
             action_str = "m0(%s %dx%d)" % (args.policy_backbone, args.reso_list[args.policy_input_offset], args.reso_list[args.policy_input_offset])
         elif action_i < reso_dim:
             action_str = "r%d(%7s %dx%d)" % (action_i, backbone_list[action_i], reso_list[action_i], reso_list[action_i])
-            #action_str = "r%d(%7s %dx%d)" % (action_i, args.backbone_list[action_i], args.reso_list[action_i], args.reso_list[action_i])
         else:
             action_str = "s%d (skip %d frames)" % (action_i - reso_dim, args.skip_list[action_i - reso_dim])
 
         usage_ratio = tmp_cnt[action_i] / tmp_total_cnt
         printed_str += "%-22s: %6d (%.2f%%)\n" % (action_str, tmp_cnt[action_i], 100 * usage_ratio)
 
-        #print("gflops",gflops, "ratio", usage_ratio, "vec",gflops_vec[action_i])
         gflops += usage_ratio * gflops_vec[action_i]
         avg_frame_ratio += usage_ratio * t_vec[action_i]
         avg_pred_ratio += usage_ratio * tt_vec[action_i]
@@ -750,7 +686,7 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
                 loss = acc_loss
         else:
             input_var = torch.autograd.Variable(input)
-            output = model(input_var)
+            output = model([input_var])
             loss = get_criterion_loss(criterion, output, target_var)
 
         # print(output.shape)
@@ -819,7 +755,6 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     all_targets = []
     all_all_preds=[]
 
-
     if use_ada_framework:
         tau = get_current_temperature(epoch)
         alosses, elosses = get_average_meters(2)
@@ -865,7 +800,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                 else:
                     loss = acc_loss
             else:
-                output = model(input)
+                output = model([input])
                 loss = get_criterion_loss(criterion, output, target)
 
             # TODO(yue)
@@ -887,7 +822,6 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
             if use_ada_framework:
                 r_list.append(r.cpu().numpy())
                 if args.save_meta:
-                    #print(input_tuple[-3],input_tuple[-2])
                     name_list += input_tuple[-3]
                     indices_list.append(input_tuple[-2])
 
@@ -905,7 +839,6 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                     )
 
                     print_output += extra_each_loss_str(each_terms)
-
                 print(print_output)
 
     # TODO(yue)
@@ -945,7 +878,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     return mAP, mmAP, top1.avg, usage_str if use_ada_framework else None, gflops
 
 def save_checkpoint(state, is_best, exp_full_path):
-    filename = '%s/models/ckpt%04d.pth.tar' % (exp_full_path, state["epoch"])
+    # filename = '%s/models/ckpt%04d.pth.tar' % (exp_full_path, state["epoch"])
     # if (state["epoch"]-1) % args.save_freq == 0 or state["epoch"] == 0:
     #     torch.save(state, filename)
     if is_best:
@@ -991,9 +924,7 @@ def shell():
     test_mode = (args.test_from != "")
     if test_mode: #TODO test mode
         print("======== TEST MODE ========")
-        if args.skip_training == False:
-            print("Set args.skip_training to True...")
-            args.skip_training = True
+        args.skip_training = True
         #TODO(debug) try check batch size and init tau
         if args.cnn3d:
             k_clips=args.num_segments // args.seg_len
@@ -1011,7 +942,7 @@ def shell():
                 t_list = [8, 16, 25]
         bs_list = [args.batch_size, args.batch_size, args.batch_size//2+1, args.batch_size//4+1, args.batch_size//4+1, args.batch_size//8+1, args.batch_size//8+1]
         k_list=[args.top_k]
-        if args.real_scsampler:
+        if args.real_scsampler and not args.uno_top_k:
             k_list = [1, 4, 8, 10, 12]
 
         for t_i, t in enumerate(t_list):

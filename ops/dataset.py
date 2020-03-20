@@ -35,7 +35,7 @@ class VideoRecord(object):
 
 class TSNDataSet(data.Dataset):
     def __init__(self, root_path, list_file,
-                 num_segments=3, new_length=1, modality='RGB',
+                 num_segments=3, new_length=1,
                  image_tmpl='img_{:05d}.jpg', transform=None,
                  random_shift=True, test_mode=False,
                  remove_missing=False, dense_sample=False, twice_sample=False, partial_fcvid_eval=False, args=None):
@@ -44,7 +44,6 @@ class TSNDataSet(data.Dataset):
         self.list_file = list_file
         self.num_segments = num_segments
         self.new_length = new_length
-        self.modality = modality
         self.image_tmpl = image_tmpl
         self.transform = transform
         self.random_shift = random_shift
@@ -63,44 +62,14 @@ class TSNDataSet(data.Dataset):
         if self.twice_sample:
             print('=> Using twice sample for the dataset...')
 
-        if self.modality == 'RGBDiff':
-            self.new_length += 1  # Diff needs one more image to calculate diff
-
         self._parse_list()
 
     def _load_image(self, directory, idx):
-        if self.modality == 'RGB' or self.modality == 'RGBDiff':
-            try:
-                return [Image.open(os.path.join(self.root_path, directory, self.image_tmpl.format(idx))).convert('RGB')]
-            except Exception:
-                print('error loading image:', os.path.join(self.root_path, directory, self.image_tmpl.format(idx)))
-                return [Image.open(os.path.join(self.root_path, directory, self.image_tmpl.format(1))).convert('RGB')]
-        elif self.modality == 'Flow':
-            if self.image_tmpl == 'flow_{}_{:05d}.jpg':  # ucf
-                x_img = Image.open(os.path.join(self.root_path, directory, self.image_tmpl.format('x', idx))).convert(
-                    'L')
-                y_img = Image.open(os.path.join(self.root_path, directory, self.image_tmpl.format('y', idx))).convert(
-                    'L')
-            elif self.image_tmpl == '{:06d}-{}_{:05d}.jpg':  # something v1 flow
-                x_img = Image.open(os.path.join(self.root_path, '{:06d}'.format(int(directory)), self.image_tmpl.
-                                                format(int(directory), 'x', idx))).convert('L')
-                y_img = Image.open(os.path.join(self.root_path, '{:06d}'.format(int(directory)), self.image_tmpl.
-                                                format(int(directory), 'y', idx))).convert('L')
-            else:
-                try:
-                    # idx_skip = 1 + (idx-1)*5
-                    flow = Image.open(os.path.join(self.root_path, directory, self.image_tmpl.format(idx))).convert(
-                        'RGB')
-                except Exception:
-                    print('error loading flow file:',
-                          os.path.join(self.root_path, directory, self.image_tmpl.format(idx)))
-                    flow = Image.open(os.path.join(self.root_path, directory, self.image_tmpl.format(1))).convert('RGB')
-                # the input flow file is RGB image with (flow_x, flow_y, blank) for each channel
-                flow_x, flow_y, _ = flow.split()
-                x_img = flow_x.convert('L')
-                y_img = flow_y.convert('L')
-
-            return [x_img, y_img]
+        try:
+            return [Image.open(os.path.join(self.root_path, directory, self.image_tmpl.format(idx))).convert('RGB')]
+        except Exception:
+            print('error loading image:', os.path.join(self.root_path, directory, self.image_tmpl.format(idx)))
+            return [Image.open(os.path.join(self.root_path, directory, self.image_tmpl.format(1))).convert('RGB')]
 
     def _parse_list(self):
         # check the frame number is large >3:
@@ -231,30 +200,19 @@ class TSNDataSet(data.Dataset):
 
         process_data = self.transform(images)
         if self.args.ada_reso_skip:
-            def check_scale_is_pyramid_indeed(reso_list):
-                for ii in range(len(reso_list)-1):
-                    if reso_list[ii] != reso_list[ii+1]*2:
-                        return False
-                return True
-
-
-            if (not any([self.args.random_crop, self.args.center_crop])) and \
-                    self.args.pyramid_boost and check_scale_is_pyramid_indeed(self.args.reso_list):
-                return process_data, record.label
+            return_items = [process_data]
+            if self.args.random_crop:
+                rescaled = [self.random_crop(process_data, (x,x)) for x in self.args.reso_list[1:]]
+            elif self.args.center_crop:
+                rescaled = [self.center_crop(process_data, (x, x)) for x in self.args.reso_list[1:]]
             else:
-                return_items = [process_data]
-                if self.args.random_crop:
-                    rescaled = [self.random_crop(process_data, (x,x)) for x in self.args.reso_list[1:]]
-                elif self.args.center_crop:
-                    rescaled = [self.center_crop(process_data, (x, x)) for x in self.args.reso_list[1:]]
-                else:
-                    rescaled = [self.rescale(process_data, (x,x)) for xi,x in enumerate(self.args.reso_list[1:]) if (self.args.ada_crop_list[xi+1]==1 or xi+1==self.args.policy_input_offset)]
-                return_items = return_items + rescaled
-                if self.args.save_meta:
-                    return_items = return_items + [record.path] + [indices] #[torch.tensor(indices)]
-                return_items = return_items + [record.label]
+                rescaled = [self.rescale(process_data, (x,x)) for xi,x in enumerate(self.args.reso_list[1:]) if (self.args.ada_crop_list[xi+1]==1 or xi+1==self.args.policy_input_offset)]
+            return_items = return_items + rescaled
+            if self.args.save_meta:
+                return_items = return_items + [record.path] + [indices] #[torch.tensor(indices)]
+            return_items = return_items + [record.label]
 
-                return tuple(return_items)
+            return tuple(return_items)
         else:
             return process_data, record.label
 

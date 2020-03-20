@@ -151,14 +151,14 @@ def return_kinetics(modality):
     return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
 
 
-def return_dataset(dataset, modality):
+def return_dataset(dataset):
     dict_single = {'jester': return_jester, 'something': return_something, 'somethingv2': return_somethingv2,
                    'ucf101': return_ucf101, 'hmdb51': return_hmdb51,
                    'kinetics': return_kinetics,
                    'actnet': return_actnet, 'fcvid':return_fcvid,
                    'ministh': return_ministh, 'minik': return_minik} # TODO(yue)
     if dataset in dict_single:
-        file_categories, file_imglist_train, file_imglist_val, root_data, prefix = dict_single[dataset](modality)
+        file_categories, file_imglist_train, file_imglist_val, root_data, prefix = dict_single[dataset]('RGB')
     else:
         raise ValueError('Unknown dataset '+dataset)
 

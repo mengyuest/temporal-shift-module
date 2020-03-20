@@ -76,10 +76,8 @@ parser.add_argument('--non_local', default=False, action="store_true", help='add
 
 parser.add_argument('--dense_sample', default=False, action="store_true", help='use dense sample for video dataset')
 
-# TODO(yue) basic style + (offline-related)
+# TODO(yue) ADAPTIVE RESEARCH HYPER-PARAMETERS
 parser.add_argument('--exp_header', default="default", type=str, help='experiment header')
-parser.add_argument('--rescale_to', default=224, type=int, help='rescale to this resolution (TSN only)')
-parser.add_argument('--rescale_pattern', default="L", type=str, help='The offline scale policy')
 
 # TODO(yue) adaptive resolution and skipping (hardcoded version)
 parser.add_argument('--ada_reso_skip', action='store_true', help='adaptively select scale and choose to skip')
@@ -111,7 +109,6 @@ parser.add_argument('--eff_loss_after', default=-1, type=int, help="use eff loss
 parser.add_argument('--save_freq', default=10, type=int,help="freq to save network model weight")# TODO(yue)
 parser.add_argument('--model_paths', default=[], type=str, nargs="+", help='path to load models for backbones')
 parser.add_argument('--policy_path', default="", type=str, help="path of the policy network")
-parser.add_argument('--pyramid_boost', action='store_true')
 # TODO(yue) maybe we want to use ImageNet pretrain or not, depending on the resolution
 
 # TODO(yue) annealing
@@ -125,8 +122,6 @@ parser.add_argument('--frozen_list', default=[], type=str, nargs="+", help='list
 parser.add_argument('--policy_also_backbone', action='store_true', help="use policy as the last backbone")
 parser.add_argument('--uniform_loss_weight', type=float, default=1e-6, help="loss to constraints all uses equal")
 parser.add_argument('--lite_mode',action='store_true') # TODO(yue) for 2 gpus and batchsize=4
-
-
 # TODO: loading order: ImageNet->Joint Model->specific modules (better not using both joint and specific)
 
 # TODO(yue) try different losses for efficiency terms
@@ -134,18 +129,13 @@ parser.add_argument('--use_gflops_loss', action='store_true') #TODO(yue) use flo
 parser.add_argument('--head_loss_weight', type=float, default=1e-6) #TODO(yue) punish to the high resolution selection
 parser.add_argument('--frames_loss_weight', type=float, default=1e-6) #TODO(yue) use num_frames as a loss assignment
 
-# TODO(yue) oracle scsampler (from ListenToLook ideas)
-parser.add_argument('--consensus_type', type=str, default='avg') #TODO can also use scsampler!
-parser.add_argument('--top_k', type=int, default=10) #TODO can also use scsampler!
-
 #TODO(yue) finetuning and testing
 parser.add_argument('--base_pretrained_from', type=str, default='', help='for base model pretrained path') #TODO can also use scsampler!
 parser.add_argument('--skip_training',action='store_true') #TODO(yue) just doing eval
 parser.add_argument('--freeze_policy', action='store_true') #TODO(yue) fix the policy
 
-#TODO(yue) for reproducibility
+#TODO(yue) reproducibility
 parser.add_argument('--random_seed', type=int, default=1007)
-parser.add_argument('--stabilize_order', action='store_true')
 
 #TODO(yue) for FCVID or datasets where eval is too heavy
 parser.add_argument('--partial_fcvid_eval', action='store_true')
@@ -156,11 +146,14 @@ parser.add_argument('--cnn3d', action='store_true')
 parser.add_argument('--seg_len',type=int, default=16)
 parser.add_argument('--3d_pretrained_uses', type=str, default='inflation') # if not inflation, maybe jester
 
+#TODO(yue) crop
 parser.add_argument('--center_crop', action='store_true')
 parser.add_argument('--random_crop', action='store_true')
 
+# TODO(yue) oracle scsampler (from ListenToLook ideas)
+parser.add_argument('--consensus_type', type=str, default='avg') #TODO can also use scsampler!
+parser.add_argument('--top_k', type=int, default=10) #TODO can also use scsampler!
 #TODO(yue) real SCSampler (we also use --top_k to select frames, and use consensus type=='scsampler')
-# parser.add_argument('--top_k', type=int, default=5) #TODO can also use scsampler!
 parser.add_argument('--real_scsampler', action='store_true')
 parser.add_argument('--sal_rank_loss', action='store_true')
 parser.add_argument('--frame_independent', action='store_true') #TODO use tsn in models_ada
@@ -174,19 +167,14 @@ parser.add_argument('--freeze_backbone', action='store_true')
 parser.add_argument('--test_from', type=str, default="")
 parser.add_argument('--many_times', action='store_true')
 parser.add_argument('--uno_time', action='store_true')
-
+parser.add_argument('--uno_top_k', action='store_true')
 parser.add_argument('--with_test', action='store_true')
 
 #TODO(yue) adaptive-cropping (only 1, 5, 9)
 parser.add_argument('--ada_crop_list', default=[], type=int, nargs="+", help='num of anchor points per scaling')
 
-#TODO(yue) mask
-
 #TODO(yue) visualizations
 parser.add_argument('--save_meta', action='store_true')
 parser.add_argument('--ablation', action='store_true')
 parser.add_argument('--remove_all_base_0', action='store_true')
-
-
 parser.add_argument('--save_all_preds', action='store_true')
-

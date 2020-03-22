@@ -21,7 +21,6 @@ parser.add_argument('--dropout', '--do', default=0.5, type=float,
                     metavar='DO', help='dropout ratio (default: 0.5)')
 #parser.add_argument('--loss_type', type=str, default="nll",
 #                    choices=['nll'])
-parser.add_argument('--img_feature_dim', default=256, type=int, help="the feature dimension for each frame")
 parser.add_argument('--suffix', type=str, default=None)
 parser.add_argument('--pretrain', type=str, default='imagenet')
 parser.add_argument('--tune_from', type=str, default=None, help='fine-tune from checkpoint')
@@ -78,6 +77,7 @@ parser.add_argument('--dense_sample', default=False, action="store_true", help='
 
 # TODO(yue) ADAPTIVE RESEARCH HYPER-PARAMETERS
 parser.add_argument('--exp_header', default="default", type=str, help='experiment header')
+parser.add_argument('--rescale_to', default=224, type=int)
 
 # TODO(yue) adaptive resolution and skipping (hardcoded version)
 parser.add_argument('--ada_reso_skip', action='store_true', help='adaptively select scale and choose to skip')
@@ -178,3 +178,10 @@ parser.add_argument('--save_meta', action='store_true')
 parser.add_argument('--ablation', action='store_true')
 parser.add_argument('--remove_all_base_0', action='store_true')
 parser.add_argument('--save_all_preds', action='store_true')
+
+# TODO NeurIPS2020: ARNet++
+parser.add_argument('--dmy', action='store_true')
+parser.add_argument('--num_filters_list', default=[64], type=int, nargs="+", help='number of filters')
+parser.add_argument('--freeze_channels', default=None, type=int, help="freeze first xth channels in filters")
+parser.add_argument('--cross_assign', action='store_true')
+parser.add_argument('--default_signal', default=0, type=int)

@@ -9,6 +9,7 @@ from efficientnet_pytorch import EfficientNet
 from ops.cnn3d.i3d_resnet import i3d_resnet
 from ops.cnn3d.mobilenet3dv2 import mobilenet3d_v2
 from ops.cnn3d.shufflenet3d import ShuffleNet3D
+import ops.dmynet
 
 feat_dim_dict = {
     "resnet18": 512,
@@ -31,6 +32,10 @@ feat_dim_dict = {
     "res3d34": 512,
     "res3d50": 2048,
     "res3d101": 2048,
+    "dmynet18": 512,
+    "dmynet34": 512,
+    "dmynet50": 2048,
+    "dmynet101": 2048
     }
 
 prior_dict={
@@ -42,7 +47,8 @@ prior_dict={
 "efficientnet-b5": (9.90, 30),
 }
 
-def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretrained=True):
+def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretrained=True,
+                      num_filters_list=[], default_signal=-1):
     if model_name in prior_dict:
         gflops, params = prior_dict[model_name]
         gflops = gflops / 224 / 224 * resolution * resolution
@@ -69,17 +75,28 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
     elif "mobilenet3d" in model_name:
         model = mobilenet3d_v2(pretrained=pretrained)
         last_layer = "classifier"
+    elif "dmynet" in model_name:
+        model = getattr(ops.dmynet, model_name)(pretrained=False,
+                                                num_filters_list=num_filters_list,
+                                                default_signal=default_signal)
+        last_layer = "fcs"
     else:
         exit("I don't know what is %s" % model_name)
     feat_dim = feat_dim_dict[model_name]
-    setattr(model, last_layer, nn.Linear(feat_dim, num_classes))
+    if "dmynet" in model_name:
+        setattr(model, last_layer, torch.nn.ModuleList([nn.Linear(feat_dim * num_filters // 64, num_classes) for num_filters in num_filters_list]))
+    else:
+        setattr(model, last_layer, nn.Linear(feat_dim, num_classes))
 
     if seg_len == -1:
         dummy_data = torch.randn(1, 3, resolution, resolution)
     else:
         dummy_data = torch.randn(1, 3, seg_len, resolution, resolution)
 
-    flops, params = profile(model, inputs=(dummy_data,))
+    hooks={}
+    if "dmynet" in model_name:
+        hooks={ops.dmynet.Conv2dMY: ops.dmynet.count_conv_my}
+    flops, params = profile(model, inputs=(dummy_data,), custom_ops=hooks)
     gflops = flops / 1e9
     params = params / 1e6
 

@@ -153,7 +153,6 @@ def main():
                 base_model=args.arch,
                 consensus_type=args.consensus_type,
                 dropout=args.dropout,
-                img_feature_dim=args.img_feature_dim,
                 partial_bn=not args.no_partialbn,
                 pretrain=args.pretrain,
                 is_shift=args.shift, shift_div=args.shift_div, shift_place=args.shift_place,
@@ -438,8 +437,14 @@ def init_gflops_table():
     global gflops_table
     gflops_table = {}
     seg_len = args.seg_len if args.cnn3d else -1
-    for i, backbone in enumerate(args.backbone_list):
-        gflops_table[backbone+str(args.reso_list[i])] = get_gflops_params(backbone, args.reso_list[i], num_class, seg_len)[0]
+    if args.dmy:
+        for fc_i in range(len(args.num_filters_list)):
+            gflops_table[args.backbone_list[0] + str(args.reso_list[fc_i])+"@%d"%(fc_i)] \
+                = get_gflops_params(args.backbone_list[0], args.reso_list[fc_i], num_class, seg_len,
+                                    default_signal=fc_i, num_filters_list=args.num_filters_list)[0]
+    else:
+        for i, backbone in enumerate(args.backbone_list):
+            gflops_table[backbone+str(args.reso_list[i])] = get_gflops_params(backbone, args.reso_list[i], num_class, seg_len)[0]
     gflops_table["policy"] = get_gflops_params(args.policy_backbone, args.reso_list[args.policy_input_offset], num_class, seg_len)[0]
     gflops_table["lstm"] = 2 * (feat_dim_dict[args.policy_backbone] ** 2) /1000000000
 
@@ -449,15 +454,22 @@ def get_gflops_t_tt_vector():
     t_vec = []
     tt_vec = []
 
-    for i, backbone in enumerate(args.backbone_list):
-        if all([arch_name not in backbone for arch_name in ["resnet","efficientnet","mobilenet", "res3d"]]):
-            exit("We can only handle resnet/mobilenet/efficientnet as backbone, when computing FLOPS")
-
-        for crop_i in range(args.ada_crop_list[i]):
-            the_flops = gflops_table[backbone+str(args.reso_list[i])]
+    if args.dmy:
+        for fc_i in range(len(args.num_filters_list)):
+            the_flops = gflops_table[args.backbone_list[0] + str(args.reso_list[fc_i])+"@%d"%(fc_i)]
             gflops_vec.append(the_flops)
             t_vec.append(1.)
             tt_vec.append(1.)
+    else:
+        for i, backbone in enumerate(args.backbone_list):
+            if all([arch_name not in backbone for arch_name in ["resnet","efficientnet","mobilenet", "res3d"]]):
+                exit("We can only handle resnet/mobilenet/efficientnet as backbone, when computing FLOPS")
+
+            for crop_i in range(args.ada_crop_list[i]):
+                the_flops = gflops_table[backbone+str(args.reso_list[i])]
+                gflops_vec.append(the_flops)
+                t_vec.append(1.)
+                tt_vec.append(1.)
 
     if args.policy_also_backbone:
         gflops_vec.append(0)
@@ -481,25 +493,28 @@ def cal_eff(r):
         r_loss = torch.tensor(gflops_vec).cuda()
     else:
         r_loss = torch.tensor([4., 2., 1., 0.5, 0.25, 0.125, 0.0625,0.03125]).cuda()[:r.shape[2]]
-
+    #print(r.shape, r_loss.shape)
     loss = torch.sum(torch.mean(r, dim=[0,1]) * r_loss)
     each_losses.append(loss.detach().cpu().item())
 
     #TODO(yue) uniform loss
     if args.uniform_loss_weight > 1e-5:
         if_policy_backbone = 1 if args.policy_also_backbone else 0
-        reso_skip_vec=torch.zeros(len(args.backbone_list)+if_policy_backbone+len(args.skip_list)).cuda()
+        num_pred = len(args.num_filters_list) if args.dmy else len(args.backbone_list)
+        policy_dim = num_pred + if_policy_backbone + len(args.skip_list)
+
+        reso_skip_vec=torch.zeros(policy_dim).cuda()
 
         #TODO
         offset=0
         #TODO reso/ada_crops
-        for b_i in range(len(args.backbone_list)):
+        for b_i in range(num_pred):
             interval = args.ada_crop_list[b_i]
             reso_skip_vec[b_i] += torch.sum(r[:, :, offset:offset+interval])
             offset = offset + interval
 
         #TODO mobilenet + skips
-        for b_i in range(len(args.backbone_list), reso_skip_vec.shape[0]):
+        for b_i in range(num_pred, reso_skip_vec.shape[0]):
             reso_skip_vec[b_i] = torch.sum(r[:, :, b_i])
         reso_skip_vec = reso_skip_vec / torch.sum(reso_skip_vec)
 
@@ -585,17 +600,22 @@ def get_policy_usage_str(r_list, reso_dim):
     avg_frame_ratio = 0
     avg_pred_ratio = 0
 
-    backbone_list=[]
+    used_model_list=[]
     reso_list=[]
-    for i in range(len(args.backbone_list)):
-        backbone_list += [args.backbone_list[i]] * args.ada_crop_list[i]
-        reso_list += [args.reso_list[i]] * args.ada_crop_list[i]
+    if args.dmy:
+        for fc_i in range(len(args.num_filters_list)):
+            used_model_list += [args.backbone_list[0]+"@%d"%(fc_i)] * args.ada_crop_list[fc_i]
+            reso_list += [args.reso_list[fc_i]] * args.ada_crop_list[fc_i]
+    else:
+        for i in range(len(args.backbone_list)):
+            used_model_list += [args.backbone_list[i]] * args.ada_crop_list[i]
+            reso_list += [args.reso_list[i]] * args.ada_crop_list[i]
 
     for action_i in range(rs.shape[2]):
         if args.policy_also_backbone and action_i == reso_dim - 1:
             action_str = "m0(%s %dx%d)" % (args.policy_backbone, args.reso_list[args.policy_input_offset], args.reso_list[args.policy_input_offset])
         elif action_i < reso_dim:
-            action_str = "r%d(%7s %dx%d)" % (action_i, backbone_list[action_i], reso_list[action_i], reso_list[action_i])
+            action_str = "r%d(%7s %dx%d)" % (action_i, used_model_list[action_i], reso_list[action_i], reso_list[action_i])
         else:
             action_str = "s%d (skip %d frames)" % (action_i - reso_dim, args.skip_list[action_i - reso_dim])
 
@@ -686,7 +706,7 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
                 loss = acc_loss
         else:
             input_var = torch.autograd.Variable(input)
-            output = model([input_var])
+            output = model(input=[input_var])
             loss = get_criterion_loss(criterion, output, target_var)
 
         # print(output.shape)
@@ -800,7 +820,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                 else:
                     loss = acc_loss
             else:
-                output = model([input])
+                output = model(input=[input])
                 loss = get_criterion_loss(criterion, output, target)
 
             # TODO(yue)

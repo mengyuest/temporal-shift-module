@@ -214,7 +214,18 @@ class TSNDataSet(data.Dataset):
 
             return tuple(return_items)
         else:
-            return process_data, record.label
+            if self.args.rescale_to == 224:
+                rescaled = process_data
+            else:
+                x = self.args.rescale_to
+                if self.args.random_crop:
+                    rescaled = self.random_crop(process_data, (x, x))
+                elif self.args.center_crop:
+                    rescaled = self.center_crop(process_data, (x, x))
+                else:
+                    rescaled = self.rescale(process_data, (x, x))
+
+            return rescaled, record.label
 
     # TODO(yue)
     # (NC, H, W)->(NC, H', W')

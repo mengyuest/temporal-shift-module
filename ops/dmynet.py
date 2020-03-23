@@ -336,28 +336,31 @@ def _dmynet(arch, block, layers, pretrained, progress, **kwargs):
                                               progress=progress)
         #TODO okay now let's load ResNet to DResNet
         model_dict = model.state_dict()
+        kvs_to_add = []
         old_to_new_pairs = []
         keys_to_delete = []
         for k in pretrained_dict:
             #TODO batchnorm
             if "bn" in k:
-                if "arunning_" in k:
-                    keys_to_delete.append(k)
-                else:
-                    # TODO layer1.0.bn1.weight-> layer1.0.bn1s.0.weight
-                    before_bn,after_bn = k.split("bn")
-                    old_to_new_pairs.append((k, before_bn+"bn"+after_bn[0]+"s.0"+after_bn[1:]))
+                # TODO layer1.0.bn1.weight-> layer1.0.bn1s.0.weight
+                before_bn,after_bn = k.split("bn")
+                for fc_i in range(1, len(kwargs["num_filters_list"])):
+                    origin_len = pretrained_dict[k].shape[0]
+                    slicing_len = origin_len * kwargs["num_filters_list"][fc_i]// 64
+                    kvs_to_add.append((before_bn+"bn"+after_bn[0]+"s.%d"%(fc_i)+after_bn[1:], pretrained_dict[k][:slicing_len]))
+                old_to_new_pairs.append((k, before_bn+"bn"+after_bn[0]+"s.0"+after_bn[1:]))
             # TODO downsample
             elif "downsample.0" in k:
                 # TODO layer1.0.downsample.0.weight-> layer1.0.downsample0.weight
                 old_to_new_pairs.append((k, k.replace("downsample.0",  "downsample0")))
             # TODO downsample
             elif "downsample.1" in k:
-                if "arunning_" in k:
-                    keys_to_delete.append(k)
-                else:
-                    # TODO layer4.0.downsample.1.weight -> layer4.0.downsample1s.0.weight
-                    old_to_new_pairs.append((k, k.replace("downsample.1", "downsample1s.0")))
+                # TODO layer4.0.downsample.1.weight -> layer4.0.downsample1s.0.weight
+                for fc_i in range(1, len(kwargs["num_filters_list"])):
+                    origin_len = pretrained_dict[k].shape[0]
+                    slicing_len = origin_len * kwargs["num_filters_list"][fc_i]// 64
+                    kvs_to_add.append((k.replace("downsample.1", "downsample1s.%d"%(fc_i)), pretrained_dict[k][:slicing_len]))
+                old_to_new_pairs.append((k, k.replace("downsample.1", "downsample1s.0")))
             # TODO fc layers
             elif "fc" in k:
                 # TODO fc.weight -> fcs.0.weight
@@ -366,10 +369,13 @@ def _dmynet(arch, block, layers, pretrained, progress, **kwargs):
         for del_key in keys_to_delete:
             del pretrained_dict[del_key]
 
+        for new_k, new_v in kvs_to_add:
+            pretrained_dict[new_k] = new_v
+
         for old_key, new_key in old_to_new_pairs:
             pretrained_dict[new_key] = pretrained_dict.pop(old_key)
-        print("updated keys", pretrained_dict.keys())
         model_dict.update(pretrained_dict)
+        model.load_state_dict(model_dict)
     return model
 
 

@@ -114,17 +114,30 @@ if __name__ == "__main__":
     # 4. ResNet3D Family (res3d18, res3d34, res3d50, res3d101)
     # 5. MobileNet3dV2
 
+    # str_list = []
+    # for k in [200]:
+    #     for resolution in [84,112,168,224]:
+    #         for key in feat_dim_dict:
+    #             print(k,resolution,key)
+    #             if "3d" in key:
+    #                 seg_len = 16
+    #             else:
+    #                 seg_len = -1
+    #             gflops, params = get_gflops_params(key, resolution, k, seg_len)
+    #             str_list.append("%-25s\tclasses:%d\treso:%3d\tseg_len:%d\tgflops:%.4f\tparams:%.4fM" % (key, k, resolution, seg_len, gflops, params))
+    #
+    # for s in str_list:
+    #     print(s)
+
     str_list = []
-    for k in [200]:
-        for resolution in [84,112,168,224]:
-            for key in feat_dim_dict:
-                print(k,resolution,key)
-                if "3d" in key:
-                    seg_len = 16
-                else:
-                    seg_len = -1
-                gflops, params = get_gflops_params(key, resolution, k, seg_len)
-                str_list.append("%-25s\tclasses:%d\treso:%3d\tseg_len:%d\tgflops:%.4f\tparams:%.4fM" % (key, k, resolution, seg_len, gflops, params))
+    k=200
+    seg_len=-1
+    for resolution in [84, 112, 168, 224]:
+        for signal in [0,1,2,3]:
+            gflops, params = get_gflops_params("dmynet50", resolution, k, seg_len,
+                                               num_filters_list=[64,48,32,16], default_signal=signal)
+            str_list.append("%-25s\tclasses:%d\treso:%3d\tseg_len:%d\tgflops:%.4f\tparams:%.4fM" % (
+                    "dmynet50", k, resolution, seg_len, gflops, params))
 
     for s in str_list:
         print(s)

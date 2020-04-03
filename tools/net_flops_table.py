@@ -48,7 +48,7 @@ prior_dict={
 }
 
 def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretrained=True,
-                      num_filters_list=[], default_signal=-1):
+                      num_filters_list=[], default_signal=-1, last_conv_same=False):
     if model_name in prior_dict:
         gflops, params = prior_dict[model_name]
         gflops = gflops / 224 / 224 * resolution * resolution
@@ -84,7 +84,11 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
         exit("I don't know what is %s" % model_name)
     feat_dim = feat_dim_dict[model_name]
     if "dmynet" in model_name:
-        setattr(model, last_layer, torch.nn.ModuleList([nn.Linear(feat_dim * num_filters // 64, num_classes) for num_filters in num_filters_list]))
+        if last_conv_same:
+            setattr(model, last_layer, torch.nn.ModuleList(
+                [nn.Linear(feat_dim, num_classes) for _ in num_filters_list]))
+        else:
+            setattr(model, last_layer, torch.nn.ModuleList([nn.Linear(feat_dim * num_filters // 64, num_classes) for num_filters in num_filters_list]))
     else:
         setattr(model, last_layer, nn.Linear(feat_dim, num_classes))
 

@@ -185,3 +185,24 @@ parser.add_argument('--num_filters_list', default=[64], type=int, nargs="+", hel
 parser.add_argument('--freeze_channels', default=None, type=int, help="freeze first xth channels in filters")
 parser.add_argument('--cross_assign', action='store_true')
 parser.add_argument('--default_signal', default=0, type=int)
+
+
+#TODO trial for dilation
+parser.add_argument('--dilation_list', default=None, type=int, nargs="+", help='list of dilations')
+
+
+#TODO trial for cross-entropy-loss for uniform
+parser.add_argument('--uniform_cross_entropy', action='store_true')
+
+#TODO trial for progressive/multi-step training
+parser.add_argument('--ignore_new_fc_weight', action='store_true')
+
+#TODO fix the last layer of conv, to share the fc layer and corr. batch norm
+parser.add_argument('--last_conv_same',action='store_true')
+
+#TODO share batch norm or not? share fc weight or not?
+
+#TODO distillation training (which part, pairwise, weight)
+parser.add_argument('--distill_policy', action='store_true')
+parser.add_argument('--distillation_weight', default=1.0, type=float, help="weights for distillation")
+parser.add_argument('--use_feat_to_distill', action='store_true')

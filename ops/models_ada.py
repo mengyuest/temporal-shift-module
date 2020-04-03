@@ -154,7 +154,7 @@ class TSN_Ada(nn.Module):
             if self.args.dmy:
                 shall_pretrain = len(self.args.model_paths) == 0 or self.args.model_paths[0].lower() != 'none'
                 self.base_model_list.append(getattr(dmynet, self.args.backbone_list[0])(
-                    pretrained=shall_pretrain, num_filters_list=self.args.num_filters_list))
+                    pretrained=shall_pretrain, num_filters_list=self.args.num_filters_list, last_conv_same=self.args.last_conv_same))
                 self.base_model_list[-1].last_layer_name = 'fcs'
             else:
                 for bbi, backbone_name in enumerate(self.args.backbone_list):
@@ -193,7 +193,7 @@ class TSN_Ada(nn.Module):
 
         if self.args.dmy:
             self.base_model = getattr(dmynet, base_model)(
-                pretrained=shall_pretrain, num_filters_list=self.args.num_filters_list)
+                pretrained=shall_pretrain, num_filters_list=self.args.num_filters_list, last_conv_same=self.args.last_conv_same)
             self.base_model.last_layer_name = 'fcs'
 
         elif 'resnet' in base_model:
@@ -286,6 +286,8 @@ class TSN_Ada(nn.Module):
                         normal_(new_fc.weight, 0, std)
                         constant_(new_fc.bias, 0)
                     self.new_fc_list.append(new_fc)
+                    if self.args.last_conv_same:
+                        break
                 setattr(base_model, base_model.last_layer_name, torch.nn.ModuleList([nn.Dropout(p=self.dropout) for _ in self.args.num_filters_list]))
                 return None
             for j,base_model in enumerate(self.base_model_list):
@@ -307,7 +309,8 @@ class TSN_Ada(nn.Module):
             return None
 
         if self.args.dmy:
-            the_fc_i = self.args.default_signal
+            the_fc_i = self.args.default_signal if not self.args.last_conv_same else 0
+
             feature_dim = getattr(self.base_model, self.base_model.last_layer_name)[the_fc_i].in_features
             setattr(self.base_model, self.base_model.last_layer_name, torch.nn.ModuleList([nn.Dropout(p=self.dropout) for _ in self.args.num_filters_list]))
             new_fc = nn.Linear(feature_dim, num_class)
@@ -458,20 +461,22 @@ class TSN_Ada(nn.Module):
                 input_3d = input_3d.view(
                     (input_data.shape[0] * self.time_steps,) + input_3d.size()[2:])
                 input_3d = input_3d.transpose(2, 1)
-                base_out = the_base_model(input_3d)
+                feat = the_base_model(input_3d)
             else:
                 if self.args.dmy and signal>=0:
-                    base_out = the_base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]),
+                    feat = the_base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]),
                                           signal=signal)
                 else:
-                    base_out = the_base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]))
+                    feat = the_base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]))
 
             if new_fc is not None:
-                base_out = new_fc(base_out)
+                base_out = new_fc(feat)
+                base_out = base_out.view((-1, self.time_steps) + base_out.size()[1:])
+            else:
+                base_out = None
+            feat = feat.view((-1, self.time_steps) + feat.size()[1:])
 
-            base_out = base_out.view((-1, self.time_steps) + base_out.size()[1:])
-
-            return base_out
+            return feat, base_out
 
         batch_size = kwargs["input"][0].shape[0] # TODO(yue) input[0] B*(TC)*H*W
 
@@ -489,8 +494,9 @@ class TSN_Ada(nn.Module):
             #                                             size=(self.rescale_to, self.rescale_to),
             #                                             mode='nearest').view(
             #         (_N, _T * _C, self.rescale_to, self.rescale_to))
-
-            base_out = backbone(kwargs["input"][0], self.base_model, self.new_fc, signal=self.args.default_signal)
+            dila_list = self.args.dilation_list if self.args.dilation_list is not None else [0 for _ in
+                                                                                             self.args.num_filters_list]
+            _, base_out = backbone(kwargs["input"][0], self.base_model, self.new_fc, signal=10*dila_list[self.args.default_signal]+self.args.default_signal)
             if self.is_shift and self.temporal_pool:
                 base_out = base_out.view((-1, self.num_segments // 2) + base_out.size()[1:])
             # else:
@@ -503,6 +509,8 @@ class TSN_Ada(nn.Module):
             output = self.consensus(base_out)
             return output.squeeze(1)
 
+
+
         input_list = kwargs["input"]
 
         new_policy_input_offset = self.args.policy_input_offset
@@ -510,23 +518,31 @@ class TSN_Ada(nn.Module):
             if self.args.ada_crop_list[reso_i]>1:
                 new_policy_input_offset -= 1
 
-        feat_lite = backbone(input_list[new_policy_input_offset], self.lite_backbone, None)
+        feat_lite, _ = backbone(input_list[new_policy_input_offset], self.lite_backbone, None)
         hx = init_hidden(batch_size, self.args.hidden_dim)
         cx = init_hidden(batch_size, self.args.hidden_dim)
         logits_list = []
         lite_j_list = []
-
+        feat_out_list = []
         base_out_list = []
+
         if self.multi_models:
             input_offset=0
             if self.args.dmy:
+                dila_list = self.args.dilation_list if self.args.dilation_list is not None else [0 for _ in
+                                                                                                 self.args.num_filters_list]
                 for fc_i in range(len(self.args.num_filters_list)):
-                    base_out_list.append(backbone(input_list[fc_i], self.base_model_list[0], self.new_fc_list[fc_i],
-                                                  signal=fc_i))
+                    last_layer_fc_i = fc_i if not self.args.last_conv_same else 0
+                    feat_out, base_out = backbone(input_list[fc_i], self.base_model_list[0], self.new_fc_list[last_layer_fc_i],
+                                                  signal=dila_list[fc_i]*10+fc_i)
+                    feat_out_list.append(feat_out)
+                    base_out_list.append(base_out)
             else:
                 for bb_i,the_backbone in enumerate(self.base_model_list):
                     if self.args.ada_crop_list[bb_i]==1:
-                        base_out_list.append(backbone(input_list[input_offset], the_backbone, self.new_fc_list[bb_i]))
+                        feat_out, base_out = backbone(input_list[input_offset], the_backbone, self.new_fc_list[bb_i])
+                        feat_out_list.append(feat_out)
+                        base_out_list.append(base_out)
                         input_offset+=1
                     else:
                         reso = self.args.reso_list[bb_i]
@@ -539,11 +555,13 @@ class TSN_Ada(nn.Module):
 
                         for x,y in zip(x_list, y_list): #(B*T,C,H,W)
                             crop_input = input_list[0][:, :,  x:x+reso, y:y+reso] # crop
-                            base_out_list.append(backbone(crop_input, the_backbone, self.new_fc_list[bb_i]))
+                            feat_out, base_out = backbone(crop_input, the_backbone, self.new_fc_list[bb_i])
+                            feat_out_list.append(feat_out)
+                            base_out_list.append(base_out)
 
         online_policy = False
         if not any([self.args.offline_lstm_all, self.args.offline_lstm_last, self.args.random_policy,
-                    self.args.all_policy, self.args.real_scsampler]):
+                    self.args.all_policy, self.args.distill_policy, self.args.real_scsampler]):
             online_policy = True
             r_list=[]
 
@@ -611,6 +629,9 @@ class TSN_Ada(nn.Module):
                         r_all[i_bs, i_t, torch.randint(self.action_dim,[1])] = 1.0
             elif self.args.all_policy: #TODO(yue) all policy: take all
                 r_all = torch.ones(batch_size, self.time_steps, self.action_dim).cuda()
+            elif self.args.distill_policy: #TODO(yue) all policy: take all
+                r_all = torch.zeros(batch_size, self.time_steps, self.action_dim).cuda()
+                r_all[:,:,0] = 1.0
             else: #TODO(yue) online policy
                 r_all = torch.stack(r_list, dim=1)
 
@@ -618,7 +639,13 @@ class TSN_Ada(nn.Module):
             if self.args.save_meta and self.args.save_all_preds:
                 return output.squeeze(1), r_all, torch.stack(base_out_list,dim=1)
             else:
-                return output.squeeze(1), r_all
+                if self.args.distillation_weight>0.001:
+                    if self.args.last_conv_same:
+                        return output.squeeze(1), r_all, torch.stack(feat_out_list,dim=1), torch.stack(base_out_list,dim=1)
+                    else:
+                        return output.squeeze(1), r_all, None, torch.stack(base_out_list, dim=1)
+                else:
+                    return output.squeeze(1), r_all, None, None
 
     def combine_logits(self, r, base_out_list):
         # TODO r           N, T, K  (0-origin, 1-low, 2-skip)

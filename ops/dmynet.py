@@ -35,20 +35,26 @@ class Conv2dMY(torch.nn.Conv2d):
             groups, bias, padding_mode)
 
 
-    def _conv_forward(self, x, weight):
+    def _conv_forward(self, x, weight, dilation):
+
+        kernel_size=weight.shape[2]
+        d_padding = ((kernel_size-1)//2) * dilation
+
         if self.padding_mode != 'zeros':
             return F.conv2d(F.pad(x, self._padding_repeated_twice, mode=self.padding_mode),
                             weight, self.bias, self.stride,
-                            (0,0), self.dilation, self.groups)
+                            (0,0), dilation, self.groups)
         return F.conv2d(x, weight, self.bias, self.stride,
-                        self.padding, self.dilation, self.groups)
+                        (d_padding, d_padding), dilation, self.groups)
+        # return F.conv2d(x, weight, self.bias, self.stride,
+        #                 self.padding, self.dilation, self.groups)
 
-    def forward(self, x, in_begin=0, in_end=64, out_begin=0, out_end=64):
+    def forward(self, x, in_begin=0, in_end=64, out_begin=0, out_end=64, dilation=1):
         in_begin = self.weight.shape[1] * in_begin // 64
         in_end = self.weight.shape[1] * in_end // 64
         out_begin = self.weight.shape[0] * out_begin // 64
         out_end = self.weight.shape[0] * out_end // 64
-        return self._conv_forward(x, self.weight[out_begin:out_end, in_begin:in_end])
+        return self._conv_forward(x, self.weight[out_begin:out_end, in_begin:in_end], dilation)
 
 
 def count_conv_my(m: Conv2dMY, x, y):
@@ -75,7 +81,8 @@ class BasicBlock(nn.Module):
     expansion = 1
 
     def __init__(self, inplanes, planes, stride=1, downsample0=None, downsample1s=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None, num_filters_list = None, default_signal=0):
+                 base_width=64, dilation=1, norm_layer=None, num_filters_list = None, default_signal=0,
+                 last_conv_same=False):
         super(BasicBlock, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -91,6 +98,7 @@ class BasicBlock(nn.Module):
         #self.bn2 = norm_layer(planes)
         self.downsample0 = downsample0
         self.downsample1s = downsample1s
+        self.last_conv_same = last_conv_same
         self.num_filters_list = num_filters_list
         self.stride = stride
         self.bn1s = torch.nn.ModuleList()
@@ -98,29 +106,46 @@ class BasicBlock(nn.Module):
         for bns in [self.bn1s, self.bn2s]:
             for num_filters in num_filters_list:
                 bns.append(norm_layer(planes * num_filters // 64))
+                if bns ==self.bn2s and self.last_conv_same:
+                    break
         self.default_signal = default_signal
 
     def forward(self, x, **kwargs):
-        signal = self.default_signal
+        conv_signal = self.default_signal % 10
+        dila_signal = (self.default_signal // 10) % 10 + 1
         if "signal" in kwargs:
-            signal = kwargs["signal"]
+            conv_signal = kwargs["signal"] % 10
+            dila_signal = (kwargs["signal"] // 10) % 10 + 1
         in_begin = 0
-        in_end = self.num_filters_list[signal]
+        in_end = self.num_filters_list[conv_signal]
         out_begin = 0
-        out_end = self.num_filters_list[signal]
+        out_end = self.num_filters_list[conv_signal]
 
         identity = x
 
-        out = self.conv1(x, in_begin, in_end, out_begin, out_end)
-        out = self.bn1s[signal](out)
+        out = self.conv1(x, in_begin, in_end, out_begin, out_end, dila_signal)
+        out = self.bn1s[conv_signal](out)
         out = self.relu(out)
 
-        out = self.conv2(out, in_begin, in_end, out_begin, out_end)
-        out = self.bn2s[signal](out)
+        last_in_begin = in_begin
+        last_out_begin = out_begin
+        if self.last_conv_same:
+            last_in_end = in_end
+            last_out_end = self.num_filters_list[0]
+            last_dila_signal = 1
+            last_conv_signal = 0
+        else:
+            last_in_end = in_end
+            last_out_end = out_end
+            last_dila_signal = dila_signal
+            last_conv_signal = conv_signal
+
+        out = self.conv2(out, last_in_begin, last_in_end, last_out_begin, last_out_end, last_dila_signal)
+        out = self.bn2s[last_conv_signal](out)
 
         if self.downsample0 is not None:
             y = self.downsample0(x, in_begin, in_end, out_begin, out_end)
-            identity = self.downsample1s[signal](y)
+            identity = self.downsample1s[conv_signal](y)
 
         out += identity
         out = self.relu(out)
@@ -138,7 +163,8 @@ class Bottleneck(nn.Module):
     expansion = 4
 
     def __init__(self, inplanes, planes, stride=1, downsample0=None, downsample1s=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None, num_filters_list = None, default_signal=0):
+                 base_width=64, dilation=1, norm_layer=None, num_filters_list = None, default_signal=0,
+                 last_conv_same=False):
         super(Bottleneck, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -154,6 +180,7 @@ class Bottleneck(nn.Module):
         self.downsample0 = downsample0
         self.downsample1s = downsample1s
         self.stride = stride
+        self.last_conv_same = last_conv_same
         self.num_filters_list=num_filters_list
         self.bn1s = torch.nn.ModuleList()
         self.bn2s = torch.nn.ModuleList()
@@ -161,33 +188,51 @@ class Bottleneck(nn.Module):
         for bns, _width in [(self.bn1s,width), (self.bn2s,width), (self.bn3s,planes * self.expansion)]:
             for num_filters in num_filters_list:
                 bns.append(norm_layer(_width * num_filters // 64))
+                if bns ==self.bn3s and last_conv_same:
+                    break
         self.default_signal = default_signal
 
     def forward(self, x, **kwargs):
-        signal = self.default_signal
+        # print("forward", self.last_conv_same, self.downsample0 is not None)
+        conv_signal = self.default_signal % 10
+        dila_signal = (self.default_signal // 10) % 10 + 1
         if "signal" in kwargs:
-            signal=kwargs["signal"]
+            conv_signal = kwargs["signal"] % 10
+            dila_signal = (kwargs["signal"] // 10) % 10 + 1
         in_begin = 0
-        in_end = self.num_filters_list[signal]
+        in_end = self.num_filters_list[conv_signal]
         out_begin = 0
-        out_end = self.num_filters_list[signal]
+        out_end = self.num_filters_list[conv_signal]
 
         identity = x
 
-        out = self.conv1(x, in_begin, in_end, out_begin, out_end)
-        out = self.bn1s[signal](out)
+        out = self.conv1(x, in_begin, in_end, out_begin, out_end, dila_signal)
+        out = self.bn1s[conv_signal](out)
         out = self.relu(out)
 
-        out = self.conv2(out, in_begin, in_end, out_begin, out_end)
-        out = self.bn2s[signal](out)
+        out = self.conv2(out, in_begin, in_end, out_begin, out_end, dila_signal)
+        out = self.bn2s[conv_signal](out)
         out = self.relu(out)
 
-        out = self.conv3(out, in_begin, in_end, out_begin, out_end)
-        out = self.bn3s[signal](out)
+        last_in_begin = in_begin
+        last_out_begin = out_begin
+        if self.last_conv_same:
+            last_in_end = in_end
+            last_out_end = self.num_filters_list[0]
+            last_dila_signal = 1
+            last_conv_signal = 0
+        else:
+            last_in_end = in_end
+            last_out_end = out_end
+            last_dila_signal = dila_signal
+            last_conv_signal = conv_signal
+        # print("bottleneck:",out.shape, last_in_begin, last_in_end, last_out_begin,last_out_end,last_dila_signal)
+        out = self.conv3(out, last_in_begin, last_in_end, last_out_begin, last_out_end, last_dila_signal)
+        out = self.bn3s[last_conv_signal](out)
 
         if self.downsample0 is not None:
             y = self.downsample0(x, in_begin, in_end, out_begin, out_end)
-            identity = self.downsample1s[signal](y)
+            identity = self.downsample1s[conv_signal](y)
         out += identity
         out = self.relu(out)
 
@@ -198,7 +243,7 @@ class DMyNet(nn.Module):
 
     def __init__(self, block, layers, num_classes=1000, zero_init_residual=False,
                  groups=1, width_per_group=64, replace_stride_with_dilation=None,
-                 norm_layer=None, num_filters_list=[64, 32, 16, 8], default_signal=0):
+                 norm_layer=None, num_filters_list=[64, 32, 16, 8], default_signal=0, last_conv_same=False):
         super(DMyNet, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -208,6 +253,8 @@ class DMyNet(nn.Module):
         self.diversity=len(num_filters_list)
         self.inplanes = num_filters_list[0]
         self.dilation = 1
+        self.last_conv_same = last_conv_same
+
         if replace_stride_with_dilation is None:
             # each element in the tuple indicates if we should replace
             # the 2x2 stride with a dilated convolution instead
@@ -232,11 +279,13 @@ class DMyNet(nn.Module):
         self.layer3 = self._make_layer(block, [num_filters * 4 for num_filters in num_filters_list], layers[2],
                                        stride=2, dilate=replace_stride_with_dilation[1])
         self.layer4 = self._make_layer(block, [num_filters * 8 for num_filters in num_filters_list], layers[3],
-                                       stride=2, dilate=replace_stride_with_dilation[2])
+                                       stride=2, dilate=replace_stride_with_dilation[2], last_conv_same=last_conv_same)
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fcs = torch.nn.ModuleList()
         for num_filters in num_filters_list:
             self.fcs.append(nn.Linear(num_filters * 8 * block.expansion, num_classes))
+            if last_conv_same:
+                break
 
 
         for m in self.modules():
@@ -258,7 +307,7 @@ class DMyNet(nn.Module):
                     for bn in m.bn2s:
                         nn.init.constant_(bn.weight, 0)
 
-    def _make_layer(self, block, planes_list, blocks, stride=1, dilate=False):
+    def _make_layer(self, block, planes_list, blocks, stride=1, dilate=False, last_conv_same=False):
         norm_layer = self._norm_layer
         downsample0 = None
         downsample1s = None
@@ -277,11 +326,11 @@ class DMyNet(nn.Module):
                             self.base_width, previous_dilation, norm_layer, num_filters_list = self.num_filters_list,
                             default_signal = self.default_signal))
         self.inplanes = planes_list[0] * block.expansion
-        for _ in range(1, blocks):
+        for k in range(1, blocks):
             layers.append(block(self.inplanes, planes_list[0], groups=self.groups,
                                 base_width=self.base_width, dilation=self.dilation,
                                 norm_layer=norm_layer, num_filters_list = self.num_filters_list,
-                                default_signal = self.default_signal))
+                                default_signal = self.default_signal, last_conv_same = last_conv_same and k == blocks-1))
 
         return layers
 
@@ -291,7 +340,6 @@ class DMyNet(nn.Module):
     #     x = self.bn1(x)
     #     x = self.relu(x)
     #     x = self.maxpool(x)
-    #
     #     x = self.layer1(x)
     #     x = self.layer2(x)
     #     x = self.layer3(x)
@@ -304,27 +352,33 @@ class DMyNet(nn.Module):
     #     return x
 
     def forward(self, x, **kwargs):
-        signal = self.default_signal
+        conv_signal = self.default_signal % 10
+        dila_signal = (self.default_signal // 10) % 10 + 1
         if "signal" in kwargs:
-            signal = kwargs["signal"]
+            conv_signal = kwargs["signal"] % 10
+            dila_signal = (kwargs["signal"] // 10) % 10 + 1
 
         in_begin = 0
         in_end = 64  #TODO initial 3 channels ~ 64/64
         out_begin = 0
-        out_end = self.num_filters_list[signal]
+        out_end = self.num_filters_list[conv_signal]
 
-        x = self.conv1(x, in_begin, in_end, out_begin, out_end)
-        x = self.bn1s[signal](x)
+        x = self.conv1(x, in_begin, in_end, out_begin, out_end, dila_signal)
+        x = self.bn1s[conv_signal](x)
         x = self.relu(x)
         x = self.maxpool(x)
 
         for layers in [self.layer1, self.layer2, self.layer3, self.layer4]:
             for block in layers:
-                x = block(x, signal=signal)
+                x = block(x, signal=(dila_signal-1)*10+conv_signal)
 
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
-        x = self.fcs[signal](x)
+        if self.last_conv_same:
+            last_conv_signal = 0
+        else:
+            last_conv_signal = conv_signal
+        x = self.fcs[last_conv_signal](x)
 
         return x
 
@@ -345,6 +399,8 @@ def _dmynet(arch, block, layers, pretrained, progress, **kwargs):
                 # TODO layer1.0.bn1.weight-> layer1.0.bn1s.0.weight
                 before_bn,after_bn = k.split("bn")
                 for fc_i in range(1, len(kwargs["num_filters_list"])):
+                    if kwargs["last_conv_same"] and "layer4.2.bn3" in k:
+                        break
                     origin_len = pretrained_dict[k].shape[0]
                     slicing_len = origin_len * kwargs["num_filters_list"][fc_i]// 64
                     kvs_to_add.append((before_bn+"bn"+after_bn[0]+"s.%d"%(fc_i)+after_bn[1:], pretrained_dict[k][:slicing_len]))

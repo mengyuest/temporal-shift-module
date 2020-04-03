@@ -257,9 +257,13 @@ def main():
             model_dict.update(sd)
             # TODO(yue) backbones
             for i, tmp_path in enumerate(args.model_paths):
-                sd = load_to_sd(model_dict, tmp_path, "base_model_list.%d"%i, "new_fc_list.%d"%i, args.reso_list[i])
+                base_model_index = i
+                new_i = i
+                if args.dmy:
+                    base_model_index = 0
+                    new_i = i if not args.last_conv_same else 0
+                sd = load_to_sd(model_dict, tmp_path, "base_model_list.%d"%base_model_index, "new_fc_list.%d"%new_i, args.reso_list[i])
                 model_dict.update(sd)
-
             model.load_state_dict(model_dict)
     else:
         if test_mode:
@@ -275,6 +279,12 @@ def main():
         print("Baseline: load from pretrained model")
         model_dict = model.state_dict()
         sd = load_to_sd(model_dict, args.base_pretrained_from, "base_model", "new_fc", 224)
+
+        if args.ignore_new_fc_weight:
+            print("@ IGNORE NEW FC WEIGHT !!!")
+            del sd["module.new_fc.weight"]
+            del sd["module.new_fc.bias"]
+
         model_dict.update(sd)
         model.load_state_dict(model_dict)
 
@@ -516,11 +526,14 @@ def cal_eff(r):
         #TODO mobilenet + skips
         for b_i in range(num_pred, reso_skip_vec.shape[0]):
             reso_skip_vec[b_i] = torch.sum(r[:, :, b_i])
+
         reso_skip_vec = reso_skip_vec / torch.sum(reso_skip_vec)
-
-        usage_bias = reso_skip_vec - torch.mean(reso_skip_vec)
-
-        uniform_loss = torch.norm(usage_bias, p=2) * args.uniform_loss_weight
+        if args.uniform_cross_entropy: #TODO cross-entropy+ logN
+            uniform_loss = torch.sum(torch.tensor([x*torch.log(torch.clamp_min(x,1e-6)) for x in reso_skip_vec])) + torch.log(torch.tensor(1.0*len(reso_skip_vec)))
+            uniform_loss = uniform_loss * args.uniform_loss_weight
+        else: #TODO L2 norm
+            usage_bias = reso_skip_vec - torch.mean(reso_skip_vec)
+            uniform_loss = torch.norm(usage_bias, p=2) * args.uniform_loss_weight
         loss = loss + uniform_loss
         each_losses.append(uniform_loss.detach().cpu().item())
 
@@ -556,6 +569,43 @@ def reverse_onehot(a):
 def get_criterion_loss(criterion, output, target):
     return criterion(output, target[:, 0])
 
+# p_logit: [batch, class_num]
+# q_logit: [batch, class_num]
+def kl_categorical(p_logit, q_logit):
+    import torch.nn.functional as F
+    p = F.softmax(p_logit, dim=-1)
+    _kl = torch.sum(p * (F.log_softmax(p_logit, dim=-1)
+                                  - F.log_softmax(q_logit, dim=-1)), 1)
+    return torch.mean(_kl)
+
+def get_distill_losses(feat_outs, base_outs):
+    d_loss_list=[]
+    if args.use_feat_to_distill: #TODO L2 norm loss for feature level
+        teacher_feat = feat_outs[:, 0]
+        for bb_i in range(1, len(args.num_filters_list)):
+            student_feat = feat_outs[:, 1]
+            l2_loss = torch.mean(torch.norm(teacher_feat-student_feat, p=2, dim=-1))
+            d_loss_list.append(l2_loss)
+
+    else: #TODO KL Divergence for prediction level
+        teacher_pred = base_outs[:, 0]
+        # teacher_dist = torch.distributions.categorical.Categorical(logits=teacher_pred.reshape(-1,teacher_pred.shape[-1]))
+        for bb_i in range(1, len(args.num_filters_list)):
+            student_pred = base_outs[:, bb_i]
+            # student_dist = torch.distributions.categorical.Categorical(
+            #     logits=student_pred.reshape(-1, student_pred.shape[-1]))
+            # kl_loss = torch.distributions.kl.kl_divergence(teacher_dist, student_dist)
+
+            my_kl_loss = kl_categorical(teacher_pred.reshape(-1,teacher_pred.shape[-1]), student_pred.reshape(-1, student_pred.shape[-1]))
+            # print("kl_loss:", torch.mean(kl_loss), "my_kl:", my_kl_loss)
+            # for ki, kl_ in enumerate(kl_loss):
+            #     if kl_ == float('inf'):
+            #         print("teacher_i:", teacher_pred.reshape(-1, teacher_pred.shape[-1])[ki])
+            #         print("student_i:", student_pred.reshape(-1, student_pred.shape[-1])[ki])
+            #         exit()
+            # d_loss_list.append(torch.mean(kl_loss))
+            d_loss_list.append(my_kl_loss)
+    return d_loss_list
 
 def compute_acc_eff_loss_with_weights(acc_loss, eff_loss, each_losses, epoch):
     if epoch > args.eff_loss_after:
@@ -662,6 +712,8 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
     if use_ada_framework:
         tau = get_current_temperature(epoch)
         alosses, elosses = get_average_meters(2)
+        if args.dmy and args.distillation_weight>0.001:
+            dlosses = list(get_average_meters(len(args.num_filters_list)-1))
         each_terms = get_average_meters(NUM_LOSSES)
         r_list = []
 
@@ -692,24 +744,30 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
                 else:
                     acc_loss = get_criterion_loss(criterion, lite_pred.mean(dim=1), target_var)
             else:
-                output, r = model(input=input_var_list, tau=tau)
+                output, r, feat_outs, base_outs = model(input=input_var_list, tau=tau)
                 acc_loss = get_criterion_loss(criterion, output, target_var)
 
             if use_ada_framework:
                 acc_loss, eff_loss, each_losses = compute_every_losses(r, acc_loss, epoch)
                 alosses.update(acc_loss.item(), input.size(0))
                 elosses.update(eff_loss.item(), input.size(0))
+
                 for l_i, each_loss in enumerate(each_losses):
                     each_terms[l_i].update(each_loss, input.size(0))
                 loss = acc_loss + eff_loss
+
+                if args.dmy and args.distillation_weight > 0.001:
+                    distill_losses = get_distill_losses(feat_outs, base_outs)
+                    for fc_i in range(len(distill_losses)):
+                        dlosses[fc_i].update(distill_losses[fc_i].item(), input.size(0))
+                    loss = (1-args.distillation_weight) * (acc_loss + eff_loss) + \
+                           args.distillation_weight * torch.mean(torch.stack(distill_losses))
             else:
                 loss = acc_loss
         else:
             input_var = torch.autograd.Variable(input)
             output = model(input=[input_var])
             loss = get_criterion_loss(criterion, output, target_var)
-
-        # print(output.shape)
 
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target[:,0], topk=(1, 5))
@@ -752,6 +810,11 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
             if args.show_pred:
                 print_output += elastic_list_print(output[-1,:].detach().cpu().numpy())
             print(print_output)
+            if use_ada_framework and args.dmy and args.distillation_weight>0.001:
+                dist_str = "distill:  "
+                for fc_i in range(len(dlosses)):
+                    dist_str += "{0:.3f} ({1:.3f})  ".format(dlosses[fc_i].val, dlosses[fc_i].val)
+                print(dist_str)
 
     if use_ada_framework:
         usage_str, gflops = get_policy_usage_str(r_list, model.module.reso_dim)
@@ -778,6 +841,9 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     if use_ada_framework:
         tau = get_current_temperature(epoch)
         alosses, elosses = get_average_meters(2)
+        if args.dmy and args.distillation_weight>0.001:
+            dlosses = list(get_average_meters(len(args.num_filters_list)))
+            all_bb_results = [[] for _ in range(len(args.num_filters_list))]
         each_terms = get_average_meters(NUM_LOSSES)
         r_list = []
         if args.save_meta:
@@ -808,7 +874,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                     if args.save_meta and args.save_all_preds:
                         output, r, all_preds = model(input=input_tuple[:-1 + meta_offset], tau=tau)
                     else:
-                        output, r = model(input=input_tuple[:-1+meta_offset], tau=tau)
+                        output, r, feat_outs, base_outs = model(input=input_tuple[:-1+meta_offset], tau=tau)
                     acc_loss = get_criterion_loss(criterion, output, target)
                 if use_ada_framework:
                     acc_loss, eff_loss, each_losses = compute_every_losses(r, acc_loss, epoch)
@@ -817,6 +883,13 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                     for l_i, each_loss in enumerate(each_losses):
                         each_terms[l_i].update(each_loss, input.size(0))
                     loss = acc_loss + eff_loss
+
+                    if args.dmy and args.distillation_weight > 0.001:
+                        distill_losses = get_distill_losses(feat_outs, base_outs)
+                        for fc_i in range(len(distill_losses)):
+                            dlosses[fc_i].update(distill_losses[fc_i].item(), input.size(0))
+                        loss = (1 - args.distillation_weight) * (acc_loss + eff_loss) + \
+                               args.distillation_weight * torch.mean(torch.stack(distill_losses))
                 else:
                     loss = acc_loss
             else:
@@ -826,6 +899,11 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
             # TODO(yue)
             all_results.append(output)
             all_targets.append(target)
+
+            if use_ada_framework and args.dmy and args.distillation_weight > 0.001:
+                for bb_i in range(len(all_bb_results)):
+                    all_bb_results[bb_i].append(base_outs[:, bb_i])
+
             if args.save_meta and args.save_all_preds:
                 all_all_preds.append(all_preds)
 
@@ -861,12 +939,26 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                     print_output += extra_each_loss_str(each_terms)
                 print(print_output)
 
+                if use_ada_framework and args.dmy and args.distillation_weight > 0.001:
+                    dist_str = "distill:  "
+                    for fc_i in range(len(dlosses)):
+                        dist_str += "{0:.3f} ({1:.3f})  ".format(dlosses[fc_i].val, dlosses[fc_i].val)
+                    print(dist_str)
+
     # TODO(yue)
     mAP,_ = cal_map(torch.cat(all_results,0).cpu(), torch.cat(all_targets,0)[:,0:1].cpu()) # TODO(yue) single-label mAP
     mmAP, _ = cal_map(torch.cat(all_results, 0).cpu(), torch.cat(all_targets, 0).cpu())    # TODO(yue)  multi-label mAP
-
     print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
               .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses))
+
+    if use_ada_framework and args.dmy and args.distillation_weight > 0.001:
+        bbmmaps = []
+        for bb_i in range(len(all_bb_results)):
+            # print("all_bb_results[%d].shape"%(bb_i), torch.cat(all_bb_results[bb_i], 0).cpu().shape)
+            bb_i_mmAP, _ = cal_map(torch.mean(torch.cat(all_bb_results[bb_i], 0), dim=1).cpu(),
+                                    torch.cat(all_targets, 0).cpu())  # TODO(yue)  multi-label mAP
+            bbmmaps.append(bb_i_mmAP)
+        print("bbmaps: "+" ".join(["{0:.3f}".format(bb_i_mmAP) for bb_i_mmAP in bbmmaps]))
 
     gflops = 0
 

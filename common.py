@@ -39,12 +39,20 @@ elif "dcc" in host_name and user_name in ["cvpr", "ieee", "sc071139"]:
     LOG_PREFIX = "../multimodalvideo/yue"
     PRETRAIN_PATH =ospj(ROOT_DIR,"logs_tsm")
 
+#TODO satori (power machines)
 elif ("node" in host_name or "service" in host_name )and user_name == "mengyue":
-    "/nobackup/users/mengyue/datasets/activity-net-v1.3"
     ROOT_DIR = "/nobackup/users/mengyue"
     CODE_PREFIX = "code"
     DATA_PREFIX = "datasets"
     # DATA_PREFIX = "../multimodalvideo"
+    LOG_PREFIX = ""
+    PRETRAIN_PATH = ospj(ROOT_DIR, "logs_tsm")
+
+#TODO AIMOS (power machines)
+elif user_name == "DPLDymng":
+    ROOT_DIR = "/gpfs/u/home/DPLD/DPLDymng/scratch"
+    CODE_PREFIX = "code"
+    DATA_PREFIX = "datasets"
     LOG_PREFIX = ""
     PRETRAIN_PATH = ospj(ROOT_DIR, "logs_tsm")
 
@@ -100,3 +108,6 @@ if "diva" in host_name:
 MINIK_FRAMES=ospj(MINIK_PATH)
 
 EXPS_PATH=ospj(ROOT_DIR, LOG_PREFIX,"logs_tsm")
+
+from os.path import expanduser
+PYTORCH_CKPT_DIR = ospj(expanduser("~"), ".cache/torch/checkpoints")

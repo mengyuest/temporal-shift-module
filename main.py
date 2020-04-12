@@ -73,14 +73,31 @@ def load_to_sd(model_dict, model_path, module_name, fc_name, resolution, apple_t
 
 
         if apple_to_apple:
+            del_keys = []
             if args.remove_all_base_0:
-                del_keys=[]
                 for key in sd:
                     if "module.base_model_list.0" in key or "new_fc_list.0" in key or "linear." in key:
                         del_keys.append(key)
 
-                for key in del_keys:
-                    del sd[key]
+            if args.no_extra_new_fcs_bns:
+                for key in sd:
+                    if "new_fc_list" in key and "new_fc_list.0" not in key:
+                        del_keys.append(key)
+                    if ".bn" in key:
+                        for bn_i in range(1,4):
+                            if ".bn%ds."%bn_i in key and ".bn%ds.0"%bn_i not in key:
+                                del_keys.append(key)
+                    if ".downsample1s." in key and ".downsample1s.0" not in key:
+                        del_keys.append(key)
+
+            if args.no_weights_from_linear:
+                for key in sd:
+                    if "linear." in key:
+                        del_keys.append(key)
+
+            for key in list(set(del_keys)):
+                del sd[key]
+
             return sd
 
         replace_dict = []
@@ -246,6 +263,12 @@ def main():
             print("Adaptively load from pretrained whole")
             model_dict = model.state_dict()
             sd = load_to_sd(model_dict, args.base_pretrained_from, "foo", "bar", -1, apple_to_apple=True)
+            if args.separate_dmy:
+                sd_keys=list(sd.keys())
+                for k in sd_keys:
+                    if "base_model_list.0." in k:
+                        for i in range(1, len(args.num_filters_list)): #TODO clone to separate nets
+                            sd[k.replace("base_model_list.0.", "base_model_list.%d."%(i))] = sd[k]
             model_dict.update(sd)
             model.load_state_dict(model_dict)
 
@@ -452,11 +475,21 @@ def init_gflops_table():
             gflops_table[args.backbone_list[0] + str(args.reso_list[fc_i])+"@%d"%(fc_i)] \
                 = get_gflops_params(args.backbone_list[0], args.reso_list[fc_i], num_class, seg_len,
                                     default_signal=fc_i, num_filters_list=args.num_filters_list)[0]
+    elif args.msd:
+        for fc_i in range(len(args.msd_indices_list)):
+            the_i = 0 if args.uno_reso else fc_i
+            gflops_table[args.backbone_list[0] + str(args.reso_list[the_i])+"@%d"%(args.msd_indices_list[fc_i])] \
+                = get_gflops_params(args.backbone_list[0], args.reso_list[the_i], num_class, seg_len,
+                                    default_signal=args.msd_indices_list[fc_i])[0]
     else:
         for i, backbone in enumerate(args.backbone_list):
             gflops_table[backbone+str(args.reso_list[i])] = get_gflops_params(backbone, args.reso_list[i], num_class, seg_len)[0]
     gflops_table["policy"] = get_gflops_params(args.policy_backbone, args.reso_list[args.policy_input_offset], num_class, seg_len)[0]
     gflops_table["lstm"] = 2 * (feat_dim_dict[args.policy_backbone] ** 2) /1000000000
+
+    print("gflops_table: ")
+    for k in gflops_table:
+        print("%-20s: %.4f GFLOPS"%(k,gflops_table[k]))
 
 
 def get_gflops_t_tt_vector():
@@ -467,6 +500,13 @@ def get_gflops_t_tt_vector():
     if args.dmy:
         for fc_i in range(len(args.num_filters_list)):
             the_flops = gflops_table[args.backbone_list[0] + str(args.reso_list[fc_i])+"@%d"%(fc_i)]
+            gflops_vec.append(the_flops)
+            t_vec.append(1.)
+            tt_vec.append(1.)
+    elif args.msd:
+        for fc_i in range(len(args.msd_indices_list)):
+            the_i = 0 if args.uno_reso else fc_i
+            the_flops = gflops_table[args.backbone_list[0] + str(args.reso_list[the_i]) + "@%d" % (args.msd_indices_list[fc_i])]
             gflops_vec.append(the_flops)
             t_vec.append(1.)
             tt_vec.append(1.)
@@ -656,6 +696,11 @@ def get_policy_usage_str(r_list, reso_dim):
         for fc_i in range(len(args.num_filters_list)):
             used_model_list += [args.backbone_list[0]+"@%d"%(fc_i)] * args.ada_crop_list[fc_i]
             reso_list += [args.reso_list[fc_i]] * args.ada_crop_list[fc_i]
+    elif args.msd:
+        for fc_i in range(len(args.msd_indices_list)):
+            the_i = 0 if args.uno_reso else fc_i
+            used_model_list += [args.backbone_list[0] + "@%d" % (args.msd_indices_list[fc_i])] * args.ada_crop_list[the_i]
+            reso_list += [args.reso_list[the_i]] * args.ada_crop_list[the_i]
     else:
         for i in range(len(args.backbone_list)):
             used_model_list += [args.backbone_list[i]] * args.ada_crop_list[i]
@@ -693,7 +738,7 @@ def extra_each_loss_str(each_terms):
     if args.frames_loss_weight > 1e-5:
         loss_str_list.append("f")
     for i in range(len(loss_str_list)):
-        s += " %s:%.4f" % (loss_str_list[i], each_terms[i].val)
+        s += " %s:(%.4f)" % (loss_str_list[i], each_terms[i].avg)
     return s
 
 def get_current_temperature(num_epoch):
@@ -725,7 +770,7 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
     model.train()
 
     end = time.time()
-    print("lr:%.4f\ttau:%.4f"%(optimizer.param_groups[-1]['lr'] * 0.1, tau if use_ada_framework else 0))
+    print("#%s# lr:%.4f\ttau:%.4f"%(args.exp_header, optimizer.param_groups[-1]['lr'] * 0.1, tau if use_ada_framework else 0))
     for i, input_tuple in enumerate(train_loader):
 
         data_time.update(time.time() - end)  # TODO(yue) measure data loading time
@@ -807,14 +852,14 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
                 )
                 print_output += extra_each_loss_str(each_terms)
 
+                if args.dmy and args.distillation_weight>0.001:
+                    print_output += " d: "
+                    for fc_i in range(len(dlosses)):
+                        print_output += "({0:.3f})".format(dlosses[fc_i].avg)
             if args.show_pred:
                 print_output += elastic_list_print(output[-1,:].detach().cpu().numpy())
             print(print_output)
-            if use_ada_framework and args.dmy and args.distillation_weight>0.001:
-                dist_str = "distill:  "
-                for fc_i in range(len(dlosses)):
-                    dist_str += "{0:.3f} ({1:.3f})  ".format(dlosses[fc_i].val, dlosses[fc_i].val)
-                print(dist_str)
+
 
     if use_ada_framework:
         usage_str, gflops = get_policy_usage_str(r_list, model.module.reso_dim)
@@ -841,9 +886,15 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     if use_ada_framework:
         tau = get_current_temperature(epoch)
         alosses, elosses = get_average_meters(2)
-        if args.dmy and args.distillation_weight>0.001:
-            dlosses = list(get_average_meters(len(args.num_filters_list)))
+        if args.dmy:
             all_bb_results = [[] for _ in range(len(args.num_filters_list))]
+            if args.distillation_weight>0.001:
+                dlosses = list(get_average_meters(len(args.num_filters_list)-1))
+        else:
+            all_bb_results = [[] for _ in args.backbone_list]
+        if args.policy_also_backbone:
+            all_bb_results.append([])
+
         each_terms = get_average_meters(NUM_LOSSES)
         r_list = []
         if args.save_meta:
@@ -900,7 +951,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
             all_results.append(output)
             all_targets.append(target)
 
-            if use_ada_framework and args.dmy and args.distillation_weight > 0.001:
+            if use_ada_framework:
                 for bb_i in range(len(all_bb_results)):
                     all_bb_results[bb_i].append(base_outs[:, bb_i])
 
@@ -937,13 +988,12 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                     )
 
                     print_output += extra_each_loss_str(each_terms)
-                print(print_output)
 
-                if use_ada_framework and args.dmy and args.distillation_weight > 0.001:
-                    dist_str = "distill:  "
-                    for fc_i in range(len(dlosses)):
-                        dist_str += "{0:.3f} ({1:.3f})  ".format(dlosses[fc_i].val, dlosses[fc_i].val)
-                    print(dist_str)
+                    if args.dmy and args.distillation_weight > 0.001:
+                        print_output += " d: "
+                        for fc_i in range(len(dlosses)):
+                            print_output += "({0:.3f})".format(dlosses[fc_i].avg)
+                print(print_output)
 
     # TODO(yue)
     mAP,_ = cal_map(torch.cat(all_results,0).cpu(), torch.cat(all_targets,0)[:,0:1].cpu()) # TODO(yue) single-label mAP
@@ -951,15 +1001,20 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
               .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses))
 
-    if use_ada_framework and args.dmy and args.distillation_weight > 0.001:
+    if use_ada_framework:
         bbmmaps = []
+        bbprec1s = []
+        all_targets_cpu=torch.cat(all_targets, 0).cpu()
         for bb_i in range(len(all_bb_results)):
-            # print("all_bb_results[%d].shape"%(bb_i), torch.cat(all_bb_results[bb_i], 0).cpu().shape)
-            bb_i_mmAP, _ = cal_map(torch.mean(torch.cat(all_bb_results[bb_i], 0), dim=1).cpu(),
-                                    torch.cat(all_targets, 0).cpu())  # TODO(yue)  multi-label mAP
+            bb_results_cpu=torch.mean(torch.cat(all_bb_results[bb_i], 0), dim=1).cpu()
+            bb_i_mmAP, _ = cal_map(bb_results_cpu, all_targets_cpu)  # TODO(yue)  multi-label mAP
             bbmmaps.append(bb_i_mmAP)
-        print("bbmaps: "+" ".join(["{0:.3f}".format(bb_i_mmAP) for bb_i_mmAP in bbmmaps]))
 
+            bbprec1, = accuracy(bb_results_cpu, all_targets_cpu[:, 0], topk=(1,))
+            bbprec1s.append(bbprec1)
+
+        print("bbmmAP: "+" ".join(["{0:.3f}".format(bb_i_mmAP) for bb_i_mmAP in bbmmaps]))
+        print("bb_Acc: "+" ".join(["{0:.3f}".format(bbprec1) for bbprec1 in bbprec1s]))
     gflops = 0
 
     if use_ada_framework:

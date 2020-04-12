@@ -204,5 +204,14 @@ parser.add_argument('--last_conv_same',action='store_true')
 
 #TODO distillation training (which part, pairwise, weight)
 parser.add_argument('--distill_policy', action='store_true')
-parser.add_argument('--distillation_weight', default=1.0, type=float, help="weights for distillation")
+parser.add_argument('--distillation_weight', default=0.0, type=float, help="weights for distillation")
 parser.add_argument('--use_feat_to_distill', action='store_true')
+
+parser.add_argument('--separate_dmy', action='store_true')
+parser.add_argument('--no_extra_new_fcs_bns', action='store_true')
+parser.add_argument('--no_weights_from_linear', action='store_true')
+
+#TODO try MSDNet
+parser.add_argument('--msd', action='store_true')
+parser.add_argument('--msd_indices_list', default=[], type=int, nargs="+", help='number of indices for msd')
+parser.add_argument('--uno_reso', action='store_true')

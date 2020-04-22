@@ -41,7 +41,9 @@ class TSNDataSet(data.Dataset):
                  remove_missing=False, dense_sample=False, twice_sample=False, partial_fcvid_eval=False, args=None):
 
         self.root_path = root_path
-        self.list_file = list_file
+        # self.list_file = list_file
+        self.list_file = \
+            ".".join(list_file.split(".")[:-1]) + args.filelist_suffix + "."+ list_file.split(".")[-1] #TODO
         self.num_segments = num_segments
         self.new_length = new_length
         self.image_tmpl = image_tmpl

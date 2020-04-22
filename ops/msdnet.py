@@ -364,9 +364,9 @@ class MSDNet(nn.Module):
             # else:
             #     print("OUT i=%d" % i, x.shape)
             if signal is not None and i == signal:
-                return [self.classifier[i](x)]
+                return self.classifier[i](x)
             elif self.default_signal != -1 and i == self.default_signal:
-                return [self.classifier[i](x)]
+                return self.classifier[i](x)
             else:
                 res.append(self.classifier[i](x))
         return res

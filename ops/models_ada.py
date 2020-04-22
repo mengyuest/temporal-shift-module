@@ -15,6 +15,8 @@ from ops.cnn3d.i3d_resnet import  I3D_ResNet, i3d_resnet
 import ops.dmynet as dmynet
 from ops.dmynet import Conv2dMY
 import ops.msdnet as msdnet
+import ops.mernet as mernet
+import ops.csnet as csnet
 
 from tools.net_flops_table import feat_dim_dict
 
@@ -139,6 +141,10 @@ class TSN_Ada(nn.Module):
             self.reso_dim = len(self.args.num_filters_list)
         elif self.args.msd:
             self.reso_dim = len(self.args.msd_indices_list) #TODO 0,1,2; 0,2,3...
+        elif self.args.mer:
+            self.reso_dim = len(self.args.mer_indices_list) #TODO 1,2,3 for exit-1, exit-2 and last one
+        elif self.args.csn:
+            self.reso_dim = len(self.args.backbone_list)  # TODO
         else:
             for i in range(len(self.args.backbone_list)):
                 self.reso_dim += self.args.ada_crop_list[i]
@@ -173,6 +179,9 @@ class TSN_Ada(nn.Module):
                 shall_pretrain = len(self.args.model_paths) == 0 or self.args.model_paths[0].lower() != 'none'
                 pretrained_path = ospj(common.PYTORCH_CKPT_DIR, "msdnet-step4-block5.pth") if shall_pretrain else None
                 self.base_model_list.append(getattr(msdnet, "create_msdnet")(pretrained_path = pretrained_path))
+            elif self.args.mer:
+                shall_pretrain = len(self.args.model_paths) == 0 or self.args.model_paths[0].lower() != 'none'
+                self.base_model_list.append(getattr(mernet, self.args.backbone_list[0])(shall_pretrain))
             else:
                 for bbi, backbone_name in enumerate(self.args.backbone_list):
                     shall_pretrain = len(self.args.model_paths) == 0 or self.args.model_paths[bbi].lower() != 'none'
@@ -188,6 +197,10 @@ class TSN_Ada(nn.Module):
                             self.base_model_list.append(mobilenet3d_v2(pretrained=shall_pretrain))
                         elif "res3d" in backbone_name:
                             self.base_model_list.append(i3d_resnet(depth=int(backbone_name.split("res3d")[1]), pretrained=shall_pretrain))
+
+                        elif self.args.csn:
+                            self.base_model_list.append(getattr(csnet, self.args.backbone_list[bbi])(shall_pretrain))
+
                     else:
                         self.base_model_list.append(getattr(torchvision.models, backbone_name)(shall_pretrain))
                     self.base_model_list[-1].avgpool = nn.AdaptiveAvgPool2d(1)
@@ -202,6 +215,8 @@ class TSN_Ada(nn.Module):
                             self.base_model_list[-1].last_layer_name = 'classifier'
                         elif "res3d" in backbone_name:
                             self.base_model_list[-1].last_layer_name = 'fc'
+                        elif self.args.csn:
+                            self.base_model_list[-1].last_layer_name = 'fc'
             return
 
         shall_pretrain = (self.pretrain == 'imagenet')
@@ -213,6 +228,9 @@ class TSN_Ada(nn.Module):
         elif self.args.msd:
             pretrained_path = ospj(common.PYTORCH_CKPT_DIR, "msdnet-step4-block5.pth") if shall_pretrain else None
             self.base_model = getattr(msdnet, "create_msdnet")(pretrained_path=pretrained_path)
+        elif self.args.mer:
+            shall_pretrain = (self.pretrain == 'imagenet')
+            self.base_model = getattr(mernet, base_model)(shall_pretrain)
         elif 'resnet' in base_model:
             self.base_model = getattr(torchvision.models, base_model)(shall_pretrain)
             if self.is_shift:
@@ -254,22 +272,22 @@ class TSN_Ada(nn.Module):
             self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
 
         elif self.args.cnn3d:
+
             if base_model == 'mobilenet3dv2':
                 self.base_model = mobilenet3d_v2(pretrained = shall_pretrain)
                 self.base_model.last_layer_name = 'classifier'
-                self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
-                self.input_size = 224
-                self.input_mean = [0.485, 0.456, 0.406]
-                self.input_std = [0.229, 0.224, 0.225]
-
+                # self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
             elif "res3d" in base_model:
                 self.base_model = i3d_resnet(depth=int(base_model.split("res3d")[1]),
                                              pretrained = shall_pretrain)
                 self.base_model.last_layer_name = 'fc'
-                self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
-                self.input_size = 224
-                self.input_mean = [0.485, 0.456, 0.406]
-                self.input_std = [0.229, 0.224, 0.225]
+                # self.base_model.avgpool = nn.AdaptiveAvgPool2d(1)
+            elif self.args.csn:
+                self.base_model = getattr(csnet, base_model)(shall_pretrain)
+                self.base_model.last_layer_name = 'fc'
+                # self.base_model.avgpool = nn.AdaptiveAvgPool3d(1)
+                # print(self.base_model)
+                # exit()
         else:
             raise ValueError('Unknown base model: {}'.format(base_model))
 
@@ -318,6 +336,18 @@ class TSN_Ada(nn.Module):
                             constant_(new_fc.bias, 0)
                         self.new_fc_list.append(new_fc)
                         base_model.classifier[self.args.msd_indices_list[fc_i]].linear = nn.Dropout(p=self.dropout)
+                return None
+
+            elif self.args.mer:
+                for bbi, base_model in enumerate(self.base_model_list):
+                    for fc_i in self.args.mer_indices_list:
+                        feature_dim = getattr(base_model, "fc%d" % fc_i).in_features
+                        new_fc = nn.Linear(feature_dim, num_class)
+                        if hasattr(new_fc, 'weight'):
+                            normal_(new_fc.weight, 0, std)
+                            constant_(new_fc.bias, 0)
+                        self.new_fc_list.append(new_fc)
+                        setattr(base_model, "fc%d" % fc_i, nn.Dropout(p=self.dropout))
                 return None
 
             for j,base_model in enumerate(self.base_model_list):
@@ -397,6 +427,32 @@ class TSN_Ada(nn.Module):
                             # shutdown update in frozen mode
                             m.weight.requires_grad = False
                             m.bias.requires_grad = False
+        if mode and len(self.args.frozen_layers) > 0 and self.args.freeze_corr_bn:
+            if self.args.ada_reso_skip:
+                models = []
+                if self.multi_models:
+                    models = models + list(self.base_model_list)
+            else:
+                models = [self.base_model]
+            for the_model in models:
+                for layer_idx in self.args.frozen_layers:
+                    for km in the_model.named_modules():
+                        k, m = km
+                        if layer_idx == 0:
+                            if "bn1" in k and "layer" not in k and (
+                                    isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm3d)):  # TODO(yue)
+                                m.eval()
+                                m.weight.requires_grad = False
+                                m.bias.requires_grad = False
+                                # print(layer_idx, "->", k, "frozen batchnorm")
+                        else:
+                            if "layer%d" % (layer_idx) in k and (
+                                    isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm3d)):  # TODO(yue)
+                                m.eval()
+                                m.weight.requires_grad = False
+                                m.bias.requires_grad = False
+                                # print(layer_idx, "->", k, "frozen batchnorm")
+
 
     def partialBN(self, enable):
         self._enable_pbn = enable
@@ -493,10 +549,10 @@ class TSN_Ada(nn.Module):
                 input_3d = input_3d.transpose(2, 1)
                 feat = the_base_model(input_3d)
             else:
-                if (self.args.dmy or self.args.msd) and (signal is not None and signal>=0):
-                    feat, = the_base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]),
+                if (self.args.dmy or self.args.msd or self.args.mer) and (signal is not None and signal>=0):
+                    feat = the_base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]),
                                           signal=signal)
-                elif self.args.msd and self.args.uno_reso and len(indices_list)>0: #TODO
+                elif (self.args.msd or self.args.mer) and self.args.uno_reso and len(indices_list)>0:  # TODO
                     feat_list = the_base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]),
                                           signal=signal)
                     # if isinstance(feat, list):
@@ -506,11 +562,11 @@ class TSN_Ada(nn.Module):
                 else:
                     feat = the_base_model(input_data.view((-1, 3 * self.new_length) + input_data.size()[-2:]))
 
-            if self.args.msd and self.args.uno_reso and len(indices_list)>0:
+            if (self.args.msd or self.args.mer) and self.args.uno_reso and len(indices_list)>0:
                 feat_out_list=[]
                 base_out_list=[]
-                for i, msd_i in enumerate(indices_list):
-                    feat=feat_list[msd_i]
+                for i, ind_i in enumerate(indices_list):
+                    feat = feat_list[ind_i]
                     base_out = new_fc[i](feat)
                     base_out = base_out.view((-1, self.time_steps) + base_out.size()[1:])
                     base_out_list.append(base_out)
@@ -597,6 +653,19 @@ class TSN_Ada(nn.Module):
                                                       signal=self.args.msd_indices_list[fc_i])
                         feat_out_list.append(feat_out)
                         base_out_list.append(base_out)
+            elif self.args.mer:
+                if self.args.uno_reso:
+                    feat_out_list, base_out_list = backbone(input_list[0], self.base_model_list[0],
+                                                            self.new_fc_list, signal=None,
+                                                            indices_list=self.args.mer_indices_list)
+                else:
+                    for fc_i in range(len(self.args.mer_indices_list)):
+                        feat_out, base_out = backbone(input_list[fc_i],
+                                                      self.base_model_list[0],
+                                                      self.new_fc_list[fc_i],
+                                                      signal=self.args.mer_indices_list[fc_i])
+                        feat_out_list.append(feat_out)
+                        base_out_list.append(base_out)
             else:
                 for bb_i,the_backbone in enumerate(self.base_model_list):
                     if self.args.ada_crop_list[bb_i]==1:
@@ -621,7 +690,7 @@ class TSN_Ada(nn.Module):
 
         online_policy = False
         if not any([self.args.offline_lstm_all, self.args.offline_lstm_last, self.args.random_policy,
-                    self.args.all_policy, self.args.distill_policy, self.args.real_scsampler]):
+                    self.args.all_policy, self.args.real_all_policy, self.args.distill_policy, self.args.real_scsampler]):
             online_policy = True
             r_list=[]
 
@@ -687,7 +756,7 @@ class TSN_Ada(nn.Module):
                 for i_bs in range(batch_size):
                     for i_t in range(self.time_steps):
                         r_all[i_bs, i_t, torch.randint(self.action_dim,[1])] = 1.0
-            elif self.args.all_policy: #TODO(yue) all policy: take all
+            elif self.args.all_policy or self.args.real_all_policy: #TODO(yue) all policy: take all
                 r_all = torch.ones(batch_size, self.time_steps, self.action_dim).cuda()
             elif self.args.distill_policy: #TODO(yue) all policy: take all
                 r_all = torch.zeros(batch_size, self.time_steps, self.action_dim).cuda()

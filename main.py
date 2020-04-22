@@ -10,6 +10,7 @@ import os
 import sys
 import time
 import torch.nn.parallel
+import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import torch.optim
 from torch.nn.utils import clip_grad_norm_
@@ -73,12 +74,31 @@ def load_to_sd(model_dict, model_path, module_name, fc_name, resolution, apple_t
 
 
         if apple_to_apple:
+            if args.incremental_load_new_fcs:
+                #TODO name changes {0.fc} -> {1.fc, 0.fc} -> {2.fc, 1.fc, 0.fc}
+                alter_keys = []
+                num_fcs_in_old_model = len(args.mer_indices_list) - 1
+                num_fcs_in_new_model = len(args.mer_indices_list)
+                fc_offset = num_fcs_in_new_model - num_fcs_in_old_model
+                for fc_i in range(num_fcs_in_old_model-1, -1, -1):
+                    alter_keys.append(["module.new_fc_list.%d.weight" % (fc_i + fc_offset), "module.new_fc_list.%d.weight" % (fc_i)])
+                    alter_keys.append(["module.new_fc_list.%d.bias" % (fc_i + fc_offset), "module.new_fc_list.%d.bias" % (fc_i)])
+
+                for newkey, oldkey in alter_keys:
+                    sd[newkey] = sd[oldkey]
+                    del sd[oldkey]
+
+                for fc_i in range(4):
+                    obsolete_fc_name = "module.base_model_list.0.fc%d."%(fc_i)
+                    if obsolete_fc_name+"weight" in sd:
+                        del sd[obsolete_fc_name+"weight"]
+                        del sd[obsolete_fc_name+"bias"]
+
             del_keys = []
             if args.remove_all_base_0:
                 for key in sd:
                     if "module.base_model_list.0" in key or "new_fc_list.0" in key or "linear." in key:
                         del_keys.append(key)
-
             if args.no_extra_new_fcs_bns:
                 for key in sd:
                     if "new_fc_list" in key and "new_fc_list.0" not in key:
@@ -182,7 +202,10 @@ def main():
     scale_size = model.scale_size
     input_mean = model.input_mean
     input_std = model.input_std
-    policies = model.get_optim_policies()
+    if args.no_optim:
+        policies = [{'params': model.parameters(), 'lr_mult': 1, 'decay_mult': 1, 'name': "parameters"}]
+    else:
+        policies = model.get_optim_policies()
     train_augmentation = model.get_augmentation(flip=False if 'something' in args.dataset or 'jester' in args.dataset else True)
 
     model = torch.nn.DataParallel(model, device_ids=args.gpus).cuda()
@@ -197,6 +220,63 @@ def main():
         for name, param in model.module.named_parameters():
             if "base_model" in name:
                 param.requires_grad = False
+    if len(args.frozen_list)>0:
+        for name, param in model.module.named_parameters():
+            for keyword in args.frozen_list:
+                if keyword[0] == "*":
+                    if keyword[-1] == "*":  # TODO middle
+                        if keyword[1:-1] in name:
+                            param.requires_grad = False
+                            print(keyword, "->", name, "frozen")
+                    else: #TODO suffix
+                        if name.endswith(keyword[1:]):
+                            param.requires_grad = False
+                            print(keyword, "->", name, "frozen")
+                elif keyword[-1] == "*":  # TODO prefix
+                    if name.startswith(keyword[:-1]):
+                        param.requires_grad = False
+                        print(keyword, "->", name, "frozen")
+                else:  # TODO exact word
+                    if name == keyword:
+                        param.requires_grad = False
+                        print(keyword,"->",name,"frozen")
+        print("="*80)
+        for name, param in model.module.named_parameters():
+            print(param.requires_grad, "\t", name)
+
+    if len(args.frozen_layers) > 0:
+        for layer_idx in args.frozen_layers:
+            for name, param in model.module.named_parameters():
+                if layer_idx==0:
+                    if "list.0.conv1" in name:
+                        param.requires_grad = False
+                        print(layer_idx, "->", name, "frozen")
+                else:
+                    if "list.0.layer%d" % layer_idx in name and ("conv" in name or "downsample.0" in name):
+                        param.requires_grad = False
+                        print(layer_idx, "->", name, "frozen")
+            if args.freeze_corr_bn:
+                for km in model.named_modules():
+                    k,m = km
+                    if layer_idx ==0:
+                        if "bn1" in k and "layer" not in k and (
+                                isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm3d)):  # TODO(yue)
+                            m.eval()
+                            m.weight.requires_grad = False
+                            m.bias.requires_grad = False
+                            print(layer_idx, "->", k, "frozen batchnorm")
+                    else:
+                        if "layer%d"%(layer_idx) in k and (isinstance(m, nn.BatchNorm2d) or isinstance(m,nn.BatchNorm3d)): #TODO(yue)
+                            m.eval()
+                            m.weight.requires_grad = False
+                            m.bias.requires_grad = False
+                            print(layer_idx, "->", k, "frozen batchnorm")
+
+
+        print("=" * 80)
+        for name, param in model.module.named_parameters():
+            print(param.requires_grad, "\t", name)
+
 
     optimizer = torch.optim.SGD(policies,
                                 args.lr,
@@ -481,6 +561,12 @@ def init_gflops_table():
             gflops_table[args.backbone_list[0] + str(args.reso_list[the_i])+"@%d"%(args.msd_indices_list[fc_i])] \
                 = get_gflops_params(args.backbone_list[0], args.reso_list[the_i], num_class, seg_len,
                                     default_signal=args.msd_indices_list[fc_i])[0]
+    elif args.mer:
+        for fc_i in range(len(args.mer_indices_list)):
+            the_i = 0 if args.uno_reso else fc_i
+            gflops_table[args.backbone_list[0] + str(args.reso_list[the_i]) + "@%d" % (args.mer_indices_list[fc_i])] \
+                = get_gflops_params(args.backbone_list[0], args.reso_list[the_i], num_class, seg_len,
+                                    default_signal=args.mer_indices_list[fc_i])[0]
     else:
         for i, backbone in enumerate(args.backbone_list):
             gflops_table[backbone+str(args.reso_list[i])] = get_gflops_params(backbone, args.reso_list[i], num_class, seg_len)[0]
@@ -510,10 +596,17 @@ def get_gflops_t_tt_vector():
             gflops_vec.append(the_flops)
             t_vec.append(1.)
             tt_vec.append(1.)
+    elif args.mer:
+        for fc_i in range(len(args.mer_indices_list)):
+            the_i = 0 if args.uno_reso else fc_i
+            the_flops = gflops_table[args.backbone_list[0] + str(args.reso_list[the_i]) + "@%d" % (args.mer_indices_list[fc_i])]
+            gflops_vec.append(the_flops)
+            t_vec.append(1.)
+            tt_vec.append(1.)
     else:
         for i, backbone in enumerate(args.backbone_list):
-            if all([arch_name not in backbone for arch_name in ["resnet","efficientnet","mobilenet", "res3d"]]):
-                exit("We can only handle resnet/mobilenet/efficientnet as backbone, when computing FLOPS")
+            if all([arch_name not in backbone for arch_name in ["resnet","mobilenet", "efficientnet", "res3d", "csn"]]):
+                exit("We can only handle resnet/mobilenet/efficientnet/res3d/csn as backbone, when computing FLOPS")
 
             for crop_i in range(args.ada_crop_list[i]):
                 the_flops = gflops_table[backbone+str(args.reso_list[i])]
@@ -620,17 +713,25 @@ def kl_categorical(p_logit, q_logit):
 
 def get_distill_losses(feat_outs, base_outs):
     d_loss_list=[]
+
+    if args.dmy:
+        iter_list = args.num_filters_list
+    elif args.msd:
+        iter_list = args.msd_indices_list
+    elif args.mer:
+        iter_list = args.mer_indices_list
+
     if args.use_feat_to_distill: #TODO L2 norm loss for feature level
         teacher_feat = feat_outs[:, 0]
-        for bb_i in range(1, len(args.num_filters_list)):
-            student_feat = feat_outs[:, 1]
+        for bb_i in range(1, len(iter_list)):
+            student_feat = feat_outs[:, bb_i]
             l2_loss = torch.mean(torch.norm(teacher_feat-student_feat, p=2, dim=-1))
             d_loss_list.append(l2_loss)
 
     else: #TODO KL Divergence for prediction level
         teacher_pred = base_outs[:, 0]
         # teacher_dist = torch.distributions.categorical.Categorical(logits=teacher_pred.reshape(-1,teacher_pred.shape[-1]))
-        for bb_i in range(1, len(args.num_filters_list)):
+        for bb_i in range(1, len(iter_list)):
             student_pred = base_outs[:, bb_i]
             # student_dist = torch.distributions.categorical.Categorical(
             #     logits=student_pred.reshape(-1, student_pred.shape[-1]))
@@ -681,7 +782,7 @@ def get_policy_usage_str(r_list, reso_dim):
 
     tmp_cnt = [np.sum(rs[:, :, iii] == 1) for iii in range(rs.shape[2])]
 
-    if args.all_policy:
+    if args.all_policy or args.real_all_policy:
         tmp_total_cnt = tmp_cnt[0]
     else:
         tmp_total_cnt = sum(tmp_cnt)
@@ -700,6 +801,11 @@ def get_policy_usage_str(r_list, reso_dim):
         for fc_i in range(len(args.msd_indices_list)):
             the_i = 0 if args.uno_reso else fc_i
             used_model_list += [args.backbone_list[0] + "@%d" % (args.msd_indices_list[fc_i])] * args.ada_crop_list[the_i]
+            reso_list += [args.reso_list[the_i]] * args.ada_crop_list[the_i]
+    elif args.mer:
+        for fc_i in range(len(args.mer_indices_list)):
+            the_i = 0 if args.uno_reso else fc_i
+            used_model_list += [args.backbone_list[0] + "@%d" % (args.mer_indices_list[fc_i])] * args.ada_crop_list[the_i]
             reso_list += [args.reso_list[the_i]] * args.ada_crop_list[the_i]
     else:
         for i in range(len(args.backbone_list)):
@@ -757,8 +863,15 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
     if use_ada_framework:
         tau = get_current_temperature(epoch)
         alosses, elosses = get_average_meters(2)
-        if args.dmy and args.distillation_weight>0.001:
-            dlosses = list(get_average_meters(len(args.num_filters_list)-1))
+        if args.distillation_weight>0.001:
+            if args.dmy:
+                dlosses = list(get_average_meters(len(args.num_filters_list)-1))
+            elif args.msd:
+                dlosses = list(get_average_meters(len(args.msd_indices_list)-1))
+            elif args.mer:
+                dlosses = list(get_average_meters(len(args.mer_indices_list)-1))
+            else:
+                raise ValueError("Distillation only supports dmy/msd/mer")
         each_terms = get_average_meters(NUM_LOSSES)
         r_list = []
 
@@ -790,7 +903,13 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
                     acc_loss = get_criterion_loss(criterion, lite_pred.mean(dim=1), target_var)
             else:
                 output, r, feat_outs, base_outs = model(input=input_var_list, tau=tau)
-                acc_loss = get_criterion_loss(criterion, output, target_var)
+                if args.real_all_policy:
+                    acc_loss_list=[]
+                    for base_i in range(base_outs.shape[1]):
+                        acc_loss_list.append(get_criterion_loss(criterion, base_outs[:,base_i].mean(dim=1), target_var))
+                    acc_loss = sum(acc_loss_list) / base_outs.shape[1]
+                else:
+                    acc_loss = get_criterion_loss(criterion, output, target_var)
 
             if use_ada_framework:
                 acc_loss, eff_loss, each_losses = compute_every_losses(r, acc_loss, epoch)
@@ -801,7 +920,7 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
                     each_terms[l_i].update(each_loss, input.size(0))
                 loss = acc_loss + eff_loss
 
-                if args.dmy and args.distillation_weight > 0.001:
+                if args.distillation_weight > 0.001:
                     distill_losses = get_distill_losses(feat_outs, base_outs)
                     for fc_i in range(len(distill_losses)):
                         dlosses[fc_i].update(distill_losses[fc_i].item(), input.size(0))
@@ -815,7 +934,17 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
             loss = get_criterion_loss(criterion, output, target_var)
 
         # measure accuracy and record loss
-        prec1, prec5 = accuracy(output.data, target[:,0], topk=(1, 5))
+        if args.real_all_policy:
+            prec1_list=[]
+            prec5_list=[]
+            for base_i in range(base_outs.shape[1]):
+                prec1_item, prec5_item = accuracy(base_outs[:,base_i].mean(dim=1).data, target[:, 0], topk=(1, 5))
+                prec1_list.append(prec1_item)
+                prec5_list.append(prec5_item)
+            prec1 = sum(prec1_list)/base_outs.shape[1]
+            prec5 = sum(prec5_list)/base_outs.shape[1]
+        else:
+            prec1, prec5 = accuracy(output.data, target[:,0], topk=(1, 5))
         losses.update(loss.item(), input.size(0))
         top1.update(prec1.item(), input.size(0))
         top5.update(prec5.item(), input.size(0))
@@ -852,7 +981,7 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
                 )
                 print_output += extra_each_loss_str(each_terms)
 
-                if args.dmy and args.distillation_weight>0.001:
+                if args.distillation_weight>0.001:
                     print_output += " d: "
                     for fc_i in range(len(dlosses)):
                         print_output += "({0:.3f})".format(dlosses[fc_i].avg)
@@ -886,14 +1015,23 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     if use_ada_framework:
         tau = get_current_temperature(epoch)
         alosses, elosses = get_average_meters(2)
+
         if args.dmy:
-            all_bb_results = [[] for _ in range(len(args.num_filters_list))]
-            if args.distillation_weight>0.001:
-                dlosses = list(get_average_meters(len(args.num_filters_list)-1))
+            iter_list = args.num_filters_list
+        elif args.msd:
+            iter_list = args.msd_indices_list
+        elif args.mer:
+            iter_list = args.mer_indices_list
         else:
-            all_bb_results = [[] for _ in args.backbone_list]
+            iter_list = args.backbone_list
+
+        all_bb_results = [[] for _ in range(len(iter_list))]
         if args.policy_also_backbone:
             all_bb_results.append([])
+
+        if args.distillation_weight > 0.001:
+            dlosses = list(get_average_meters(len(iter_list) - 1))
+
 
         each_terms = get_average_meters(NUM_LOSSES)
         r_list = []
@@ -926,7 +1064,16 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                         output, r, all_preds = model(input=input_tuple[:-1 + meta_offset], tau=tau)
                     else:
                         output, r, feat_outs, base_outs = model(input=input_tuple[:-1+meta_offset], tau=tau)
-                    acc_loss = get_criterion_loss(criterion, output, target)
+                        #print("base_outs",base_outs.shape)
+
+                    if args.real_all_policy:
+                        acc_loss_list = []
+                        for base_i in range(base_outs.shape[1]):
+                            acc_loss_list.append(
+                                get_criterion_loss(criterion, base_outs[:, base_i].mean(dim=1), target))
+                        acc_loss = sum(acc_loss_list) / base_outs.shape[1]
+                    else:
+                        acc_loss = get_criterion_loss(criterion, output, target)
                 if use_ada_framework:
                     acc_loss, eff_loss, each_losses = compute_every_losses(r, acc_loss, epoch)
                     alosses.update(acc_loss.item(), input.size(0))
@@ -935,7 +1082,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                         each_terms[l_i].update(each_loss, input.size(0))
                     loss = acc_loss + eff_loss
 
-                    if args.dmy and args.distillation_weight > 0.001:
+                    if args.distillation_weight > 0.001:
                         distill_losses = get_distill_losses(feat_outs, base_outs)
                         for fc_i in range(len(distill_losses)):
                             dlosses[fc_i].update(distill_losses[fc_i].item(), input.size(0))
@@ -959,7 +1106,17 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                 all_all_preds.append(all_preds)
 
             # measure accuracy and record loss
-            prec1, prec5 = accuracy(output.data, target[:,0], topk=(1, 5))
+            if args.real_all_policy:
+                prec1_list = []
+                prec5_list = []
+                for base_i in range(base_outs.shape[1]):
+                    prec1_item, prec5_item = accuracy(base_outs[:, base_i].mean(dim=1).data, target[:, 0], topk=(1, 5))
+                    prec1_list.append(prec1_item)
+                    prec5_list.append(prec5_item)
+                prec1 = sum(prec1_list) / base_outs.shape[1]
+                prec5 = sum(prec5_list) / base_outs.shape[1]
+            else:
+                prec1, prec5 = accuracy(output.data, target[:,0], topk=(1, 5))
 
             losses.update(loss.item(), input.size(0))
             top1.update(prec1.item(), input.size(0))
@@ -989,15 +1146,25 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
 
                     print_output += extra_each_loss_str(each_terms)
 
-                    if args.dmy and args.distillation_weight > 0.001:
+                    if args.distillation_weight > 0.001:
                         print_output += " d: "
                         for fc_i in range(len(dlosses)):
                             print_output += "({0:.3f})".format(dlosses[fc_i].avg)
                 print(print_output)
 
     # TODO(yue)
-    mAP,_ = cal_map(torch.cat(all_results,0).cpu(), torch.cat(all_targets,0)[:,0:1].cpu()) # TODO(yue) single-label mAP
-    mmAP, _ = cal_map(torch.cat(all_results, 0).cpu(), torch.cat(all_targets, 0).cpu())    # TODO(yue)  multi-label mAP
+    if args.real_all_policy:
+        all_targets_cpu = torch.cat(all_targets, 0).cpu().repeat(len(all_bb_results), 1)
+        bb_results_list=[]
+        for base_i in range(len(all_bb_results)):
+            bb_results_list.append(torch.mean(torch.cat(all_bb_results[base_i], 0), dim=1).cpu())
+        mAP, _ = cal_map(torch.cat(bb_results_list, 0),
+                         all_targets_cpu[:, 0:1])  # TODO(yue) single-label mAP
+        mmAP, _ = cal_map(torch.cat(bb_results_list, 0),
+                          all_targets_cpu)  # TODO(yue)  multi-label mAP
+    else:
+        mAP,_ = cal_map(torch.cat(all_results,0).cpu(), torch.cat(all_targets,0)[:,0:1].cpu()) # TODO(yue) single-label mAP
+        mmAP, _ = cal_map(torch.cat(all_results, 0).cpu(), torch.cat(all_targets, 0).cpu())    # TODO(yue)  multi-label mAP
     print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
               .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses))
 

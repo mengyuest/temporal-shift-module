@@ -11,6 +11,7 @@ from ops.cnn3d.mobilenet3dv2 import mobilenet3d_v2
 from ops.cnn3d.shufflenet3d import ShuffleNet3D
 import ops.dmynet
 import ops.msdnet
+import ops.mernet
 
 feat_dim_dict = {
     "resnet18": 512,
@@ -38,6 +39,9 @@ feat_dim_dict = {
     "dmynet50": 2048,
     "dmynet101": 2048,
     "msdnet": 0,
+    "mernet50": 0,
+    "ir_csn_50": 2048,
+    "ir_csn_152": 2048,
     }
 
 prior_dict={
@@ -50,7 +54,7 @@ prior_dict={
 }
 
 def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretrained=True,
-                      num_filters_list=[], default_signal=-1, last_conv_same=False, msd_indices_list=[]):
+                      num_filters_list=[], default_signal=-1, last_conv_same=False, msd_indices_list=[], mer_indices_list=[]):
     if model_name in prior_dict:
         gflops, params = prior_dict[model_name]
         gflops = gflops / 224 / 224 * resolution * resolution
@@ -84,6 +88,8 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
         last_layer = "fcs"
     elif "msdnet" in model_name:
         model = getattr(ops.msdnet, "MSDNet")(default_signal = default_signal)
+    elif "mernet" in model_name:
+        model = getattr(ops.mernet, model_name)(default_signal = default_signal)
     else:
         exit("I don't know what is %s" % model_name)
     feat_dim = feat_dim_dict[model_name]
@@ -98,7 +104,10 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
         for msd_i in msd_indices_list:
             msd_feat_dim = model.classifier[msd_i].linear.in_features
             model.classifier[msd_i].linear = nn.Linear(msd_feat_dim, num_classes)
-
+    elif "mernet" in model_name:
+        for mer_i in mer_indices_list:
+            mer_feat_dim = getattr(model, "fc%d.in_features"%(mer_i))
+            setattr(model, "fc%d"%mer_i, nn.Linear(mer_feat_dim, num_classes))
     else:
         setattr(model, last_layer, nn.Linear(feat_dim, num_classes))
 

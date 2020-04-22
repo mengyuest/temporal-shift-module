@@ -209,9 +209,23 @@ parser.add_argument('--use_feat_to_distill', action='store_true')
 
 parser.add_argument('--separate_dmy', action='store_true')
 parser.add_argument('--no_extra_new_fcs_bns', action='store_true')
+parser.add_argument('--incremental_load_new_fcs', action='store_true')
 parser.add_argument('--no_weights_from_linear', action='store_true')
 
 #TODO try MSDNet
 parser.add_argument('--msd', action='store_true')
 parser.add_argument('--msd_indices_list', default=[], type=int, nargs="+", help='number of indices for msd')
 parser.add_argument('--uno_reso', action='store_true')
+
+parser.add_argument('--filelist_suffix', type=str, default="")
+parser.add_argument('--no_optim', action='store_true')
+
+#TODO Multi-Exit ResNet
+parser.add_argument('--mer', action='store_true')
+parser.add_argument('--mer_indices_list', default=[], type=int, nargs="+", help='number of indices for mer')
+parser.add_argument('--frozen_layers', default=[], type=int, nargs="+", help='list of frozen layers')
+parser.add_argument('--real_all_policy', action='store_true', help="just using all preds there")
+parser.add_argument('--freeze_corr_bn', action='store_true', help="freeze the corresponding batchnorms")
+
+#TODO channel-separate network
+parser.add_argument('--csn', action='store_true')

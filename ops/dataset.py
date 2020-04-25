@@ -35,17 +35,18 @@ class VideoRecord(object):
 
 class TSNDataSet(data.Dataset):
     def __init__(self, root_path, list_file,
-                 num_segments=3, new_length=1,
-                 image_tmpl='img_{:05d}.jpg', transform=None,
+                 num_segments=3, image_tmpl='img_{:05d}.jpg', transform=None,
                  random_shift=True, test_mode=False,
-                 remove_missing=False, dense_sample=False, twice_sample=False, partial_fcvid_eval=False, args=None):
+                 remove_missing=False, dense_sample=False, twice_sample=False,
+                 dataset=None, filelist_suffix="", folder_suffix=None, partial_fcvid_eval=False, partial_ratio=None,
+                 ada_reso_skip=False, reso_list=None, random_crop=False, center_crop=False, ada_crop_list=None,
+                 rescale_to=224, policy_input_offset=None, save_meta=False):
 
         self.root_path = root_path
         # self.list_file = list_file
         self.list_file = \
-            ".".join(list_file.split(".")[:-1]) + args.filelist_suffix + "."+ list_file.split(".")[-1] #TODO
+            ".".join(list_file.split(".")[:-1]) + filelist_suffix + "."+ list_file.split(".")[-1] #TODO
         self.num_segments = num_segments
-        self.new_length = new_length
         self.image_tmpl = image_tmpl
         self.transform = transform
         self.random_shift = random_shift
@@ -53,11 +54,21 @@ class TSNDataSet(data.Dataset):
         self.remove_missing = remove_missing
         self.dense_sample = dense_sample  # using dense sample as I3D
         self.twice_sample = twice_sample  # twice sample for more validation
-        self.partial_fcvid_eval = partial_fcvid_eval
-        self.args=args
+
 
         # TODO(yue)
-        self.root_path += self.args.folder_suffix
+        self.dataset = dataset
+        self.root_path += folder_suffix
+        self.partial_fcvid_eval = partial_fcvid_eval
+        self.partial_ratio = partial_ratio
+        self.ada_reso_skip=ada_reso_skip
+        self.reso_list = reso_list
+        self.random_crop = random_crop
+        self.center_crop = center_crop
+        self.ada_crop_list = ada_crop_list
+        self.rescale_to = rescale_to
+        self.policy_input_offset = policy_input_offset
+        self.save_meta = save_meta
 
         if self.dense_sample:
             print('=> Using dense sample for the dataset...')
@@ -75,17 +86,17 @@ class TSNDataSet(data.Dataset):
 
     def _parse_list(self):
         # check the frame number is large >3:
-        splitter="," if self.args.dataset in ["actnet","fcvid"] else " "
+        splitter="," if self.dataset in ["actnet","fcvid"] else " "
         tmp = [x.strip().split(splitter) for x in open(self.list_file)]
 
-        if any(len(items)>=3 for items in tmp) and self.args.dataset=="minik":
+        if any(len(items)>=3 for items in tmp) and self.dataset=="minik":
             tmp = [[splitter.join(x[:-2]), x[-2], x[-1]] for x in tmp]
 
         if not self.test_mode or self.remove_missing:
             tmp = [item for item in tmp if int(item[1]) >= 3]
 
-        if self.partial_fcvid_eval and self.args.dataset=="fcvid":
-            tmp = tmp[:int(len(tmp)*self.args.partial_ratio)]
+        if self.partial_fcvid_eval and self.dataset=="fcvid":
+            tmp = tmp[:int(len(tmp)*self.partial_ratio)]
 
         self.video_list = [VideoRecord(item) for item in tmp]
 
@@ -107,12 +118,12 @@ class TSNDataSet(data.Dataset):
             offsets = [(idx * t_stride + start_idx) % record.num_frames for idx in range(self.num_segments)]
             return np.array(offsets) + 1
         else:  # normal sample
-            average_duration = (record.num_frames - self.new_length + 1) // self.num_segments
+            average_duration = record.num_frames // self.num_segments
             if average_duration > 0:
                 offsets = np.multiply(list(range(self.num_segments)), average_duration) + randint(average_duration,
                                                                                                   size=self.num_segments)
             elif record.num_frames > self.num_segments:
-                offsets = np.sort(randint(record.num_frames - self.new_length + 1, size=self.num_segments))
+                offsets = np.sort(randint(record.num_frames, size=self.num_segments))
             else:
                 #offsets = np.zeros((self.num_segments,)) #TODO(yue) do this for mini-sth
                 offsets = np.array(list(range(record.num_frames)) + [record.num_frames - 1] * (self.num_segments - record.num_frames))
@@ -126,8 +137,8 @@ class TSNDataSet(data.Dataset):
             offsets = [(idx * t_stride + start_idx) % record.num_frames for idx in range(self.num_segments)]
             return np.array(offsets) + 1
         else:
-            if record.num_frames > self.num_segments + self.new_length - 1:
-                tick = (record.num_frames - self.new_length + 1) / float(self.num_segments)
+            if record.num_frames > self.num_segments:
+                tick = record.num_frames / float(self.num_segments)
                 offsets = np.array([int(tick / 2.0 + tick * x) for x in range(self.num_segments)])
             else:
                 #offsets = np.zeros((self.num_segments,)) #TODO(yue) do this for mini-sth
@@ -144,14 +155,14 @@ class TSNDataSet(data.Dataset):
                 offsets += [(idx * t_stride + start_idx) % record.num_frames for idx in range(self.num_segments)]
             return np.array(offsets) + 1
         elif self.twice_sample:
-            tick = (record.num_frames - self.new_length + 1) / float(self.num_segments)
+            tick = record.num_frames  / float(self.num_segments)
 
             offsets = np.array([int(tick / 2.0 + tick * x) for x in range(self.num_segments)] +
                                [int(tick * x) for x in range(self.num_segments)])
 
             return offsets + 1
         else:
-            tick = (record.num_frames - self.new_length + 1) / float(self.num_segments)
+            tick = record.num_frames  / float(self.num_segments)
             offsets = np.array([int(tick / 2.0 + tick * x) for x in range(self.num_segments)])
             return offsets + 1
 
@@ -193,53 +204,55 @@ class TSNDataSet(data.Dataset):
 
         images = list()
         for seg_ind in indices:
-            p = int(seg_ind)
-            for i in range(self.new_length):
-                seg_imgs = self._load_image(record.path, p)
-                images.extend(seg_imgs)
-                if p < record.num_frames:
-                    p += 1
+            images.extend(self._load_image(record.path, int(seg_ind)))
+        # for seg_ind in indices:
+        #     p = int(seg_ind)
+        #     for i in range(1):
+        #         seg_imgs = self._load_image(record.path, p)
+        #         images.extend(seg_imgs)
+        #         if p < record.num_frames:
+        #             p += 1
 
         process_data = self.transform(images)
-        if self.args.ada_reso_skip:
+        if self.ada_reso_skip:
             return_items = [process_data]
-            if self.args.random_crop:
-                rescaled = [self.random_crop(process_data, (x,x)) for x in self.args.reso_list[1:]]
-            elif self.args.center_crop:
-                rescaled = [self.center_crop(process_data, (x, x)) for x in self.args.reso_list[1:]]
+            if self.random_crop:
+                rescaled = [self.random_crop_proc(process_data, (x,x)) for x in self.reso_list[1:]]
+            elif self.center_crop:
+                rescaled = [self.center_crop_proc(process_data, (x, x)) for x in self.reso_list[1:]]
             else:
-                rescaled = [self.rescale(process_data, (x,x)) for xi,x in enumerate(self.args.reso_list[1:]) if (self.args.ada_crop_list[xi+1]==1 or xi+1==self.args.policy_input_offset)]
+                rescaled = [self.rescale_proc(process_data, (x,x)) for xi,x in enumerate(self.reso_list[1:]) if (self.ada_crop_list[xi+1]==1 or xi+1==self.policy_input_offset)]
             return_items = return_items + rescaled
-            if self.args.save_meta:
+            if self.save_meta:
                 return_items = return_items + [record.path] + [indices] #[torch.tensor(indices)]
             return_items = return_items + [record.label]
 
             return tuple(return_items)
         else:
-            if self.args.rescale_to == 224:
+            if self.rescale_to == 224:
                 rescaled = process_data
             else:
-                x = self.args.rescale_to
-                if self.args.random_crop:
-                    rescaled = self.random_crop(process_data, (x, x))
-                elif self.args.center_crop:
-                    rescaled = self.center_crop(process_data, (x, x))
+                x = self.rescale_to
+                if self.random_crop:
+                    rescaled = self.random_crop_proc(process_data, (x, x))
+                elif self.center_crop:
+                    rescaled = self.center_crop_proc(process_data, (x, x))
                 else:
-                    rescaled = self.rescale(process_data, (x, x))
+                    rescaled = self.rescale_proc(process_data, (x, x))
 
             return rescaled, record.label
 
     # TODO(yue)
     # (NC, H, W)->(NC, H', W')
-    def rescale(self, input_data, size):
+    def rescale_proc(self, input_data, size):
         return torch.nn.functional.interpolate(input_data.unsqueeze(1), size=size, mode='nearest').squeeze(1)
 
-    def center_crop(self, input_data, size):
+    def center_crop_proc(self, input_data, size):
         h = input_data.shape[1] // 2
         w = input_data.shape[2] // 2
         return input_data[:, h - size[0] // 2:h + size[0] // 2, w - size[1] // 2:w + size[1] // 2]
 
-    def random_crop(self, input_data, size):
+    def random_crop_proc(self, input_data, size):
         H = input_data.shape[1]
         W = input_data.shape[2]
         input_data_nchw=input_data.view(-1, 3, H, W)

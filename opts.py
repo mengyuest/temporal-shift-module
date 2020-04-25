@@ -66,7 +66,7 @@ parser.add_argument('--flow_prefix', default="", type=str)
 parser.add_argument('--root_log',type=str, default='logs')
 parser.add_argument('--root_model', type=str, default='checkpoint')
 
-parser.add_argument('--shift', default=False, action="store_true", help='use shift for models')
+parser.add_argument('--shift', default=False, action="store_true", help='use shift for imta_models')
 parser.add_argument('--shift_div', default=8, type=int, help='number of div for shift (default: 8)')
 parser.add_argument('--shift_place', default='blockres', type=str, help='place for shift (default: stageres)')
 
@@ -87,9 +87,7 @@ parser.add_argument('--backbone_list', default=[], type=str, nargs='+', help="ba
 parser.add_argument('--shared_backbone', action='store_true', help="share same backbone weight")
 parser.add_argument('--accuracy_weight', default=1., type=float)
 parser.add_argument('--efficency_weight', default=0., type=float)
-parser.add_argument('--no_skip', action='store_true')
 parser.add_argument('--show_pred', action='store_true')
-parser.add_argument('--t_offset', default=0, type=int)
 
 # TODO(yue) multi-label cases (for activity-net-v1.3)
 # Always provides (single + multi) mAPs. Difference is only in training
@@ -107,7 +105,7 @@ parser.add_argument('--all_policy', action='store_true', help="just using all fe
 parser.add_argument('--eff_loss_after', default=-1, type=int, help="use eff loss after X epochs")
 
 parser.add_argument('--save_freq', default=10, type=int,help="freq to save network model weight")# TODO(yue)
-parser.add_argument('--model_paths', default=[], type=str, nargs="+", help='path to load models for backbones')
+parser.add_argument('--model_paths', default=[], type=str, nargs="+", help='path to load imta_models for backbones')
 parser.add_argument('--policy_path', default="", type=str, help="path of the policy network")
 # TODO(yue) maybe we want to use ImageNet pretrain or not, depending on the resolution
 
@@ -185,10 +183,6 @@ parser.add_argument('--num_filters_list', default=[64], type=int, nargs="+", hel
 parser.add_argument('--freeze_channels', default=None, type=int, help="freeze first xth channels in filters")
 parser.add_argument('--cross_assign', action='store_true')
 parser.add_argument('--default_signal', default=0, type=int)
-
-
-#TODO trial for dilation
-parser.add_argument('--dilation_list', default=None, type=int, nargs="+", help='list of dilations')
 
 
 #TODO trial for cross-entropy-loss for uniform

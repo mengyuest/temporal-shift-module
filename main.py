@@ -1,8 +1,3 @@
-# Code for "TSM: Temporal Shift Module for Efficient Video Understanding"
-# arXiv:1811.08383
-# Ji Lin*, Chuang Gan, Song Han
-# {jilin, songhan}@mit.edu, ganchuang@csail.mit.edu
-
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -334,7 +329,7 @@ def main():
             print("Test mode load from pretrained model")
             the_model_path = args.test_from
             if ".pth.tar" not in the_model_path:
-                the_model_path = ospj(the_model_path,"models","ckpt.best.pth.tar")
+                the_model_path = ospj(the_model_path,"imta_models","ckpt.best.pth.tar")
             model_dict = model.state_dict()
             sd = load_to_sd(model_dict, the_model_path, "foo", "bar", -1, apple_to_apple=True)
             model_dict.update(sd)
@@ -372,7 +367,7 @@ def main():
         if test_mode:
             the_model_path = args.test_from
             if ".pth.tar" not in the_model_path:
-                the_model_path = ospj(the_model_path,"models","ckpt.best.pth.tar")
+                the_model_path = ospj(the_model_path,"imta_models","ckpt.best.pth.tar")
             model_dict = model.state_dict()
             sd = load_to_sd(model_dict, the_model_path, "foo", "bar", -1, apple_to_apple=True)
             model_dict.update(sd)
@@ -398,32 +393,55 @@ def main():
     data_length = 1
     train_loader = torch.utils.data.DataLoader(
         TSNDataSet(args.root_path, args.train_list, num_segments=args.num_segments,
-                   new_length=data_length,
                    image_tmpl=prefix,
-                   partial_fcvid_eval=False,
                    transform=torchvision.transforms.Compose([
                        train_augmentation,
                        Stack(roll=False),
                        ToTorchFormatTensor(div=True),
                        normalize,
-                   ]), dense_sample=args.dense_sample, args=args),
+                   ]), dense_sample=args.dense_sample,
+                   dataset=args.dataset,
+                   filelist_suffix=args.filelist_suffix,
+                   folder_suffix=args.folder_suffix,
+                   partial_fcvid_eval=args.partial_fcvid_eval,
+                   partial_ratio=args.partial_ratio,
+                   ada_reso_skip=args.ada_reso_skip,
+                   reso_list=args.reso_list,
+                   random_crop=args.random_crop,
+                   center_crop=args.center_crop,
+                   ada_crop_list=args.ada_crop_list,
+                   rescale_to=args.rescale_to,
+                   policy_input_offset=args.policy_input_offset,
+                   save_meta=args.save_meta),
         batch_size=args.batch_size, shuffle=True,
         num_workers=args.workers, pin_memory=True,
         drop_last=True)  # prevent something not % n_GPU
 
     val_loader = torch.utils.data.DataLoader(
         TSNDataSet(args.root_path, args.val_list, num_segments=args.num_segments,
-                   new_length=data_length,
                    image_tmpl=prefix,
                    random_shift=False,
-                   partial_fcvid_eval=args.partial_fcvid_eval,
                    transform=torchvision.transforms.Compose([
                        GroupScale(int(scale_size)),
                        GroupCenterCrop(crop_size),
                        Stack(roll=False),
                        ToTorchFormatTensor(div=True),
                        normalize,
-                   ]), dense_sample=args.dense_sample, args=args),
+                   ]), dense_sample=args.dense_sample,
+                   dataset=args.dataset,
+                   filelist_suffix=args.filelist_suffix,
+                   folder_suffix=args.folder_suffix,
+                   partial_fcvid_eval=args.partial_fcvid_eval,
+                   partial_ratio=args.partial_ratio,
+                   ada_reso_skip=args.ada_reso_skip,
+                   reso_list=args.reso_list,
+                   random_crop=args.random_crop,
+                   center_crop=args.center_crop,
+                   ada_crop_list=args.ada_crop_list,
+                   rescale_to=args.rescale_to,
+                   policy_input_offset=args.policy_input_offset,
+                   save_meta=args.save_meta
+                   ),
         batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True)
 
@@ -1064,7 +1082,6 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                         output, r, all_preds = model(input=input_tuple[:-1 + meta_offset], tau=tau)
                     else:
                         output, r, feat_outs, base_outs = model(input=input_tuple[:-1+meta_offset], tau=tau)
-                        #print("base_outs",base_outs.shape)
 
                     if args.real_all_policy:
                         acc_loss_list = []
@@ -1212,11 +1229,11 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     return mAP, mmAP, top1.avg, usage_str if use_ada_framework else None, gflops
 
 def save_checkpoint(state, is_best, exp_full_path):
-    # filename = '%s/models/ckpt%04d.pth.tar' % (exp_full_path, state["epoch"])
+    # filename = '%s/imta_models/ckpt%04d.pth.tar' % (exp_full_path, state["epoch"])
     # if (state["epoch"]-1) % args.save_freq == 0 or state["epoch"] == 0:
     #     torch.save(state, filename)
     if is_best:
-        torch.save(state, '%s/models/ckpt.best.pth.tar' % (exp_full_path))
+        torch.save(state, '%s/imta_models/ckpt.best.pth.tar' % (exp_full_path))
 
 
 def adjust_learning_rate(optimizer, epoch, lr_type, lr_steps):
@@ -1248,7 +1265,7 @@ def setup_log_directory(logger, exp_header):
     else:
         exp_full_path = ospj(common.EXPS_PATH, exp_full_name)
         os.makedirs(exp_full_path)
-        os.makedirs(ospj(exp_full_path,"models"))
+        os.makedirs(ospj(exp_full_path,"imta_models"))
     logger.create_log(exp_full_path, test_mode, args.num_segments, args.batch_size, args.top_k)
     return exp_full_path
 

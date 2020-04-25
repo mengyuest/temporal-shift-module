@@ -122,7 +122,7 @@ model = ops.dmynet.dmynet50(num_filters_list=[64, 32, 16, 8], default_signal=0)
 # flops, params = profile(model, inputs=(dummy_data,))
 # print(flops / 1e9, params / 1e6)
 #
-# model = getattr(torchvision.models, "resnet50")(False)
+# model = getattr(torchvision.imta_models, "resnet50")(False)
 
 timing(
     ops.dmynet.dmynet50(num_filters_list=[64, 32, 16, 8], default_signal=0),

@@ -294,7 +294,7 @@ def main():
 
     # load weights
     model_dict = model.state_dict()
-    sd = load_to_sd(ospj(args.test_from, "models", "ckpt.best.pth.tar"))
+    sd = load_to_sd(ospj(args.test_from, "imta_models", "ckpt.best.pth.tar"))
     model_dict.update(sd)
     model.load_state_dict(model_dict)
     cudnn.benchmark = True

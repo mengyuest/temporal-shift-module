@@ -389,7 +389,7 @@ def ir_csn_152(pretrained=False, progress=False, **kwargs):
     """Constructor for the 152 layer deep ir-CSN network as described
     in https://arxiv.org/abs/1904.02811.
     Note that video model zoo (https://github.com/facebookresearch/VMZ) provides
-    imta_models pretrained on large scale benchmarks such as Sports1M and URU.
+    models pretrained on large scale benchmarks such as Sports1M and URU.
     Args:
         pretrained (bool): If True, returns a model pre-trained on Kinetics-400
         progress (bool): If True, displays a progress bar of the download to stderr
@@ -408,7 +408,7 @@ def ip_csn_152(pretrained=False, progress=False, **kwargs):
     """Constructor for the 152 layer deep ip-CSN network as described
     in https://arxiv.org/abs/1904.02811.
     Note that video model zoo (https://github.com/facebookresearch/VMZ) provides
-    imta_models pretrained on large scale benchmarks such as Sports1M and URU.
+    models pretrained on large scale benchmarks such as Sports1M and URU.
     Args:
         pretrained (bool): If True, returns a model pre-trained on Kinetics-400
         progress (bool): If True, displays a progress bar of the download to stderr
@@ -427,7 +427,7 @@ def ir_csn_50(pretrained=False, progress=False, **kwargs):
     """Constructor for the 152 layer deep ir-CSN network as described
     in https://arxiv.org/abs/1904.02811.
     Note that video model zoo (https://github.com/facebookresearch/VMZ) provides
-    imta_models pretrained on large scale benchmarks such as Sports1M and URU.
+    models pretrained on large scale benchmarks such as Sports1M and URU.
     Args:
         pretrained (bool): If True, returns a model pre-trained on Kinetics-400
         progress (bool): If True, displays a progress bar of the download to stderr

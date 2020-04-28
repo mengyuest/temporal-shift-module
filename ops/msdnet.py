@@ -4,6 +4,32 @@ import math
 import pdb
 
 
+# ---- GradientRescale ---- #
+class GradientRescaleFunction(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx, input, weight):
+        ctx.save_for_backward(input)
+        ctx.gd_scale_weight = weight
+        output = input
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input = ctx.saved_tensors
+        grad_input = grad_weight = None
+
+        if ctx.needs_input_grad[0]:
+            grad_input = ctx.gd_scale_weight * grad_output
+
+        return grad_input, grad_weight
+
+
+gradient_rescale = GradientRescaleFunction.apply
+
+
+# ---- END Gradient Rescale ---- #
+
 class ConvBasic(nn.Module):
     def __init__(self, nIn, nOut, kernel=3, stride=1,
                  padding=1):
@@ -205,7 +231,7 @@ class ClassifierModule(nn.Module):
 
 
 class MSDNet(nn.Module):
-    def __init__(self, args=None, default_signal = -1):
+    def __init__(self, args=None, default_signal=-1, gradient_equilibrium=False):
         super(MSDNet, self).__init__()
         self.blocks = nn.ModuleList()
         self.classifier = nn.ModuleList()
@@ -219,6 +245,12 @@ class MSDNet(nn.Module):
 
         self.nBlocks = args.nBlocks
         self.steps = [args.base]
+
+        self.gradient_equilibrium = gradient_equilibrium  # TODO(yue)
+        if self.gradient_equilibrium:
+            print("*" * 40)
+            print("GRADIENT EQUILIBRIUM !")
+            print("*" * 40)
 
         n_layers_all, n_layer_curr = args.base, 0
         for i in range(1, self.nBlocks):
@@ -359,16 +391,23 @@ class MSDNet(nn.Module):
         res = []
         for i in range(self.nBlocks):
             x = self.blocks[i](x)
+            if self.gradient_equilibrium:
+                x[-1] = gradient_rescale(x[-1], 1.0 / (self.nBlocks - i))
             # if isinstance(x, list):
             #     print("OUT i=%d" % i, [xx.shape for xx in x])
             # else:
             #     print("OUT i=%d" % i, x.shape)
+
+            pred = self.classifier[i](x)
+            if self.gradient_equilibrium:
+                x[-1] = gradient_rescale(x[-1], (self.nBlocks - i - 1))
+
             if signal is not None and i == signal:
-                return self.classifier[i](x)
+                return pred
             elif self.default_signal != -1 and i == self.default_signal:
-                return self.classifier[i](x)
+                return pred
             else:
-                res.append(self.classifier[i](x))
+                res.append(pred)
         return res
 
 #TODO(yue)
@@ -388,8 +427,8 @@ class DefaultArgs:
         self.prune="max"
         self.reduction=0.5
 
-def create_msdnet(args=None, default_signal=-1, pretrained_path=None):
-    model = MSDNet(args, default_signal)
+def create_msdnet(args=None, default_signal=-1, pretrained_path=None, gradient_equilibrium=False):
+    model = MSDNet(args, default_signal, gradient_equilibrium)
     if pretrained_path is not None:
         print("Load pretrained MSDNet weights from ImageNet...")
         pretrained_dict = torch.load(pretrained_path)["state_dict"]

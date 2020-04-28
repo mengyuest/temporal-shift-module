@@ -105,6 +105,28 @@ def load_to_sd(model_dict, model_path, module_name, fc_name, resolution, apple_t
                     if ".downsample1s." in key and ".downsample1s.0" not in key:
                         del_keys.append(key)
 
+            if len(args.pretrained_msd_indices_list) != 0:
+                # TODO check whether matched covered
+                for idx in args.msd_indices_list:
+                    if idx not in args.pretrained_msd_indices_list:
+                        exit("Indices unmatched from pretrained to current model: %s=>%s"%
+                             (args.pretrained_msd_indices_list, args.msd_indices_list))
+                now_cls_i = 0
+                prefix0="module.new_fc_list.%d.weight"
+                prefix1 = "module.new_fc_list.%d.bias"
+                for cls_i in range(len(args.pretrained_msd_indices_list)):  # TODO base_model_list.0, 1., 2., 3., 4. ...
+                    if args.pretrained_msd_indices_list[cls_i] == args.msd_indices_list[now_cls_i]:
+                        sd[prefix0 % (now_cls_i)] = sd[prefix0 % (cls_i)]
+                        sd[prefix1 % (now_cls_i)] = sd[prefix1 % (cls_i)]
+                        now_cls_i += 1
+                    if now_cls_i >= len(args.msd_indices_list):
+                        break
+
+                # TODO delete the remaining (and unmatched) base_model_list indices
+                for old_cls_i in range(len(args.msd_indices_list), len(args.pretrained_msd_indices_list)):
+                    del_keys.append(prefix0 % old_cls_i)
+                    del_keys.append(prefix1 % old_cls_i)
+
             if args.no_weights_from_linear:
                 for key in sd:
                     if "linear." in key:
@@ -329,7 +351,7 @@ def main():
             print("Test mode load from pretrained model")
             the_model_path = args.test_from
             if ".pth.tar" not in the_model_path:
-                the_model_path = ospj(the_model_path,"imta_models","ckpt.best.pth.tar")
+                the_model_path = ospj(the_model_path, "models","ckpt.best.pth.tar")
             model_dict = model.state_dict()
             sd = load_to_sd(model_dict, the_model_path, "foo", "bar", -1, apple_to_apple=True)
             model_dict.update(sd)
@@ -344,6 +366,12 @@ def main():
                     if "base_model_list.0." in k:
                         for i in range(1, len(args.num_filters_list)): #TODO clone to separate nets
                             sd[k.replace("base_model_list.0.", "base_model_list.%d."%(i))] = sd[k]
+            if args.ge_pretraining:
+                new_sd = {}
+                for k in sd:  #TODO don't load in the classifiers
+                    if "classifier" not in k:
+                        new_sd[k.replace("module.", "module.base_model_list.0.")] = sd[k]
+                sd = new_sd
             model_dict.update(sd)
             model.load_state_dict(model_dict)
 
@@ -367,7 +395,7 @@ def main():
         if test_mode:
             the_model_path = args.test_from
             if ".pth.tar" not in the_model_path:
-                the_model_path = ospj(the_model_path,"imta_models","ckpt.best.pth.tar")
+                the_model_path = ospj(the_model_path,"models","ckpt.best.pth.tar")
             model_dict = model.state_dict()
             sd = load_to_sd(model_dict, the_model_path, "foo", "bar", -1, apple_to_apple=True)
             model_dict.update(sd)
@@ -1043,9 +1071,10 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
         else:
             iter_list = args.backbone_list
 
-        all_bb_results = [[] for _ in range(len(iter_list))]
-        if args.policy_also_backbone:
-            all_bb_results.append([])
+        if args.boost == False:
+            all_bb_results = [[] for _ in range(len(iter_list))]
+            if args.policy_also_backbone:
+                all_bb_results.append([])
 
         if args.distillation_weight > 0.001:
             dlosses = list(get_average_meters(len(iter_list) - 1))
@@ -1115,7 +1144,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
             all_results.append(output)
             all_targets.append(target)
 
-            if use_ada_framework:
+            if use_ada_framework and args.boost == False:
                 for bb_i in range(len(all_bb_results)):
                     all_bb_results[bb_i].append(base_outs[:, bb_i])
 
@@ -1185,7 +1214,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
               .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses))
 
-    if use_ada_framework:
+    if use_ada_framework and args.boost == False:
         bbmmaps = []
         bbprec1s = []
         all_targets_cpu=torch.cat(all_targets, 0).cpu()
@@ -1229,11 +1258,11 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     return mAP, mmAP, top1.avg, usage_str if use_ada_framework else None, gflops
 
 def save_checkpoint(state, is_best, exp_full_path):
-    # filename = '%s/imta_models/ckpt%04d.pth.tar' % (exp_full_path, state["epoch"])
+    # filename = '%s/models/ckpt%04d.pth.tar' % (exp_full_path, state["epoch"])
     # if (state["epoch"]-1) % args.save_freq == 0 or state["epoch"] == 0:
     #     torch.save(state, filename)
     if is_best:
-        torch.save(state, '%s/imta_models/ckpt.best.pth.tar' % (exp_full_path))
+        torch.save(state, '%s/models/ckpt.best.pth.tar' % (exp_full_path))
 
 
 def adjust_learning_rate(optimizer, epoch, lr_type, lr_steps):
@@ -1265,7 +1294,7 @@ def setup_log_directory(logger, exp_header):
     else:
         exp_full_path = ospj(common.EXPS_PATH, exp_full_name)
         os.makedirs(exp_full_path)
-        os.makedirs(ospj(exp_full_path,"imta_models"))
+        os.makedirs(ospj(exp_full_path,"models"))
     logger.create_log(exp_full_path, test_mode, args.num_segments, args.batch_size, args.top_k)
     return exp_full_path
 

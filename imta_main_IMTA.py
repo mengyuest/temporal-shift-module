@@ -5,14 +5,21 @@ from __future__ import division
 from __future__ import absolute_import
 
 import os
+import sys  # TODO(yue)
 
 from imta_dataloader import get_dataloaders
 from imta_args import arg_parser
 from imta_adaptive_inference import dynamic_evaluate
 import imta_models
 
+from ops.utils import cal_map
+import common
+from os.path import join as ospj
+import warnings  # TODO(yue)
+warnings.filterwarnings("ignore")  # TODO(yue)
+
 args = arg_parser.parse_args()
-os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+# os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
 
 args.grFactor = list(map(int, args.grFactor.split('-')))
 args.bnFactor = list(map(int, args.bnFactor.split('-')))
@@ -27,6 +34,10 @@ if args.data == 'cifar10':
     args.num_classes = 10
 elif args.data == 'cifar100':
     args.num_classes = 100
+elif args.data == 'dummy':  # TODO (yue)
+    args.num_classes = 10
+elif args.data == 'actnet':  # TODO (yue)
+    args.num_classes = 200
 else:
     args.num_classes = 1000
 
@@ -36,6 +47,19 @@ import torch.optim
 from imta_utils import *
 
 torch.manual_seed(args.seed)
+
+# TODO(Yue) Overrided the logger
+class Logger(object):
+    def __init__(self, log_path):
+        self._terminal = sys.stdout
+        self.log = open(log_path, "a", 1)
+
+    def write(self, message):
+        self._terminal.write(message)
+        self.log.write(message)
+
+    def flush(self):
+        pass
 
 def main():
 
@@ -47,8 +71,12 @@ def main():
     else:
         IMAGE_SIZE = 224
 
+    args.save = common.EXPS_PATH + "/imta/" + args.save  # TODO(Yue)
+
     if not os.path.exists(args.save):
         os.makedirs(args.save)
+
+    sys.stdout = Logger(os.path.join(args.save, 'log.txt'))  # TODO(Yue)
 
     model = getattr(imta_models, args.arch)(args)
 
@@ -59,7 +87,7 @@ def main():
         model.features = torch.nn.DataParallel(model.features)
         model.cuda()
     else:
-        model = torch.nn.DataParallel(model).cuda()
+        model = torch.nn.DataParallel(model, device_ids=[int(x) for x in args.gpu.split(",")]).cuda()  # TODO(yue)
 
     # define loss function (criterion) and pptimizer
     for param in model.module.net.parameters():
@@ -101,21 +129,22 @@ def main():
             dynamic_evaluate(model, test_loader, val_loader, args)
         return
 
+    if args.imagenet_pretrained:   # TODO(yue)
+        sd = torch.load(ospj(common.PYTORCH_CKPT_DIR, "msdnet-step4-block5.pth"))["state_dict"]
+        state_dict = model.state_dict()
+        new_sd = {k.replace("module.","module.net."): sd[k] for k in sd if "classifier" not in k}
+        state_dict.update(new_sd)
+        model.load_state_dict(state_dict)
+
     # set up logging
-    global log_print, f_log
-    f_log = open(os.path.join(args.save, 'log.txt'), 'w')
+    global log_print
 
     def log_print(*args):
         print(*args)
-        print(*args, file=f_log)
     log_print('args:')
     log_print(args)
-    print('model:', file=f_log)
-    print(model, file=f_log)
     log_print('# of params:',
               str(sum([p.numel() for p in model.parameters()])))
-
-    f_log.flush()
 
     scores = ['epoch\tlr\ttrain_loss\tval_loss\ttrain_acc1'
               '\tval_acc1\ttrain_acc5\tval_acc5']
@@ -152,7 +181,6 @@ def main():
     print('Best val_acc1: {:.4f} at epoch {}'.format(best_acc1, best_epoch))
 
 def train(train_loader, model, kd_loss, optimizer, epoch):
-
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -168,6 +196,16 @@ def train(train_loader, model, kd_loss, optimizer, epoch):
 
     running_lr = None
     for i, (input, target) in enumerate(train_loader):
+        if args.data == 'dummy':  # TODO (yue)
+            input = torch.zeros(args.batch_size, 3, 224, 224)
+            target = torch.randint(0, args.num_classes, (args.batch_size,))
+        elif args.data == 'actnet':  # TODO (yue)
+            # print(input.shape, target.shape)
+            # exit()
+            _b, _tc, _h, _w = input.shape
+            input = input.view(_b, _tc//3, 3, _h, _w).view(_b * _tc //3, 3, _h, _w)
+            # input = input[0].view(-1,args.num_segment, 3,) # B*(TC)*H*W
+            target = target[:,0]
 
         lr = adjust_learning_rate(optimizer, epoch, args, batch=i,
                                   nBatch=len(train_loader), method=args.lr_type)
@@ -186,6 +224,10 @@ def train(train_loader, model, kd_loss, optimizer, epoch):
         if not isinstance(output, list):
             output = [output]
 
+        if args.data == 'actnet':  # TODO (yue)
+            output = [x.view(_b, _tc//3, args.num_classes).mean(dim=1) for x in output]
+            soft_target = soft_target.view(_b, _tc//3, args.num_classes).mean(dim=1)
+
         loss = kd_loss.loss_fn_kd(output, target_var, soft_target)
         losses.update(loss.item(), input.size(0))
         for j in range(len(output)):
@@ -203,13 +245,13 @@ def train(train_loader, model, kd_loss, optimizer, epoch):
         end = time.time()
 
         if i % args.print_freq == 0:
-            print('Epoch: [{0}][{1}/{2}]\t'
-                  'Time {batch_time.avg:.3f}\t'
-                  'Data {data_time.avg:.3f}\t'
-                  'Loss {loss.val:.4f}\t'
-                  'Acc@1 {top1.val:.4f}\t'
-                  'Acc@5 {top5.val:.4f}'.format(
-                    epoch, i + 1, len(train_loader),
+            print('Epoch: [{0}][{1}/{2}](lr={3:.5f})\t'
+                  'Time {batch_time.avg:.3f}({batch_time.avg:.3f})\t'
+                  'Data {data_time.avg:.3f}({data_time.avg:.3f})\t'
+                  'Loss {loss.val:.4f}({loss.avg:.4f})\t'
+                  'Acc@1 {top1.val:.4f}({top1.avg:.4f})\t'
+                  'Acc@5 {top5.val:.4f}({top5.avg:.4f})'.format(
+                    epoch, i + 1, len(train_loader), lr,
                     batch_time=batch_time, data_time=data_time,
                     loss=losses, top1=top1[-1], top5=top5[-1]))
 
@@ -224,12 +266,27 @@ def validate(val_loader, model, kd_loss):
         top1.append(AverageMeter())
         top5.append(AverageMeter())
 
+    # TODO (yue)
+    pred_list_list=[]
+    target_list=[]
+    mtarget_list=[]
+
     # switch to evaluate mode
     model.eval()
 
     end = time.time()
     with torch.no_grad():
         for i, (input, target) in enumerate(val_loader):
+            if args.data == 'dummy':
+                input = torch.zeros(args.batch_size, 3, 224, 224)
+                target = torch.randint(0, args.num_classes, (args.batch_size,))
+            elif args.data == 'actnet':  # TODO (yue)
+                _b, _tc, _h, _w = input.shape
+                input = input.view(_b, _tc // 3, 3, _h, _w).view(_b * _tc // 3, 3, _h, _w)
+                mtarget = target.cuda(non_blocking=True)
+                target = target[:,0]
+            if args.data != 'actnet':
+                mtarget = target.unsqueeze(-1).cuda(non_blocking=True)
             target = target.cuda(non_blocking=True)
             input = input.cuda()
 
@@ -243,7 +300,17 @@ def validate(val_loader, model, kd_loss):
             if not isinstance(output, list):
                 output = [output]
 
+            if args.data == 'actnet':  # TODO (yue)
+                output = [x.view(_b, _tc // 3, args.num_classes).mean(dim=1) for x in output]
+            if len(pred_list_list)==0:  # TODO (yue)
+                pred_list_list = [[] for _ in range(len(output))]
+
             loss = kd_loss.loss_fn_kd(output, target_var, output[-1])
+
+            for j in range(len(output)):
+                pred_list_list[j].append(output[j])  # TODO (yue)
+            target_list.append(target)  # TODO (yue)
+            mtarget_list.append(mtarget)  # TODO (yue)
 
             # measure error and record loss
             losses.update(loss.item(), input.size(0))
@@ -259,17 +326,23 @@ def validate(val_loader, model, kd_loss):
 
             if i % args.print_freq == 0:
                 print('Epoch: [{0}/{1}]\t'
-                      'Time {batch_time.avg:.3f}\t'
-                      'Data {data_time.avg:.3f}\t'
-                      'Loss {loss.val:.4f}\t'
-                      'Acc@1 {top1.val:.4f}\t'
-                      'Acc@5 {top5.val:.4f}'.format(
+                      'Time {batch_time.avg:.3f}({batch_time.avg:.3f})\t'
+                      'Data {data_time.avg:.3f}({data_time.avg:.3f})\t'
+                      'Loss {loss.val:.4f}({loss.avg:.4f})\t'
+                      'Acc@1 {top1.val:.4f}({top1.avg:.4f})\t'
+                      'Acc@5 {top5.val:.4f}({top5.avg:.4f})'.format(
                         i + 1, len(val_loader),
                         batch_time=batch_time, data_time=data_time,
                         loss=losses, top1=top1[-1], top5=top5[-1]))
                 # break
     for j in range(args.nBlocks):
-        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1[j], top5=top5[j]))
+        # TODO(yue)
+        mAP, _ = cal_map(torch.cat(pred_list_list[j], 0).cpu(),
+                         torch.cat(mtarget_list, 0)[:, 0:1].cpu())  # TODO(yue) single-label mAP
+        mmAP, _ = cal_map(torch.cat(pred_list_list[j], 0).cpu(),
+                          torch.cat(mtarget_list, 0).cpu())  # TODO(yue)  multi-label mAP
+        print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}  mAP {mAP:.3f}  mmAP {mmAP:.3f}'.
+              format(top1=top1[j], top5=top5[j], mAP=mAP, mmAP=mmAP))  #TODO(yue)
         """
         print('Exit {}\t'
               'Err@1 {:.4f}\t'
@@ -280,27 +353,21 @@ def validate(val_loader, model, kd_loss):
     return losses.avg, top1[-1].avg, top5[-1].avg
 
 def save_checkpoint(state, args, is_best, filename, result):
-    print(args)
+    # print(args)  #TODO(yue)
     result_filename = os.path.join(args.save, 'scores.tsv')
     model_dir = os.path.join(args.save, 'save_models')
     latest_filename = os.path.join(model_dir, 'latest.txt')
     model_filename = os.path.join(model_dir, filename)
     best_filename = os.path.join(model_dir, 'model_best.pth.tar')
-    os.makedirs(args.save, exist_ok=True)
-    os.makedirs(model_dir, exist_ok=True)
-    print("=> saving checkpoint '{}'".format(model_filename))
-
-    torch.save(state, model_filename)
-
-    with open(result_filename, 'w') as f:
-        print('\n'.join(result), file=f)
-
-    with open(latest_filename, 'w') as fout:
-        fout.write(model_filename)
-    if is_best:
-        shutil.copyfile(model_filename, best_filename)
-
-    print("=> saved checkpoint '{}'".format(model_filename))
+    if is_best:  #TODO(yue)
+        os.makedirs(args.save, exist_ok=True)
+        os.makedirs(model_dir, exist_ok=True)
+        torch.save(state, best_filename)
+        with open(result_filename, 'w') as f:
+            print('\n'.join(result), file=f)
+        with open(latest_filename, 'w') as fout:
+            fout.write(best_filename)
+        print("=> saved checkpoint '{}'".format(best_filename))
     return
 
 def load_checkpoint(args):
@@ -365,6 +432,12 @@ def adjust_learning_rate(optimizer, epoch, args, batch=None,
                 lr *= decay_rate
         else:
             lr = args.lr * (0.1 ** (epoch // 30))
+    elif method == 'piecewise':  # TODO(yue)
+        lr_steps = [0]+args.lr_steps + [100086]
+        t=0
+        while epoch >= lr_steps[t+1]:
+            t += 1
+        lr=args.lrs[t]
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     return lr

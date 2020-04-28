@@ -4,6 +4,7 @@ from __future__ import division
 from __future__ import absolute_import
 
 import os
+import sys  # TODO(yue)
 import math
 import time
 import shutil
@@ -50,6 +51,20 @@ import torch.optim
 
 torch.manual_seed(args.seed)
 
+# TODO(Yue) Overrided the logger
+class Logger(object):
+    def __init__(self, log_path):
+        self._terminal = sys.stdout
+        self.log = open(log_path, "a", 1)
+
+    def write(self, message):
+        self._terminal.write(message)
+        self.log.write(message)
+
+    def flush(self):
+        pass
+
+
 def main():
 
     global args
@@ -60,8 +75,13 @@ def main():
     else:
         IMAGE_SIZE = 224
 
+
+    args.save = common.EXPS_PATH+"/imta/"+args.save  # TODO(Yue)
+
     if not os.path.exists(args.save):
         os.makedirs(args.save)
+
+    sys.stdout = Logger(os.path.join(args.save, 'log.txt'))  # TODO(Yue)
 
     model = getattr(imta_models, args.arch)(args)
     #   print(model)
@@ -83,7 +103,7 @@ def main():
         model.features = torch.nn.DataParallel(model.features)
         model.cuda()
     else:
-        model = torch.nn.DataParallel(model,device_ids=[int(x) for x in args.gpu.split(",")]).cuda()  # TODO(yue)
+        model = torch.nn.DataParallel(model, device_ids=[int(x) for x in args.gpu.split(",")]).cuda()  # TODO(yue)
 
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda()
@@ -122,25 +142,20 @@ def main():
     if args.imagenet_pretrained:   # TODO(yue)
         sd = torch.load(ospj(common.PYTORCH_CKPT_DIR, "msdnet-step4-block5.pth"))["state_dict"]
         state_dict = model.state_dict()
-        new_sd = {k:sd[k] for k in sd if "classifier" not in k}
+        new_sd = {k: sd[k] for k in sd if "classifier" not in k}
         state_dict.update(new_sd)
         model.load_state_dict(state_dict)
 
     # set up logging
-    global log_print, f_log
-    f_log = open(os.path.join(args.save, 'log.txt'), 'w')
+    global log_print
+
 
     def log_print(*args):
         print(*args)
-        print(*args, file=f_log)
     log_print('args:')
     log_print(args)
-    print('model:', file=f_log)
-    print(model, file=f_log)
     log_print('# of params:',
               str(sum([p.numel() for p in model.parameters()])))
-
-    f_log.flush()
 
     scores = ['epoch\tlr\ttrain_loss\tval_loss\ttrain_acc1'
               '\tval_acc1\ttrain_acc5\tval_acc5']
@@ -296,20 +311,21 @@ def validate(val_loader, model, criterion):
             data_time.update(time.time() - end)
 
             # compute output
-            output,_ = model(input_var)  # TODO(yue) strange, why mistake like this
+            output, _ = model(input_var)  # TODO(yue) strange, why mistake like this
             if not isinstance(output, list):
                 output = [output]
 
             if args.data == 'actnet':  # TODO (yue)
                 output = [x.view(_b, _tc // 3, args.num_classes).mean(dim=1) for x in output]
-            if len(pred_list_list)==0:
+            if len(pred_list_list)==0:  # TODO (yue)
                 pred_list_list = [[] for _ in range(len(output))]
+
             loss = 0.0
             for j in range(len(output)):
                 loss += criterion(output[j], target_var)
-                pred_list_list[j].append(output[j])
-            target_list.append(target)
-            mtarget_list.append(mtarget)
+                pred_list_list[j].append(output[j])  # TODO (yue)
+            target_list.append(target)  # TODO (yue)
+            mtarget_list.append(mtarget)  # TODO (yue)
             # measure acc and record loss
             losses.update(loss.item(), input.size(0))
 
@@ -342,7 +358,7 @@ def validate(val_loader, model, criterion):
                           torch.cat(mtarget_list, 0).cpu())  # TODO(yue)  multi-label mAP
 
         print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}  mAP {mAP:.3f}  mmAP {mmAP:.3f}'.
-              format(top1=top1[j], top5=top5[j], mAP=mAP, mmAP=mmAP))
+              format(top1=top1[j], top5=top5[j], mAP=mAP, mmAP=mmAP))  #TODO(yue)
         """
         print('Exit {}\t'
               'Acc@1 {:.4f}\t'
@@ -359,21 +375,15 @@ def save_checkpoint(state, args, is_best, filename, result):
     latest_filename = os.path.join(model_dir, 'latest.txt')
     model_filename = os.path.join(model_dir, filename)
     best_filename = os.path.join(model_dir, 'model_best.pth.tar')
-    os.makedirs(args.save, exist_ok=True)
-    os.makedirs(model_dir, exist_ok=True)
-    print("=> saving checkpoint '{}'".format(model_filename))
-
-    torch.save(state, model_filename)
-
-    with open(result_filename, 'w') as f:
-        print('\n'.join(result), file=f)
-
-    with open(latest_filename, 'w') as fout:
-        fout.write(model_filename)
     if is_best:
-        shutil.copyfile(model_filename, best_filename)
-
-    print("=> saved checkpoint '{}'".format(model_filename))
+        os.makedirs(args.save, exist_ok=True)
+        os.makedirs(model_dir, exist_ok=True)
+        torch.save(state, best_filename)
+        with open(result_filename, 'w') as f:
+            print('\n'.join(result), file=f)
+        with open(latest_filename, 'w') as fout:
+            fout.write(best_filename)
+        print("=> saved checkpoint '{}'".format(best_filename))
     return
 
 def load_checkpoint(args):
@@ -438,7 +448,7 @@ def adjust_learning_rate(optimizer, epoch, args, batch=None,
                 lr *= decay_rate
         else:
             lr = args.lr * (0.1 ** (epoch // 30))
-    elif method == 'piecewise':
+    elif method == 'piecewise':  # TODO(yue)
         lr_steps = [0]+args.lr_steps + [100086]
         t=0
         while epoch >= lr_steps[t+1]:

@@ -66,7 +66,7 @@ parser.add_argument('--flow_prefix', default="", type=str)
 parser.add_argument('--root_log',type=str, default='logs')
 parser.add_argument('--root_model', type=str, default='checkpoint')
 
-parser.add_argument('--shift', default=False, action="store_true", help='use shift for imta_models')
+parser.add_argument('--shift', default=False, action="store_true", help='use shift for models')
 parser.add_argument('--shift_div', default=8, type=int, help='number of div for shift (default: 8)')
 parser.add_argument('--shift_place', default='blockres', type=str, help='place for shift (default: stageres)')
 
@@ -105,7 +105,7 @@ parser.add_argument('--all_policy', action='store_true', help="just using all fe
 parser.add_argument('--eff_loss_after', default=-1, type=int, help="use eff loss after X epochs")
 
 parser.add_argument('--save_freq', default=10, type=int,help="freq to save network model weight")# TODO(yue)
-parser.add_argument('--model_paths', default=[], type=str, nargs="+", help='path to load imta_models for backbones')
+parser.add_argument('--model_paths', default=[], type=str, nargs="+", help='path to load models for backbones')
 parser.add_argument('--policy_path', default="", type=str, help="path of the policy network")
 # TODO(yue) maybe we want to use ImageNet pretrain or not, depending on the resolution
 
@@ -209,6 +209,7 @@ parser.add_argument('--no_weights_from_linear', action='store_true')
 #TODO try MSDNet
 parser.add_argument('--msd', action='store_true')
 parser.add_argument('--msd_indices_list', default=[], type=int, nargs="+", help='number of indices for msd')
+parser.add_argument('--pretrained_msd_indices_list',default=[], type=int,nargs="+")
 parser.add_argument('--uno_reso', action='store_true')
 
 parser.add_argument('--filelist_suffix', type=str, default="")
@@ -223,3 +224,9 @@ parser.add_argument('--freeze_corr_bn', action='store_true', help="freeze the co
 
 #TODO channel-separate network
 parser.add_argument('--csn', action='store_true')
+
+parser.add_argument('--ge_pretraining', action='store_true')
+parser.add_argument('--gradient_equilibrium', action='store_true')
+
+#TODO boost and prev-sharing
+parser.add_argument('--boost', action='store_true')

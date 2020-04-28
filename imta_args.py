@@ -2,16 +2,17 @@ import os
 import glob
 import time
 import argparse
+from datetime import datetime
 
 # model_names = list(map(lambda n: os.path.basename(n)[:-3],
-#                        glob.glob('imta_models/[A-Za-z]*.py')))
+#                        glob.glob('models/[A-Za-z]*.py')))
 model_names = ['msdnet', 'msdnet_ge', 'IMTA_MSDNet', 'mobilenet_imagenet']
 
 arg_parser = argparse.ArgumentParser(
                 description='Image classification PK main script')
 
 exp_group = arg_parser.add_argument_group('exp', 'experiment setting')
-exp_group.add_argument('--save', default='save/default-{}'.format(time.time()),
+exp_group.add_argument('--save', default='save/default-{}'.format(datetime.fromtimestamp(time.time()).strftime("g%m%d-%H%M%S")),
                        type=str, metavar='SAVE',
                        help='path to the experiment logging directory'
                        '(default: save/debug)')

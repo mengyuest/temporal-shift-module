@@ -86,7 +86,8 @@ class TSN_Ada(nn.Module):
             model.last_layer_name = 'fcs'
         elif self.args.msd and "msdnet" in model_name:
             pretrained_path = ospj(common.PYTORCH_CKPT_DIR, "msdnet-step4-block5.pth") if shall_pretrain else None
-            model = getattr(msdnet, "create_msdnet")(pretrained_path=pretrained_path)
+            model = getattr(msdnet, "create_msdnet")(pretrained_path=pretrained_path,
+                                                     gradient_equilibrium=self.args.gradient_equilibrium)
         elif self.args.mer and "mernet" in model_name:
             model = getattr(mernet, model_name)(shall_pretrain)
         elif self.args.csn and "csn" in model_name:
@@ -378,16 +379,22 @@ class TSN_Ada(nn.Module):
              'name': "lr10_bias"},
         ]
 
-    def backbone(self, input_data, the_base_model, new_fc, signal=-1, indices_list=[]):
-        _b, _tc, _h, _w = input_data.shape  # TODO(yue) input (B, T*C, H, W)
-        _t, _c = _tc // 3, 3
+    def backbone(self, input_data, the_base_model, new_fc, signal=-1, indices_list=[], boost=False):
+        if boost:
+            _bt, _, _h, _w = input_data.shape
+        else:
+            _b, _tc, _h, _w = input_data.shape  # TODO(yue) input (B, T*C, H, W)
+            _t, _c = _tc // 3, 3
         if self.args.cnn3d:
             input_3d = input_data.view(_b, self.time_steps, self.args.seg_len, _c, _h, _w)  # TODO(yue) T=T1*T2
             input_3d = input_3d.view(_b * self.time_steps, self.args.seg_len, _c, _h, _w)  # TODO(yue) B,T1 -> B*T1
             input_3d = input_3d.transpose(2, 1)  # TODO(yue) view  (B*T1, C, T2, H, W)
             feat = the_base_model(input_3d)  # TODO(yue) feat  (B*T1, feat_dim)
         else:
-            input_2d = input_data.view(_b*_t, _c, _h, _w)
+            if boost:
+                input_2d = input_data
+            else:
+                input_2d = input_data.view(_b * _t, _c, _h, _w)
             if any([self.args.dmy, self.args.msd, self.args.mer]) and \
                     ((self.args.uno_reso and len(indices_list)>0) or (signal is not None and signal>=0)):
                 feat = the_base_model(input_2d, signal=signal)
@@ -400,62 +407,27 @@ class TSN_Ada(nn.Module):
             return _feat_out_list, _base_out_list
         else:
             _base_out = None
-            if new_fc is not None:
-                _base_out = new_fc(feat).view(_b, _t, -1)
-            return feat.view(_b, _t, -1), _base_out
+            if boost:
+                if new_fc is not None:
+                    _base_out = new_fc(feat)
+            else:
+                if new_fc is not None:
+                    _base_out = new_fc(feat).view(_b, _t, -1)
+                feat = feat.view(_b, _t, -1)
+            return feat, _base_out
 
-    def forward(self, *argv, **kwargs):
-        input_data = kwargs["input"][0]
-        batch_size = input_data.shape[0] # TODO(yue) input[0] B*(TC)*H*W
-        if not self.args.ada_reso_skip:  # TODO simple TSN
-            _, base_out = self.backbone(input_data, self.base_model, self.new_fc, signal=self.args.default_signal)
-            if self.is_shift and self.temporal_pool:
-                base_out = base_out.view((-1, self.num_segments // 2) + base_out.size()[1:])
-            output = self.consensus(base_out)
-            return output.squeeze(1)
+    def get_lite_j_and_r(self, input_list, online_policy, tau):
 
-        input_list = kwargs["input"]
         feat_lite, _ = self.backbone(input_list[self.args.policy_input_offset], self.lite_backbone, None)
+
+        r_list = []
+        lite_j_list = []
+        logits_list = []
+        batch_size = feat_lite.shape[0]
         hx = init_hidden(batch_size, self.args.hidden_dim)
         cx = init_hidden(batch_size, self.args.hidden_dim)
-        logits_list = []
-        lite_j_list = []
-        feat_out_list = []
-        base_out_list = []
 
-        if self.multi_models:
-            if self.args.dmy:
-                for fc_i in range(len(self.args.num_filters_list)):
-                    last_layer_fc_i = fc_i if not self.args.last_conv_same else 0
-                    feat_out, base_out = self.backbone(input_list[fc_i],
-                                                       self.base_model_list[fc_i % len(self.base_model_list)],
-                                                       self.new_fc_list[last_layer_fc_i], signal=fc_i)
-                    feat_out_list.append(feat_out)
-                    base_out_list.append(base_out)
-            elif any([self.args.msd, self.args.mer]):
-                iter_list = self.args.msd_indices_list if self.args.msd else self.args.mer_indices_list
-                if self.args.uno_reso:
-                    feat_out_list, base_out_list = self.backbone(input_list[0], self.base_model_list[0],
-                                                            self.new_fc_list, signal=None, indices_list=iter_list)
-                else:
-                    for fc_i in range(len(iter_list)):
-                        feat_out, base_out = self.backbone(input_list[fc_i], self.base_model_list[0],
-                                                           self.new_fc_list[fc_i], signal=iter_list[fc_i])
-                        feat_out_list.append(feat_out)
-                        base_out_list.append(base_out)
-            else:
-                for bb_i,the_backbone in enumerate(self.base_model_list):
-                    feat_out, base_out = self.backbone(input_list[bb_i], the_backbone, self.new_fc_list[bb_i])
-                    feat_out_list.append(feat_out)
-                    base_out_list.append(base_out)
-
-        online_policy = False
-        if not any([self.args.offline_lstm_all, self.args.offline_lstm_last, self.args.random_policy,
-                self.args.all_policy, self.args.real_all_policy, self.args.distill_policy, self.args.real_scsampler]):
-            online_policy = True
-            r_list=[]
-
-        remain_skip_vector = torch.zeros(batch_size,1)
+        remain_skip_vector = torch.zeros(batch_size, 1)
         old_hx = None
         old_r_t = None
 
@@ -467,15 +439,16 @@ class TSN_Ada(nn.Module):
                 feat_t = hx
             p_t = torch.log(F.softmax(self.linear(feat_t), dim=1))
             j_t = self.lite_fc(feat_t)
-            logits_list.append(p_t) #TODO as logit
-            lite_j_list.append(j_t) #TODO as pred
+            logits_list.append(p_t)  # TODO as logit
+            lite_j_list.append(j_t)  # TODO as pred
 
-            #TODO (yue) need a simple case to illustrate this
+            # TODO (yue) need a simple case to illustrate this
             if online_policy:
-                r_t = torch.cat([F.gumbel_softmax(p_t[b_i:b_i+1], kwargs["tau"], True) for b_i in range(p_t.shape[0])])
+                r_t = torch.cat(
+                    [F.gumbel_softmax(p_t[b_i:b_i + 1], tau, True) for b_i in range(p_t.shape[0])])
                 # r_t = F.gumbel_softmax(logits=p_t, tau=kwargs["tau"], hard=True)
 
-                #TODO update states and r_t
+                # TODO update states and r_t
                 if old_hx is not None:
                     take_bool = remain_skip_vector > 0.5
                     take_old = torch.tensor(take_bool, dtype=torch.float).cuda()
@@ -485,14 +458,84 @@ class TSN_Ada(nn.Module):
 
                 # TODO update skipping_vector
                 for batch_i in range(batch_size):
-                    for skip_i in range(self.action_dim-self.reso_dim):
-                        #TODO(yue) first condition to avoid valuing skip vector forever
-                        if remain_skip_vector[batch_i][0]<0.5 and r_t[batch_i][self.reso_dim + skip_i] > 0.5:
+                    for skip_i in range(self.action_dim - self.reso_dim):
+                        # TODO(yue) first condition to avoid valuing skip vector forever
+                        if remain_skip_vector[batch_i][0] < 0.5 and r_t[batch_i][self.reso_dim + skip_i] > 0.5:
                             remain_skip_vector[batch_i][0] = self.args.skip_list[skip_i]
                 old_hx = hx
                 old_r_t = r_t
                 r_list.append(r_t)  # TODO as decision
                 remain_skip_vector = (remain_skip_vector - 1).clamp(0)
+        return lite_j_list, torch.stack(r_list, dim=1)
+
+    def using_online_policy(self):
+        if any([self.args.offline_lstm_all, self.args.offline_lstm_last]):
+            return False
+        elif any([self.args.random_policy, self.args.all_policy, self.args.real_all_policy, self.args.distill_policy]):
+            return False
+        elif self.args.real_scsampler:
+            return False
+        else:
+            return True
+
+    def get_feat_and_pred(self, input_list, r_all):
+        feat_out_list = []
+        base_out_list = []
+        ind_list = []
+        if self.args.dmy:
+            for fc_i in range(len(self.args.num_filters_list)):
+                if self.args.boost:
+                    _b, _tc, _h, _w = input_list[fc_i].shape
+                    indices = (r_all[:, :, fc_i] == 1).nonzero()
+                    if indices.shape[0] == 0:
+                        feat_out_list.append(None)
+                        base_out_list.append(None)
+                        ind_list.append(None)
+                        continue
+                    input_data = (input_list[fc_i].view(_b, _tc//3, 3, _h, _w))[indices[:, 0], indices[:, 1]]
+                    input_data = input_data.view(-1, 3, _h, _w)
+                    ind_list.append(torch.tensor([x[0] * _tc // 3 + x[1] for x in indices]))
+                else:
+                    input_data = input_list[fc_i]
+                last_layer_fc_i = fc_i if not self.args.last_conv_same else 0
+                feat_out, base_out = self.backbone(input_data, self.base_model_list[fc_i % len(self.base_model_list)],
+                                                self.new_fc_list[last_layer_fc_i], signal=fc_i, boost=self.args.boost)
+                feat_out_list.append(feat_out)
+                base_out_list.append(base_out)
+        elif any([self.args.msd, self.args.mer]):
+            iter_list = self.args.msd_indices_list if self.args.msd else self.args.mer_indices_list
+            if self.args.uno_reso:
+                feat_out_list, base_out_list = self.backbone(input_list[0], self.base_model_list[0],
+                                                             self.new_fc_list, signal=None, indices_list=iter_list)
+            else:
+                for fc_i in range(len(iter_list)):
+                    feat_out, base_out = self.backbone(input_list[fc_i], self.base_model_list[0],
+                                                       self.new_fc_list[fc_i], signal=iter_list[fc_i])
+                    feat_out_list.append(feat_out)
+                    base_out_list.append(base_out)
+        else:
+            for bb_i, the_backbone in enumerate(self.base_model_list):
+                feat_out, base_out = self.backbone(input_list[bb_i], the_backbone, self.new_fc_list[bb_i])
+                feat_out_list.append(feat_out)
+                base_out_list.append(base_out)
+        return feat_out_list, base_out_list, ind_list
+
+    def forward(self, *argv, **kwargs):
+        if not self.args.ada_reso_skip:  # TODO simple TSN
+            _, base_out = self.backbone(kwargs["input"][0], self.base_model, self.new_fc, signal=self.args.default_signal)
+            if self.is_shift and self.temporal_pool:
+                base_out = base_out.view((-1, self.num_segments // 2) + base_out.size()[1:])
+            output = self.consensus(base_out)
+            return output.squeeze(1)
+
+        input_list = kwargs["input"]
+        batch_size = input_list[0].shape[0]  # TODO(yue) input[0] B*(TC)*H*W
+        lite_j_list, r_all = self.get_lite_j_and_r(input_list, self.using_online_policy(), kwargs["tau"])
+
+        if self.multi_models:
+            feat_out_list, base_out_list, ind_list = self.get_feat_and_pred(input_list, r_all)
+        else:
+            feat_out_list, base_out_list, ind_list  = [], [], []
 
         if self.args.policy_also_backbone:
             base_out_list.append(torch.stack(lite_j_list, dim=1))
@@ -520,25 +563,40 @@ class TSN_Ada(nn.Module):
             elif self.args.distill_policy: #TODO(yue) all policy: take all
                 r_all = torch.zeros(batch_size, self.time_steps, self.action_dim).cuda()
                 r_all[:,:,0] = 1.0
-            else: #TODO(yue) online policy
-                r_all = torch.stack(r_list, dim=1)
 
-            output = self.combine_logits(r_all, base_out_list)
+            output = self.combine_logits(r_all, base_out_list, ind_list)
             if self.args.save_meta and self.args.save_all_preds:
                 return output.squeeze(1), r_all, torch.stack(base_out_list,dim=1)
             else:
                 if self.args.last_conv_same:
                     return output.squeeze(1), r_all, torch.stack(feat_out_list,dim=1), torch.stack(base_out_list,dim=1)
                 else:
-                    return output.squeeze(1), r_all, None, torch.stack(base_out_list, dim=1)
+                    if self.args.boost:
+                        return output.squeeze(1), r_all, None, None
+                    else:
+                        return output.squeeze(1), r_all, None, torch.stack(base_out_list, dim=1)
 
-    def combine_logits(self, r, base_out_list):
+    def combine_logits(self, r, base_out_list, ind_list):
         # TODO r                N, T, K
         # TODO base_out_list  < K * (N, T, C)
-        pred_tensor = torch.stack(base_out_list, dim=2)
-        r_tensor = r[:, :, :self.reso_dim].unsqueeze(-1)
-        t_tensor = torch.sum(r[:, :, :self.reso_dim], dim=[1, 2]).unsqueeze(-1).clamp(1)  # TODO sum T, K to count frame
-        return (pred_tensor * r_tensor).sum(dim=[1, 2]) / t_tensor
+        if self.args.boost:
+            if len(ind_list)==0 or all([x is None for x in ind_list]):
+                return torch.zeros(r.shape[0], self.num_class).cuda()
+            pred_tensor2d = torch.cat([x for x in base_out_list if x is not None], dim=0)  # TODO N'T'*K
+            ind_tensor2d = torch.cat([x.unsqueeze(-1) for x in ind_list if x is not None], dim=0)
+            ind_tensor1d = ind_tensor2d.squeeze(-1)
+
+            if ind_tensor1d.shape[0] == 0:  # TODO(yue) this batch is fei le => return zeros
+                return torch.zeros(r.shape[0], self.num_class).cuda()
+            pred_tensor = torch.zeros(r.shape[0], r.shape[1], self.num_class).cuda()
+            pred_tensor[ind_tensor1d // r.shape[1], ind_tensor1d % r.shape[1]] = pred_tensor2d
+            t_tensor = torch.sum(r[:, :, :self.reso_dim], dim=[1, 2]).unsqueeze(-1).clamp(1)
+            return pred_tensor.sum(dim=1) / t_tensor
+        else:
+            pred_tensor = torch.stack(base_out_list, dim=2)
+            r_tensor = r[:, :, :self.reso_dim].unsqueeze(-1)
+            t_tensor = torch.sum(r[:, :, :self.reso_dim], dim=[1, 2]).unsqueeze(-1).clamp(1)  # TODO sum T, K to count frame
+            return (pred_tensor * r_tensor).sum(dim=[1, 2]) / t_tensor
 
     @property
     def crop_size(self):

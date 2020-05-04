@@ -10,6 +10,7 @@ from ops.cnn3d.i3d_resnet import i3d_resnet
 from ops.cnn3d.mobilenet3dv2 import mobilenet3d_v2
 from ops.cnn3d.shufflenet3d import ShuffleNet3D
 import ops.dmynet
+import ops.dhsnet
 import ops.msdnet
 import ops.mernet
 
@@ -38,6 +39,10 @@ feat_dim_dict = {
     "dmynet34": 512,
     "dmynet50": 2048,
     "dmynet101": 2048,
+    'dhsnet18': 512,
+    'dhsnet34': 512,
+    'dhsnet50': 2048,
+    'dhsnet101': 2048,
     "msdnet": 0,
     "mernet50": 0,
     "ir_csn_50": 2048,
@@ -54,7 +59,8 @@ prior_dict={
 }
 
 def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretrained=True,
-                      num_filters_list=[], default_signal=-1, last_conv_same=False, msd_indices_list=[], mer_indices_list=[]):
+                      num_filters_list=[], default_signal=-1, last_conv_same=False,
+                      msd_indices_list=[], mer_indices_list=[], args=None):
     if model_name in prior_dict:
         gflops, params = prior_dict[model_name]
         gflops = gflops / 224 / 224 * resolution * resolution
@@ -86,6 +92,12 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
                                                 num_filters_list=num_filters_list,
                                                 default_signal=default_signal)
         last_layer = "fcs"
+    elif "dhsnet" in model_name:
+        model = getattr(ops.dhsnet, model_name)(pretrained=False,
+                                                num_filters_list=num_filters_list,
+                                                default_signal=default_signal,
+                                                args=args)
+        last_layer="fc"
     elif "msdnet" in model_name:
         model = getattr(ops.msdnet, "MSDNet")(default_signal = default_signal)
     elif "mernet" in model_name:
@@ -99,7 +111,8 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
                 [nn.Linear(feat_dim, num_classes) for _ in num_filters_list]))
         else:
             setattr(model, last_layer, torch.nn.ModuleList([nn.Linear(feat_dim * num_filters // 64, num_classes) for num_filters in num_filters_list]))
-
+    elif "dhsnet" in model_name:
+        setattr(model, last_layer, nn.Linear(feat_dim, num_classes))
     elif "msdnet" in model_name:
         for msd_i in msd_indices_list:
             msd_feat_dim = model.classifier[msd_i].linear.in_features
@@ -116,10 +129,17 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
     else:
         dummy_data = torch.randn(1, 3, seg_len, resolution, resolution)
 
+
+
     hooks={}
     if "dmynet" in model_name:
-        hooks={ops.dmynet.Conv2dMY: ops.dmynet.count_conv_my}
+        hooks = {ops.dmynet.Conv2dMY: ops.dmynet.count_conv_my}
+    if "dhsnet" in model_name:
+        dummy_data = torch.randn(1, 16, 3, resolution, resolution)
+        hooks = {ops.dhsnet.Conv2dHS: ops.dhsnet.count_conv_hs}
     flops, params = profile(model, inputs=(dummy_data,), custom_ops=hooks)
+    if "dhsnet" in model_name:
+        flops = flops / 16
     gflops = flops / 1e9
     params = params / 1e6
 

@@ -228,5 +228,23 @@ parser.add_argument('--csn', action='store_true')
 parser.add_argument('--ge_pretraining', action='store_true')
 parser.add_argument('--gradient_equilibrium', action='store_true')
 
-#TODO boost and prev-sharing
+#TODO boost and prev-sharing (dhsnet)
 parser.add_argument('--boost', action='store_true')
+parser.add_argument('--dhs', action='store_true')
+parser.add_argument('--dynamic_channel', action='store_true')
+parser.add_argument('--no_pre_bn_mask', action='store_true')
+parser.add_argument('--bn_channel_mask', action='store_true')
+
+# ablations
+parser.add_argument('--dhs_no_history', action='store_true')
+parser.add_argument('--dhs_one_history', action='store_true')
+parser.add_argument('--dhs_rand_history', action='store_true')
+parser.add_argument('--dhs_history_no_grad', action='store_true')
+
+parser.add_argument('--dhs_all_level', action='store_true')
+parser.add_argument('--dhs_stage_level', action='store_true')
+parser.add_argument('--dhs_print_net_states', action='store_true')
+
+parser.add_argument('--dhs_fix_history_ratio', action='store_true')
+parser.add_argument('--dhs_current_ratio', type=int, default=0)
+parser.add_argument('--dhs_fuse_history', action='store_true')

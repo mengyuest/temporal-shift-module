@@ -601,6 +601,12 @@ def init_gflops_table():
             gflops_table[args.backbone_list[0] + str(args.reso_list[fc_i])+"@%d"%(fc_i)] \
                 = get_gflops_params(args.backbone_list[0], args.reso_list[fc_i], num_class, seg_len,
                                     default_signal=fc_i, num_filters_list=args.num_filters_list)[0]
+    elif args.dhs:
+        for fc_i in range(len(args.num_filters_list)):
+            gflops_table[args.backbone_list[0] + str(args.reso_list[0]) + "@%d" % (fc_i)] \
+                = get_gflops_params(args.backbone_list[0], args.reso_list[0], num_class, seg_len,
+                                    default_signal=fc_i, num_filters_list=args.num_filters_list,
+                                    args=args)[0]
     elif args.msd:
         for fc_i in range(len(args.msd_indices_list)):
             the_i = 0 if args.uno_reso else fc_i
@@ -632,6 +638,12 @@ def get_gflops_t_tt_vector():
     if args.dmy:
         for fc_i in range(len(args.num_filters_list)):
             the_flops = gflops_table[args.backbone_list[0] + str(args.reso_list[fc_i])+"@%d"%(fc_i)]
+            gflops_vec.append(the_flops)
+            t_vec.append(1.)
+            tt_vec.append(1.)
+    elif args.dhs:
+        for fc_i in range(len(args.num_filters_list)):
+            the_flops = gflops_table[args.backbone_list[0] + str(args.reso_list[0])+"@%d"%(fc_i)]
             gflops_vec.append(the_flops)
             t_vec.append(1.)
             tt_vec.append(1.)
@@ -689,7 +701,7 @@ def cal_eff(r):
     #TODO(yue) uniform loss
     if args.uniform_loss_weight > 1e-5:
         if_policy_backbone = 1 if args.policy_also_backbone else 0
-        num_pred = len(args.num_filters_list) if args.dmy else len(args.backbone_list)
+        num_pred = len(args.num_filters_list) if (args.dmy or args.dhs) else len(args.backbone_list)
         policy_dim = num_pred + if_policy_backbone + len(args.skip_list)
 
         reso_skip_vec=torch.zeros(policy_dim).cuda()
@@ -698,7 +710,10 @@ def cal_eff(r):
         offset=0
         #TODO reso/ada_crops
         for b_i in range(num_pred):
-            interval = args.ada_crop_list[b_i]
+            if args.dhs:
+                interval = 1
+            else:
+                interval = args.ada_crop_list[b_i]
             reso_skip_vec[b_i] += torch.sum(r[:, :, offset:offset+interval])
             offset = offset + interval
 
@@ -843,6 +858,10 @@ def get_policy_usage_str(r_list, reso_dim):
         for fc_i in range(len(args.num_filters_list)):
             used_model_list += [args.backbone_list[0]+"@%d"%(fc_i)] * args.ada_crop_list[fc_i]
             reso_list += [args.reso_list[fc_i]] * args.ada_crop_list[fc_i]
+    elif args.dhs:
+        for fc_i in range(len(args.num_filters_list)):
+            used_model_list += [args.backbone_list[0] + "@%d" % (fc_i)] * args.ada_crop_list[0]
+            reso_list += [args.reso_list[0]] * args.ada_crop_list[0]
     elif args.msd:
         for fc_i in range(len(args.msd_indices_list)):
             the_i = 0 if args.uno_reso else fc_i
@@ -1071,7 +1090,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
         else:
             iter_list = args.backbone_list
 
-        if args.boost == False:
+        if args.boost == False and args.dhs == False:
             all_bb_results = [[] for _ in range(len(iter_list))]
             if args.policy_also_backbone:
                 all_bb_results.append([])
@@ -1144,7 +1163,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
             all_results.append(output)
             all_targets.append(target)
 
-            if use_ada_framework and args.boost == False:
+            if use_ada_framework and args.boost == False and args.dhs == False:
                 for bb_i in range(len(all_bb_results)):
                     all_bb_results[bb_i].append(base_outs[:, bb_i])
 
@@ -1214,7 +1233,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
               .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses))
 
-    if use_ada_framework and args.boost == False:
+    if use_ada_framework and args.boost == False and args.dhs == False:
         bbmmaps = []
         bbprec1s = []
         all_targets_cpu=torch.cat(all_targets, 0).cpu()

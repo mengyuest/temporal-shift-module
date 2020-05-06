@@ -240,6 +240,8 @@ class BasicBlock(nn.Module):
         shall_first = True #TODO holds for all_level or block_level
         if args.dhs_stage_level:
             shall_first = is_first_block #TODO otherwise judge whether it's the first block
+        if args.dhs_zero_level:
+            shall_first = False
 
         self.conv1 = conv3x3(inplanes, planes, stride, dhs_enabled=shall_first, num_filters_list=num_filters_list,
                              default_signal=default_signal, args=args)
@@ -313,6 +315,8 @@ class Bottleneck(nn.Module):
         shall_first = True  # TODO holds for all_level or block_level
         if args.dhs_stage_level:
             shall_first = is_first_block  # TODO otherwise judge whether it's the first block
+        if args.dhs_zero_level:
+            shall_first = False
         self.conv1 = conv1x1(inplanes, width, dhs_enabled=shall_first, num_filters_list=num_filters_list,
                              default_signal=default_signal, args=args)
         self.bn1 = norm_layer(width)

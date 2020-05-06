@@ -107,6 +107,17 @@ if "diva" in host_name:
 # print(MINIK_META_PATH)
 MINIK_FRAMES=ospj(MINIK_PATH)
 
+
+#TODO(yue) mini-kinetics
+K400_PATH=ospj(DATA_PATH, "k400-toy")
+if "dcc" in host_name:
+    K400_PATH = K400_PATH.replace("longxun/datasets","multimodalvideo")
+K400_META_PATH = K400_PATH
+if "diva" in host_name:
+    K400_META_PATH = K400_PATH.replace("kinetics-qf","kinetics-100")
+K400_FRAMES = ospj(K400_PATH, 'images')
+
+
 EXPS_PATH=ospj(ROOT_DIR, LOG_PREFIX,"logs_tsm")
 
 from os.path import expanduser

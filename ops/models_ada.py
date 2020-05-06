@@ -97,7 +97,7 @@ class TSN_Ada(nn.Module):
         elif self.args.mer and "mernet" in model_name:
             model = getattr(mernet, model_name)(shall_pretrain)
         elif self.args.csn and "csn" in model_name:
-            model = getattr(csnet, model_name)(shall_pretrain)
+            model = getattr(csnet, model_name)(self.args.load_csn_weights)
             model.last_layer_name = 'fc'
         elif "mobilenet3dv2" in model_name:
             model = mobilenet3d_v2(shall_pretrain)
@@ -161,7 +161,13 @@ class TSN_Ada(nn.Module):
 
         self.reso_dim = self._get_resolution_dimension()
         self.skip_dim = len(self.args.skip_list)
-        self.action_dim = self.reso_dim + self.skip_dim
+        if self.args.hard_t_fusion:
+            if self.args.improved_semhash:
+                self.action_dim = self.args.num_segments
+            else:
+                self.action_dim = self.args.num_segments * 2
+        else:
+            self.action_dim = self.reso_dim + self.skip_dim
 
     def _prepare_base_model(self, base_model):
         self.input_size = 224
@@ -409,6 +415,13 @@ class TSN_Ada(nn.Module):
                 input_2d = input_data
             elif b_t_c:
                 input_b_t_c = input_data.view(_b, _t, _c, _h, _w)
+            elif self.args.average_frames:
+                input_avg = input_data.view(_b, _t, _c, _h, _w).mean(dim=1)
+            elif self.args.average_frames_clone:
+                input_avg = input_data.view(_b, _t, _c, _h, _w).mean(dim=1, keepdim=True).expand(_b, _t, _c, _h, _w)
+                input_avg = input_avg.reshape(_b * _t, _c, _h, _w)
+            elif self.args.step_by_step:
+                input_step = input_data.view(_b, _t, _c, _h, _w)
             else:
                 input_2d = input_data.view(_b * _t, _c, _h, _w)
 
@@ -417,6 +430,15 @@ class TSN_Ada(nn.Module):
             elif any([self.args.dmy, self.args.msd, self.args.mer]) and \
                     ((self.args.uno_reso and len(indices_list) > 0) or (signal is not None and signal >= 0)):
                 feat = the_base_model(input_2d, signal=signal)
+            elif self.args.average_frames or self.args.average_frames_clone:
+                feat = the_base_model(input_avg)
+                if self.args.step_by_step and self.args.average_frames_clone:
+                    feat = torch.stack([the_base_model(
+                        input_avg.view(_b, _t, _c, _h, _w)[:, t_step]) for t_step in range(_t)], dim=1)
+                    feat = feat.view(_b * _t, -1)
+            elif self.args.step_by_step:
+                feat = torch.stack([the_base_model(input_step[:, t_step]) for t_step in range(_t)], dim=1)
+                feat = feat.view(_b * _t, -1)
             else:
                 feat = the_base_model(input_2d)
 
@@ -432,11 +454,22 @@ class TSN_Ada(nn.Module):
             elif b_t_c:
                 if new_fc is not None:
                     _base_out = new_fc(feat.view(_b * _t, -1)).view(_b, _t, -1)
+            elif self.args.average_frames:
+                _base_out = new_fc(feat).view(_b, 1, -1)
+                feat = feat.view(_b, 1, -1)
             else:
-                if new_fc is not None:
-                    _base_out = new_fc(feat).view(_b, _t, -1)
-                feat = feat.view(_b, _t, -1)
+                if self.args.cnn3d:
+                    if new_fc is not None:
+                        _base_out = new_fc(feat).view(_b, 1, -1)
+                    feat = feat.view(_b, 1, -1)
+                else:
+                    if new_fc is not None:
+                        _base_out = new_fc(feat).view(_b, _t, -1)
+                    feat = feat.view(_b, _t, -1)
             return feat, _base_out
+
+    def improved_semantic_hash(self, p_t, is_training):
+        return None
 
     def get_lite_j_and_r(self, input_list, online_policy, tau):
 
@@ -459,35 +492,50 @@ class TSN_Ada(nn.Module):
             else:
                 hx, cx = self.rnn(feat_lite[:, t], (hx, cx))
                 feat_t = hx
-            p_t = torch.log(F.softmax(self.linear(feat_t), dim=1))
+            if self.args.hard_t_fusion:
+                if self.args.improved_semhash:
+                    p_t = self.linear(feat_t)
+                else:
+                    p_t = torch.log(F.softmax(self.linear(feat_t).view(batch_size, self.args.num_segments, 2), dim=2))
+
+            else: #TODO normal gumbel softmax
+                p_t = torch.log(F.softmax(self.linear(feat_t), dim=1))
             j_t = self.lite_fc(feat_t)
             logits_list.append(p_t)  # TODO as logit
             lite_j_list.append(j_t)  # TODO as pred
 
             # TODO (yue) need a simple case to illustrate this
             if online_policy:
-                r_t = torch.cat(
-                    [F.gumbel_softmax(p_t[b_i:b_i + 1], tau, True) for b_i in range(p_t.shape[0])])
-                # r_t = F.gumbel_softmax(logits=p_t, tau=kwargs["tau"], hard=True)
+                if self.args.hard_t_fusion:
+                    if self.args.improved_semhash:
+                        r_t = self.improved_semantic_hash(p_t, is_training=True)  # TODO semhash (B*T)
+                    else:
+                        r_t = F.gumbel_softmax(logits=p_t, tau=tau, hard=True)
+                        r_t = r_t[:, :, 1]  # TODO: select as the chosen one (B*T)
+                    r_list.append(r_t)
+                else:
+                    r_t = torch.cat(
+                        [F.gumbel_softmax(p_t[b_i:b_i + 1], tau, True) for b_i in range(p_t.shape[0])])
+                    # r_t = F.gumbel_softmax(logits=p_t, tau=kwargs["tau"], hard=True)
 
-                # TODO update states and r_t
-                if old_hx is not None:
-                    take_bool = remain_skip_vector > 0.5
-                    take_old = torch.tensor(take_bool, dtype=torch.float).cuda()
-                    take_curr = torch.tensor(~take_bool, dtype=torch.float).cuda()
-                    hx = old_hx * take_old + hx * take_curr
-                    r_t = old_r_t * take_old + r_t * take_curr
+                    # TODO update states and r_t
+                    if old_hx is not None:
+                        take_bool = remain_skip_vector > 0.5
+                        take_old = torch.tensor(take_bool, dtype=torch.float).cuda()
+                        take_curr = torch.tensor(~take_bool, dtype=torch.float).cuda()
+                        hx = old_hx * take_old + hx * take_curr
+                        r_t = old_r_t * take_old + r_t * take_curr
 
-                # TODO update skipping_vector
-                for batch_i in range(batch_size):
-                    for skip_i in range(self.action_dim - self.reso_dim):
-                        # TODO(yue) first condition to avoid valuing skip vector forever
-                        if remain_skip_vector[batch_i][0] < 0.5 and r_t[batch_i][self.reso_dim + skip_i] > 0.5:
-                            remain_skip_vector[batch_i][0] = self.args.skip_list[skip_i]
-                old_hx = hx
-                old_r_t = r_t
-                r_list.append(r_t)  # TODO as decision
-                remain_skip_vector = (remain_skip_vector - 1).clamp(0)
+                    # TODO update skipping_vector
+                    for batch_i in range(batch_size):
+                        for skip_i in range(self.action_dim - self.reso_dim):
+                            # TODO(yue) first condition to avoid valuing skip vector forever
+                            if remain_skip_vector[batch_i][0] < 0.5 and r_t[batch_i][self.reso_dim + skip_i] > 0.5:
+                                remain_skip_vector[batch_i][0] = self.args.skip_list[skip_i]
+                    old_hx = hx
+                    old_r_t = r_t
+                    r_list.append(r_t)  # TODO as decision
+                    remain_skip_vector = (remain_skip_vector - 1).clamp(0)
         if online_policy:
             return lite_j_list, torch.stack(r_list, dim=1)
         else:
@@ -502,6 +550,31 @@ class TSN_Ada(nn.Module):
             return False
         else:
             return True
+
+    def input_fusion(self, input_data, r):
+        # TODO data: B * TC * H * W
+        # TODO r   : B * T * T
+        _b, _tc, _h, _w = input_data.shape
+        _c = _tc // self.args.num_segments
+        fuse_data_list=[]
+
+        for bi in range(_b):
+            if self.args.identity_prior:
+                prior = torch.eye(self.args.num_segments).to(input_data.device)
+            else:
+                prior = 0
+            if self.args.lower_mask:
+                mask = torch.tril(torch.ones(self.args.num_segments, self.args.num_segments)).to(input_data.device)
+            else:
+                mask = 1
+            real_r = (r[bi] + prior) * mask
+            if self.args.direct_lower_mask:
+                real_r = torch.tril(real_r)
+            if self.args.row_normalization:
+                real_r = real_r / (real_r.sum(dim=1, keepdim=True).clamp_min(1e-6))
+            fused_data = torch.matmul(real_r, input_data[bi].view(self.args.num_segments, _c * _h * _w))
+            fuse_data_list.append(fused_data)
+        return torch.stack(fuse_data_list, dim=0).view(_b, _tc, _h, _w)
 
     def get_feat_and_pred(self, input_list, r_all):
         feat_out_list = []
@@ -546,11 +619,20 @@ class TSN_Ada(nn.Module):
                     feat_out_list.append(feat_out)
                     base_out_list.append(base_out)
         else:
-            for bb_i, the_backbone in enumerate(self.base_model_list):
-                feat_out, base_out = self.backbone(input_list[bb_i], the_backbone, self.new_fc_list[bb_i])
+            if self.args.hard_t_fusion:
+                input_data = self.input_fusion(input_list[0], r_all)
+                feat_out, base_out = self.backbone(input_data, self.base_model_list[0], self.new_fc_list[0])
                 feat_out_list.append(feat_out)
                 base_out_list.append(base_out)
+            else:
+                for bb_i, the_backbone in enumerate(self.base_model_list):
+                    feat_out, base_out = self.backbone(input_list[bb_i], the_backbone, self.new_fc_list[bb_i])
+                    feat_out_list.append(feat_out)
+                    base_out_list.append(base_out)
         return feat_out_list, base_out_list, ind_list
+
+    def late_fusion(self, base_out_list, in_matrix, out_matrix):
+        return base_out_list
 
     def forward(self, *argv, **kwargs):
         if not self.args.ada_reso_skip:  # TODO simple TSN
@@ -570,6 +652,15 @@ class TSN_Ada(nn.Module):
                 for i_bs in range(batch_size):
                     for i_t in range(self.time_steps):
                         r_all[i_bs, i_t, torch.randint(self.action_dim, [1])] = 1.0
+            if self.args.hard_t_fusion:
+                if self.args.zero_policy:
+                    r_all = torch.zeros(batch_size, self.time_steps, self.time_steps).cuda()
+
+                elif self.args.random_policy:
+                    # TODO (yue) should give more diversed randomness here
+                    r_all = torch.randint(0, 2, (batch_size, self.time_steps, self.time_steps))\
+                        .type("torch.FloatTensor").cuda()
+
             feat_out_list, base_out_list, ind_list = self.get_feat_and_pred(input_list, r_all)
         else:
             feat_out_list, base_out_list, ind_list  = [], [], []
@@ -590,6 +681,10 @@ class TSN_Ada(nn.Module):
             return output.squeeze(1), ind, real_pred, lite_pred
 
         else:
+            if self.args.hard_t_fusion:
+                output = self.late_fusion(base_out_list, r_all, r_all)
+                return output[0].mean(dim=1), r_all, None, None
+
             if self.args.random_policy: #TODO(yue) random policy
                 r_all = torch.zeros(batch_size, self.time_steps, self.action_dim).cuda()
                 for i_bs in range(batch_size):

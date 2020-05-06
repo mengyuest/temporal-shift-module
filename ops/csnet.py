@@ -274,7 +274,6 @@ class VideoResNet(nn.Module):
 
     def forward(self, x):
         x = self.stem(x)
-
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
@@ -397,7 +396,7 @@ def ir_csn_152(pretrained=False, progress=False, **kwargs):
         nn.Module: ir-CSN-152 network
     """
     return _video_resnet('ir_csn_152',
-                         False, False,
+                         pretrained, False,
                          block=Bottleneck,
                          conv_makers=[Conv3DDepthwise] * 4,
                          layers=[3, 8, 36, 3],
@@ -416,7 +415,7 @@ def ip_csn_152(pretrained=False, progress=False, **kwargs):
         nn.Module: ip-CSN-152 network
     """
     return _video_resnet('ip_csn_152',
-                         False, False,
+                         pretrained, False,
                          block=Bottleneck,
                          conv_makers=[IPConv3DDepthwise] * 4,
                          layers=[3, 8, 36, 3],
@@ -435,7 +434,7 @@ def ir_csn_50(pretrained=False, progress=False, **kwargs):
         nn.Module: ir-CSN-152 network
     """
     return _video_resnet('ir_csn_50',
-                         False, False,
+                         pretrained, False,
                          block=Bottleneck,
                          conv_makers=[Conv3DDepthwise] * 4,
                          layers=[3, 4, 6, 3],

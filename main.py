@@ -227,7 +227,7 @@ def main():
 
     model = torch.nn.DataParallel(model, device_ids=args.gpus).cuda()
 
-    # TODO(yue) freeze some params in the policy+lstm layers
+    # TODO(yue) freeze some params in the policy + lstm layers
     if args.freeze_policy:
         for name, param in model.module.named_parameters():
             if "lite_fc" in name or "lite_backbone" in name or "rnn" in name or "linear" in name:
@@ -693,41 +693,48 @@ def cal_eff(r):
     if args.use_gflops_loss:
         r_loss = torch.tensor(gflops_vec).cuda()
     else:
-        r_loss = torch.tensor([4., 2., 1., 0.5, 0.25, 0.125, 0.0625,0.03125]).cuda()[:r.shape[2]]
-    #print(r.shape, r_loss.shape)
-    loss = torch.sum(torch.mean(r, dim=[0,1]) * r_loss)
+        r_loss = torch.tensor([4., 2., 1., 0.5, 0.25, 0.125, 0.0625, 0.03125]).cuda()[:r.shape[2]]
+    if args.hard_t_fusion:
+        # TODO (yue)
+        loss = torch.sum(0 * r_loss)
+    else:
+        loss = torch.sum(torch.mean(r, dim=[0,1]) * r_loss)
     each_losses.append(loss.detach().cpu().item())
 
     #TODO(yue) uniform loss
     if args.uniform_loss_weight > 1e-5:
-        if_policy_backbone = 1 if args.policy_also_backbone else 0
-        num_pred = len(args.num_filters_list) if (args.dmy or args.dhs) else len(args.backbone_list)
-        policy_dim = num_pred + if_policy_backbone + len(args.skip_list)
+        if args.hard_t_fusion:
+            # TODO (yue)
+            uniform_loss = torch.sum(0 * r_loss)
+        else:
+            if_policy_backbone = 1 if args.policy_also_backbone else 0
+            num_pred = len(args.num_filters_list) if (args.dmy or args.dhs) else len(args.backbone_list)
+            policy_dim = num_pred + if_policy_backbone + len(args.skip_list)
 
-        reso_skip_vec=torch.zeros(policy_dim).cuda()
+            reso_skip_vec=torch.zeros(policy_dim).cuda()
 
-        #TODO
-        offset=0
-        #TODO reso/ada_crops
-        for b_i in range(num_pred):
-            if args.dhs:
-                interval = 1
-            else:
-                interval = args.ada_crop_list[b_i]
-            reso_skip_vec[b_i] += torch.sum(r[:, :, offset:offset+interval])
-            offset = offset + interval
+            #TODO
+            offset=0
+            #TODO reso/ada_crops
+            for b_i in range(num_pred):
+                if args.dhs:
+                    interval = 1
+                else:
+                    interval = args.ada_crop_list[b_i]
+                reso_skip_vec[b_i] += torch.sum(r[:, :, offset:offset+interval])
+                offset = offset + interval
 
-        #TODO mobilenet + skips
-        for b_i in range(num_pred, reso_skip_vec.shape[0]):
-            reso_skip_vec[b_i] = torch.sum(r[:, :, b_i])
+            #TODO mobilenet + skips
+            for b_i in range(num_pred, reso_skip_vec.shape[0]):
+                reso_skip_vec[b_i] = torch.sum(r[:, :, b_i])
 
-        reso_skip_vec = reso_skip_vec / torch.sum(reso_skip_vec)
-        if args.uniform_cross_entropy: #TODO cross-entropy+ logN
-            uniform_loss = torch.sum(torch.tensor([x*torch.log(torch.clamp_min(x,1e-6)) for x in reso_skip_vec])) + torch.log(torch.tensor(1.0*len(reso_skip_vec)))
-            uniform_loss = uniform_loss * args.uniform_loss_weight
-        else: #TODO L2 norm
-            usage_bias = reso_skip_vec - torch.mean(reso_skip_vec)
-            uniform_loss = torch.norm(usage_bias, p=2) * args.uniform_loss_weight
+            reso_skip_vec = reso_skip_vec / torch.sum(reso_skip_vec)
+            if args.uniform_cross_entropy: #TODO cross-entropy+ logN
+                uniform_loss = torch.sum(torch.tensor([x*torch.log(torch.clamp_min(x,1e-6)) for x in reso_skip_vec])) + torch.log(torch.tensor(1.0*len(reso_skip_vec)))
+                uniform_loss = uniform_loss * args.uniform_loss_weight
+            else: #TODO L2 norm
+                usage_bias = reso_skip_vec - torch.mean(reso_skip_vec)
+                uniform_loss = torch.norm(usage_bias, p=2) * args.uniform_loss_weight
         loss = loss + uniform_loss
         each_losses.append(uniform_loss.detach().cpu().item())
 
@@ -835,7 +842,23 @@ def elastic_list_print(l, limit=8):
 def compute_exp_decay_tau(epoch):
     return args.init_tau * np.exp(args.exp_decay_factor * epoch)
 
+def print_matrices(m_list, prefix="%d", gap=1):
+    slices=["" for _ in range(m_list[0].shape[0])]
+    for i in range(len(slices)):
+        for m in m_list:
+            slices[i] += "|" + " ".join([prefix % x for x in m[i]]) + "|" + " " * gap
+
+    mlen = len(m_list)
+    total_width = sum([2 * m.shape[1] for m in m_list]) - 1+ mlen * 2 + (mlen-1) * gap
+
+    print("-" * total_width)
+    for s in slices:
+        print(s)
+    print("-" * total_width)
 def get_policy_usage_str(r_list, reso_dim):
+    if args.hard_t_fusion and args.print_matrix:
+        print_matrices([r_list[-1][0], r_list[-2][0], r_list[-3][0]])
+
     printed_str=""
     rs = np.concatenate(r_list, axis=0)
 
@@ -854,6 +877,13 @@ def get_policy_usage_str(r_list, reso_dim):
 
     used_model_list=[]
     reso_list=[]
+
+    # TODO(yue)
+    if args.hard_t_fusion:
+        est_gflops = sum(gflops_vec)
+        return "HARD_T_FUSION: %.4f"%(est_gflops), est_gflops
+
+
     if args.dmy:
         for fc_i in range(len(args.num_filters_list)):
             used_model_list += [args.backbone_list[0]+"@%d"%(fc_i)] * args.ada_crop_list[fc_i]
@@ -1041,8 +1071,12 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
                 data_time=data_time, loss=losses, top1=top1, top5=top5))  # TODO
 
             if use_ada_framework:
+                if args.hard_t_fusion:
+                    roh_r = r[-1, 0, :].detach().cpu().numpy()
+                else:
+                    roh_r = reverse_onehot(r[-1, :, :].detach().cpu().numpy())
                 print_output += ' a {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
-                    aloss = alosses, eloss =elosses, r=elastic_list_print(reverse_onehot(r[-1,:,:].detach().cpu().numpy()))
+                    aloss = alosses, eloss =elosses, r=elastic_list_print(roh_r)
                 )
                 print_output += extra_each_loss_str(each_terms)
 
@@ -1090,7 +1124,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
         else:
             iter_list = args.backbone_list
 
-        if args.boost == False and args.dhs == False:
+        if args.boost == False and args.dhs == False and args.hard_t_fusion == False:
             all_bb_results = [[] for _ in range(len(iter_list))]
             if args.policy_also_backbone:
                 all_bb_results.append([])
@@ -1163,7 +1197,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
             all_results.append(output)
             all_targets.append(target)
 
-            if use_ada_framework and args.boost == False and args.dhs == False:
+            if use_ada_framework and args.boost == False and args.dhs == False and args.hard_t_fusion == False:
                 for bb_i in range(len(all_bb_results)):
                     all_bb_results[bb_i].append(base_outs[:, bb_i])
 
@@ -1205,8 +1239,13 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                     i, len(val_loader), batch_time=batch_time, loss=losses,
                     top1=top1, top5=top5))
                 if use_ada_framework:
+                    if args.hard_t_fusion:
+                        roh_r = r[-1, 0, :].detach().cpu().numpy()
+                    else:
+                        roh_r = reverse_onehot(r[-1, :, :].cpu().numpy())
+
                     print_output += ' a {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
-                        aloss=alosses, eloss=elosses, r=elastic_list_print(reverse_onehot(r[-1, :, :].cpu().numpy()))
+                        aloss=alosses, eloss=elosses, r=elastic_list_print(roh_r)
                     )
 
                     print_output += extra_each_loss_str(each_terms)
@@ -1233,7 +1272,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
               .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses))
 
-    if use_ada_framework and args.boost == False and args.dhs == False:
+    if use_ada_framework and args.boost == False and args.dhs == False and args.hard_t_fusion == False:
         bbmmaps = []
         bbprec1s = []
         all_targets_cpu=torch.cat(all_targets, 0).cpu()
@@ -1306,8 +1345,6 @@ def setup_log_directory(logger, exp_header):
         return None
 
     exp_full_name = "g%s_%s"%(logger._timestr, exp_header)
-    if args.skip_training:
-        exp_full_name+="_test"
     if test_mode:
         exp_full_path = ospj(common.EXPS_PATH, args.test_from)
     else:

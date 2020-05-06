@@ -86,11 +86,16 @@ class TSNDataSet(data.Dataset):
 
     def _parse_list(self):
         # check the frame number is large >3:
-        splitter="," if self.dataset in ["actnet","fcvid"] else " "
+        splitter = "," if self.dataset in ["actnet","fcvid"] else " "
+        if self.dataset == "kinetics":
+            splitter = ";"
         tmp = [x.strip().split(splitter) for x in open(self.list_file)]
 
         if any(len(items)>=3 for items in tmp) and self.dataset=="minik":
             tmp = [[splitter.join(x[:-2]), x[-2], x[-1]] for x in tmp]
+
+        if self.dataset == "kinetics":
+            tmp = [[x[0], x[-2], x[-1]] for x in tmp]
 
         if not self.test_mode or self.remove_missing:
             tmp = [item for item in tmp if int(item[1]) >= 3]

@@ -224,6 +224,7 @@ parser.add_argument('--freeze_corr_bn', action='store_true', help="freeze the co
 
 #TODO channel-separate network
 parser.add_argument('--csn', action='store_true')
+parser.add_argument('--load_csn_weights', action='store_true')
 
 parser.add_argument('--ge_pretraining', action='store_true')
 parser.add_argument('--gradient_equilibrium', action='store_true')
@@ -241,6 +242,7 @@ parser.add_argument('--dhs_one_history', action='store_true')
 parser.add_argument('--dhs_rand_history', action='store_true')
 parser.add_argument('--dhs_history_no_grad', action='store_true')
 
+parser.add_argument('--dhs_zero_level', action='store_true')
 parser.add_argument('--dhs_all_level', action='store_true')
 parser.add_argument('--dhs_stage_level', action='store_true')
 parser.add_argument('--dhs_print_net_states', action='store_true')
@@ -248,3 +250,26 @@ parser.add_argument('--dhs_print_net_states', action='store_true')
 parser.add_argument('--dhs_fix_history_ratio', action='store_true')
 parser.add_argument('--dhs_current_ratio', type=int, default=0)
 parser.add_argument('--dhs_fuse_history', action='store_true')
+
+
+#TODO monday thoughts for vanilla models (average frames, tune batchsizes)
+parser.add_argument('--average_frames', action='store_true')
+parser.add_argument('--average_frames_clone', action='store_true')
+parser.add_argument('--step_by_step', action='store_true')
+
+#TODO hard temporal fusion
+parser.add_argument('--hard_t_fusion', action='store_true')
+parser.add_argument('--improved_semhash', action='store_true')
+parser.add_argument('--zero_policy', action='store_true')
+parser.add_argument('--identity_prior', action='store_true')
+parser.add_argument('--lower_mask', action='store_true')
+parser.add_argument('--row_normalization', action='store_true')
+parser.add_argument('--local_range', action='store_true')
+parser.add_argument('--vanilla_side', action='store_true')  # TODO but this might hurt batchnorm (try clone net weights)
+parser.add_argument('--post_t_fusion', action='store_true')  # TODO for feature level
+parser.add_argument('--print_matrix', action='store_true')
+parser.add_argument('--direct_lower_mask', action='store_true')
+
+
+
+# TODO (local policy network, and dynamic pruning)

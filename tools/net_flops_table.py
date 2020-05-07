@@ -11,6 +11,7 @@ from ops.cnn3d.mobilenet3dv2 import mobilenet3d_v2
 from ops.cnn3d.shufflenet3d import ShuffleNet3D
 import ops.dmynet
 import ops.dhsnet
+import ops.gatenet
 import ops.msdnet
 import ops.mernet
 
@@ -43,6 +44,10 @@ feat_dim_dict = {
     'dhsnet34': 512,
     'dhsnet50': 2048,
     'dhsnet101': 2048,
+    'gatenet18': 512,
+    'gatenet34': 512,
+    'gatenet50': 2048,
+    'gatenet101': 2048,
     "msdnet": 0,
     "mernet50": 0,
     "ir_csn_50": 2048,
@@ -98,6 +103,9 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
                                                 default_signal=default_signal,
                                                 args=args)
         last_layer="fc"
+    elif "gatenet" in model_name:
+        model = getattr(ops.gatenet, model_name)(pretrained=False, args=args)
+        last_layer = "fc"
     elif "msdnet" in model_name:
         model = getattr(ops.msdnet, "MSDNet")(default_signal = default_signal)
     elif "mernet" in model_name:
@@ -111,8 +119,6 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
                 [nn.Linear(feat_dim, num_classes) for _ in num_filters_list]))
         else:
             setattr(model, last_layer, torch.nn.ModuleList([nn.Linear(feat_dim * num_filters // 64, num_classes) for num_filters in num_filters_list]))
-    elif "dhsnet" in model_name:
-        setattr(model, last_layer, nn.Linear(feat_dim, num_classes))
     elif "msdnet" in model_name:
         for msd_i in msd_indices_list:
             msd_feat_dim = model.classifier[msd_i].linear.in_features
@@ -121,7 +127,7 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
         for mer_i in mer_indices_list:
             mer_feat_dim = getattr(model, "fc%d.in_features"%(mer_i))
             setattr(model, "fc%d"%mer_i, nn.Linear(mer_feat_dim, num_classes))
-    else:
+    else:  # TODO: normal, dhs, gate
         setattr(model, last_layer, nn.Linear(feat_dim, num_classes))
 
     if seg_len == -1:
@@ -134,11 +140,12 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
     hooks={}
     if "dmynet" in model_name:
         hooks = {ops.dmynet.Conv2dMY: ops.dmynet.count_conv_my}
-    if "dhsnet" in model_name:
-        dummy_data = torch.randn(1, 16, 3, resolution, resolution)
-        hooks = {ops.dhsnet.Conv2dHS: ops.dhsnet.count_conv_hs}
+    if "dhsnet" in model_name or "gatenet" in model_name:  # TODO: step-by-step solution
+        dummy_data = torch.randn(2, 8, 3, resolution, resolution)
+        if "dhsnet" in model_name:
+            hooks = {ops.dhsnet.Conv2dHS: ops.dhsnet.count_conv_hs}
     flops, params = profile(model, inputs=(dummy_data,), custom_ops=hooks)
-    if "dhsnet" in model_name:
+    if "dhsnet" in model_name or "gatenet" in model_name:
         flops = flops / 16
     gflops = flops / 1e9
     params = params / 1e6

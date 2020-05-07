@@ -10,6 +10,7 @@ import ops.dmynet as dmynet
 from ops.dmynet import Conv2dMY
 import ops.dhsnet as dhsnet
 from ops.dhsnet import Conv2dHS
+import ops.gatenet as gatenet
 import ops.msdnet as msdnet
 import ops.mernet as mernet
 import ops.csnet as csnet
@@ -60,7 +61,12 @@ class TSN_Ada(nn.Module):
         self.time_steps = self.num_segments // self.args.seg_len if self.args.cnn3d else self.num_segments
 
         if self.args.ada_reso_skip:
-            self._prepare_policy_net()
+            self.reso_dim = self._get_resolution_dimension()
+            self.skip_dim = len(self.args.skip_list)
+            self.action_dim = self._get_action_dimension()
+
+            if not (self.args.gate and self.args.gate_local_policy):
+                self._prepare_policy_net()
             self._extends_to_multi_models()
 
         self._prepare_base_model(base_model)
@@ -89,6 +95,9 @@ class TSN_Ada(nn.Module):
         elif self.args.dhs and "dhsnet" in model_name:
             model = getattr(dhsnet, model_name)(shall_pretrain, num_filters_list=self.args.num_filters_list,
                                                 args=self.args)
+            model.last_layer_name = 'fc'
+        elif self.args.gate and "gatenet" in model_name:
+            model = getattr(gatenet, model_name)(shall_pretrain, args=self.args)
             model.last_layer_name = 'fc'
         elif self.args.msd and "msdnet" in model_name:
             pretrained_path = ospj(common.PYTORCH_CKPT_DIR, "msdnet-step4-block5.pth") if shall_pretrain else None
@@ -125,6 +134,8 @@ class TSN_Ada(nn.Module):
             reso_dim = len(self.args.num_filters_list)
         elif self.args.dhs:
             reso_dim = len(self.args.num_filters_list)
+        elif self.args.gate:
+            reso_dim = 1
         elif self.args.msd:
             reso_dim = len(self.args.msd_indices_list) #TODO 0,1,2; 0,2,3...
         elif self.args.mer:
@@ -137,6 +148,18 @@ class TSN_Ada(nn.Module):
         if self.args.policy_also_backbone:
             reso_dim += 1
         return reso_dim
+
+    def _get_action_dimension(self):
+        if self.args.hard_t_fusion:
+            if self.args.improved_semhash:
+                action_dim = self.args.num_segments
+            else:
+                action_dim = self.args.num_segments * 2
+        elif self.args.gate:
+            action_dim = None
+        else:
+            action_dim = self.reso_dim + self.skip_dim
+        return action_dim
 
     def _make_a_shift(self, base_model):
         if "resnet" in base_model:
@@ -159,16 +182,6 @@ class TSN_Ada(nn.Module):
         self.policy_feat_dim = feat_dim_dict[self.args.policy_backbone]
         self.rnn = nn.LSTMCell(input_size=self.policy_feat_dim, hidden_size=self.args.hidden_dim, bias=True)
 
-        self.reso_dim = self._get_resolution_dimension()
-        self.skip_dim = len(self.args.skip_list)
-        if self.args.hard_t_fusion:
-            if self.args.improved_semhash:
-                self.action_dim = self.args.num_segments
-            else:
-                self.action_dim = self.args.num_segments * 2
-        else:
-            self.action_dim = self.reso_dim + self.skip_dim
-
     def _prepare_base_model(self, base_model):
         self.input_size = 224
         self.input_mean = [0.485, 0.456, 0.406]
@@ -179,7 +192,7 @@ class TSN_Ada(nn.Module):
                 for _ in self.args.num_filters_list:
                     model = self._prep_a_net(self.args.backbone_list[0], shall_pretrain)
                     self.base_model_list.append(model)
-            elif any([self.args.dmy, self.args.dhs, self.args.msd, self.args.mer]):
+            elif any([self.args.dmy, self.args.dhs, self.args.gate, self.args.msd, self.args.mer]):
                 model = self._prep_a_net(self.args.backbone_list[0], shall_pretrain)
                 self.base_model_list.append(model)
             else:
@@ -198,7 +211,9 @@ class TSN_Ada(nn.Module):
             constant_(linear_model.bias, 0)
             return linear_model
 
-        if self.args.ada_reso_skip:
+        i_do_need_a_policy_network = not (self.args.gate and self.args.gate_local_policy)
+
+        if self.args.ada_reso_skip and i_do_need_a_policy_network:
             setattr(self.lite_backbone, self.lite_backbone.last_layer_name, nn.Dropout(p=self.dropout))
             feed_dim = self.args.hidden_dim if not self.args.frame_independent else self.policy_feat_dim
             self.linear = make_a_linear(feed_dim, self.action_dim)
@@ -217,11 +232,12 @@ class TSN_Ada(nn.Module):
                             break
                     setattr(base_model, base_model.last_layer_name, torch.nn.ModuleList([nn.Dropout(p=self.dropout) for _ in self.args.num_filters_list]))
 
-            elif self.args.dhs:
+            elif self.args.dhs or self.args.gate:
                 feature_dim = getattr(self.base_model_list[0], self.base_model_list[0].last_layer_name).in_features
                 new_fc = make_a_linear(feature_dim, num_class)
                 self.new_fc_list.append(new_fc)
                 setattr(self.base_model_list[0], self.base_model_list[0].last_layer_name, nn.Dropout(p=self.dropout))
+
             else:
                 multi_fc_list = [None]
                 if self.args.msd:
@@ -399,7 +415,7 @@ class TSN_Ada(nn.Module):
              'name': "lr10_bias"},
         ]
 
-    def backbone(self, input_data, the_base_model, new_fc, signal=-1, indices_list=[], boost=False, b_t_c=False):
+    def backbone(self, input_data, the_base_model, new_fc, signal=-1, indices_list=[], boost=False, b_t_c=False, **kwargs):
         if boost:
             _bt, _, _h, _w = input_data.shape
         else:
@@ -426,7 +442,10 @@ class TSN_Ada(nn.Module):
                 input_2d = input_data.view(_b * _t, _c, _h, _w)
 
             if b_t_c:
-                feat = the_base_model(input_b_t_c, signal=signal)
+                if self.args.gate:
+                    feat = the_base_model(input_b_t_c, **kwargs)
+                else:
+                    feat = the_base_model(input_b_t_c, signal=signal, **kwargs)
             elif any([self.args.dmy, self.args.msd, self.args.mer]) and \
                     ((self.args.uno_reso and len(indices_list) > 0) or (signal is not None and signal >= 0)):
                 feat = the_base_model(input_2d, signal=signal)
@@ -576,7 +595,7 @@ class TSN_Ada(nn.Module):
             fuse_data_list.append(fused_data)
         return torch.stack(fuse_data_list, dim=0).view(_b, _tc, _h, _w)
 
-    def get_feat_and_pred(self, input_list, r_all):
+    def get_feat_and_pred(self, input_list, r_all, **kwargs):
         feat_out_list = []
         base_out_list = []
         ind_list = []
@@ -604,6 +623,12 @@ class TSN_Ada(nn.Module):
             input_data = input_list[0]
             feat_out, base_out = self.backbone(input_data, self.base_model_list[0],
                                                self.new_fc_list[0], signal=r_all, boost=self.args.boost, b_t_c=True)
+            feat_out_list.append(feat_out)
+            base_out_list.append(base_out)
+
+        elif self.args.gate:
+            input_data = input_list[0]
+            feat_out, base_out = self.backbone(input_data, self.base_model_list[0], self.new_fc_list[0], b_t_c=True, **kwargs)
             feat_out_list.append(feat_out)
             base_out_list.append(base_out)
 
@@ -644,7 +669,10 @@ class TSN_Ada(nn.Module):
 
         input_list = kwargs["input"]
         batch_size = input_list[0].shape[0]  # TODO(yue) input[0] B*(TC)*H*W
-        lite_j_list, r_all = self.get_lite_j_and_r(input_list, self.using_online_policy(), kwargs["tau"])
+        if self.args.gate:
+            r_all = None
+        else:
+            lite_j_list, r_all = self.get_lite_j_and_r(input_list, self.using_online_policy(), kwargs["tau"])
 
         if self.multi_models:
             if self.args.dhs and self.args.random_policy:
@@ -652,6 +680,7 @@ class TSN_Ada(nn.Module):
                 for i_bs in range(batch_size):
                     for i_t in range(self.time_steps):
                         r_all[i_bs, i_t, torch.randint(self.action_dim, [1])] = 1.0
+
             if self.args.hard_t_fusion:
                 if self.args.zero_policy:
                     r_all = torch.zeros(batch_size, self.time_steps, self.time_steps).cuda()
@@ -661,7 +690,10 @@ class TSN_Ada(nn.Module):
                     r_all = torch.randint(0, 2, (batch_size, self.time_steps, self.time_steps))\
                         .type("torch.FloatTensor").cuda()
 
-            feat_out_list, base_out_list, ind_list = self.get_feat_and_pred(input_list, r_all)
+            if "tau" not in kwargs:
+                kwargs["tau"] = None
+
+            feat_out_list, base_out_list, ind_list = self.get_feat_and_pred(input_list, r_all, tau=kwargs["tau"])
         else:
             feat_out_list, base_out_list, ind_list  = [], [], []
 
@@ -724,7 +756,7 @@ class TSN_Ada(nn.Module):
             pred_tensor[ind_tensor1d // r.shape[1], ind_tensor1d % r.shape[1]] = pred_tensor2d
             t_tensor = torch.sum(r[:, :, :self.reso_dim], dim=[1, 2]).unsqueeze(-1).clamp(1)
             return pred_tensor.sum(dim=1) / t_tensor
-        elif self.args.dhs:
+        elif self.args.dhs or self.args.gate:
             return base_out_list[0].mean(dim=1)
         else:
             pred_tensor = torch.stack(base_out_list, dim=2)

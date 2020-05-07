@@ -607,6 +607,11 @@ def init_gflops_table():
                 = get_gflops_params(args.backbone_list[0], args.reso_list[0], num_class, seg_len,
                                     default_signal=fc_i, num_filters_list=args.num_filters_list,
                                     args=args)[0]
+    elif args.gate:
+        for fc_i in range(len(args.num_filters_list)):
+            gflops_table[args.backbone_list[0] + str(args.reso_list[0]) + "@%d" % (fc_i)] \
+                = get_gflops_params(args.backbone_list[0], args.reso_list[0], num_class, seg_len, args=args)[0]
+
     elif args.msd:
         for fc_i in range(len(args.msd_indices_list)):
             the_i = 0 if args.uno_reso else fc_i
@@ -622,8 +627,9 @@ def init_gflops_table():
     else:
         for i, backbone in enumerate(args.backbone_list):
             gflops_table[backbone+str(args.reso_list[i])] = get_gflops_params(backbone, args.reso_list[i], num_class, seg_len)[0]
-    gflops_table["policy"] = get_gflops_params(args.policy_backbone, args.reso_list[args.policy_input_offset], num_class, seg_len)[0]
-    gflops_table["lstm"] = 2 * (feat_dim_dict[args.policy_backbone] ** 2) /1000000000
+    if not args.gate:
+        gflops_table["policy"] = get_gflops_params(args.policy_backbone, args.reso_list[args.policy_input_offset], num_class, seg_len)[0]
+        gflops_table["lstm"] = 2 * (feat_dim_dict[args.policy_backbone] ** 2) /1000000000
 
     print("gflops_table: ")
     for k in gflops_table:
@@ -647,6 +653,9 @@ def get_gflops_t_tt_vector():
             gflops_vec.append(the_flops)
             t_vec.append(1.)
             tt_vec.append(1.)
+    elif args.gate:
+        the_flops = gflops_table[args.backbone_list[0] + str(args.reso_list[0]) + "@%d" % (0)]
+        gflops_vec.append(the_flops)
     elif args.msd:
         for fc_i in range(len(args.msd_indices_list)):
             the_i = 0 if args.uno_reso else fc_i
@@ -694,7 +703,7 @@ def cal_eff(r):
         r_loss = torch.tensor(gflops_vec).cuda()
     else:
         r_loss = torch.tensor([4., 2., 1., 0.5, 0.25, 0.125, 0.0625, 0.03125]).cuda()[:r.shape[2]]
-    if args.hard_t_fusion:
+    if args.hard_t_fusion or args.gate:
         # TODO (yue)
         loss = torch.sum(0 * r_loss)
     else:
@@ -703,7 +712,7 @@ def cal_eff(r):
 
     #TODO(yue) uniform loss
     if args.uniform_loss_weight > 1e-5:
-        if args.hard_t_fusion:
+        if args.hard_t_fusion or args.gate:
             # TODO (yue)
             uniform_loss = torch.sum(0 * r_loss)
         else:
@@ -832,6 +841,9 @@ def compute_every_losses(r, acc_loss, epoch):
 
 
 def elastic_list_print(l, limit=8):
+    if isinstance(l, str):
+        return l
+
     limit = min(limit, len(l))
     l_output = "[%s," % (",".join([str(x) for x in l[:limit//2]]))
     if l.shape[0] > limit:
@@ -859,10 +871,17 @@ def get_policy_usage_str(r_list, reso_dim):
     if args.hard_t_fusion and args.print_matrix:
         print_matrices([r_list[-1][0], r_list[-2][0], r_list[-3][0]])
 
-    printed_str=""
-    rs = np.concatenate(r_list, axis=0)
-
     gflops_vec, t_vec, tt_vec = get_gflops_t_tt_vector()
+    # TODO(yue)
+    if args.hard_t_fusion:
+        est_gflops = sum(gflops_vec)
+        return "HARD_T_FUSION: %.4f" % (est_gflops), est_gflops
+    if args.gate:
+        est_gflops = sum(gflops_vec)
+        return "gatenet(TODO): %.4f" % (est_gflops), est_gflops
+
+    printed_str = ""
+    rs = np.concatenate(r_list, axis=0)
 
     tmp_cnt = [np.sum(rs[:, :, iii] == 1) for iii in range(rs.shape[2])]
 
@@ -877,12 +896,6 @@ def get_policy_usage_str(r_list, reso_dim):
 
     used_model_list=[]
     reso_list=[]
-
-    # TODO(yue)
-    if args.hard_t_fusion:
-        est_gflops = sum(gflops_vec)
-        return "HARD_T_FUSION: %.4f"%(est_gflops), est_gflops
-
 
     if args.dmy:
         for fc_i in range(len(args.num_filters_list)):
@@ -1058,7 +1071,8 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
         end = time.time()
 
         if use_ada_framework:
-            r_list.append(r.detach().cpu().numpy())
+            if not args.gate:
+                r_list.append(r.detach().cpu().numpy())
 
         if i % args.print_freq == 0:
             print_output = ('Epoch:[{0:02d}][{1:03d}/{2:03d}] '
@@ -1073,6 +1087,8 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
             if use_ada_framework:
                 if args.hard_t_fusion:
                     roh_r = r[-1, 0, :].detach().cpu().numpy()
+                elif args.gate:
+                    roh_r = "TODOTODO"
                 else:
                     roh_r = reverse_onehot(r[-1, :, :].detach().cpu().numpy())
                 print_output += ' a {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
@@ -1111,6 +1127,8 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     all_targets = []
     all_all_preds=[]
 
+    i_dont_need_bb = any([not use_ada_framework, args.boost, args.dhs, args.gate, args.hard_t_fusion])
+
     if use_ada_framework:
         tau = get_current_temperature(epoch)
         alosses, elosses = get_average_meters(2)
@@ -1124,7 +1142,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
         else:
             iter_list = args.backbone_list
 
-        if args.boost == False and args.dhs == False and args.hard_t_fusion == False:
+        if not i_dont_need_bb:
             all_bb_results = [[] for _ in range(len(iter_list))]
             if args.policy_also_backbone:
                 all_bb_results.append([])
@@ -1197,7 +1215,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
             all_results.append(output)
             all_targets.append(target)
 
-            if use_ada_framework and args.boost == False and args.dhs == False and args.hard_t_fusion == False:
+            if not i_dont_need_bb:
                 for bb_i in range(len(all_bb_results)):
                     all_bb_results[bb_i].append(base_outs[:, bb_i])
 
@@ -1225,7 +1243,8 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
             batch_time.update(time.time() - end)
             end = time.time()
             if use_ada_framework:
-                r_list.append(r.cpu().numpy())
+                if not args.gate:
+                    r_list.append(r.cpu().numpy())
                 if args.save_meta:
                     name_list += input_tuple[-3]
                     indices_list.append(input_tuple[-2])
@@ -1241,6 +1260,8 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                 if use_ada_framework:
                     if args.hard_t_fusion:
                         roh_r = r[-1, 0, :].detach().cpu().numpy()
+                    elif args.gate:
+                        roh_r = "TODOTODO"
                     else:
                         roh_r = reverse_onehot(r[-1, :, :].cpu().numpy())
 
@@ -1272,7 +1293,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
               .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses))
 
-    if use_ada_framework and args.boost == False and args.dhs == False and args.hard_t_fusion == False:
+    if not i_dont_need_bb:
         bbmmaps = []
         bbprec1s = []
         all_targets_cpu=torch.cat(all_targets, 0).cpu()

@@ -12,6 +12,7 @@ from torch.nn.utils import clip_grad_norm_
 
 from ops.dataset import TSNDataSet
 from ops.models_ada import TSN_Ada
+from ops.models_gate import TSN_Gate
 from ops.transforms import *
 from opts import parser
 from ops import dataset_config
@@ -201,19 +202,20 @@ def main():
     if use_ada_framework:
         init_gflops_table()
 
-    # if args.ada_reso_skip:
-    MODEL_NAME = TSN_Ada
-    model = MODEL_NAME(num_class, args.num_segments,
-                base_model=args.arch,
-                consensus_type=args.consensus_type,
-                dropout=args.dropout,
-                partial_bn=not args.no_partialbn,
-                pretrain=args.pretrain,
-                is_shift=args.shift, shift_div=args.shift_div, shift_place=args.shift_place,
-                fc_lr5=not (args.tune_from and args.dataset in args.tune_from),
-                temporal_pool=args.temporal_pool,
-                non_local=args.non_local,
-                args = args)
+    if args.gate:
+        model = TSN_Gate(num_class, args.num_segments, args=args)
+    else:
+        model = TSN_Ada(num_class, args.num_segments,
+                    base_model=args.arch,
+                    consensus_type=args.consensus_type,
+                    dropout=args.dropout,
+                    partial_bn=not args.no_partialbn,
+                    pretrain=args.pretrain,
+                    is_shift=args.shift, shift_div=args.shift_div, shift_place=args.shift_place,
+                    fc_lr5=not (args.tune_from and args.dataset in args.tune_from),
+                    temporal_pool=args.temporal_pool,
+                    non_local=args.non_local,
+                    args = args)
 
     crop_size = model.crop_size
     scale_size = model.scale_size

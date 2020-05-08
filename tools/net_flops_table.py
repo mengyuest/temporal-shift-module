@@ -106,6 +106,7 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
     elif "gatenet" in model_name:
         model = getattr(ops.gatenet, model_name)(pretrained=False, args=args)
         last_layer = "fc"
+        # print(model.count_flops((1, 1, 3, 224, 224)))
     elif "msdnet" in model_name:
         model = getattr(ops.msdnet, "MSDNet")(default_signal = default_signal)
     elif "mernet" in model_name:

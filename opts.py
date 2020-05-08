@@ -284,13 +284,13 @@ parser.add_argument('--gate_all_zero_policy', action='store_true')
 parser.add_argument('--gate_random_hard_policy', action='store_true')
 parser.add_argument('--gate_random_soft_policy', action='store_true')
 
-
-parser.add_argument('--gate_use_attention', action='store_true')
 parser.add_argument('--gate_gumbel_sigmoid', action='store_true')
 parser.add_argument('--gate_gumbel_softmax', action='store_true')
 parser.add_argument('--gate_gumbel_use_soft', action='store_true')
 parser.add_argument('--gate_sem_hash', action='store_true')
+parser.add_argument('--gate_tanh', action='store_true')
 parser.add_argument('--gate_hard_concrete', action='store_true')
 
 parser.add_argument('--gate_print_policy', action='store_true')
-
+parser.add_argument('--print_statistics', action='store_true')
+parser.add_argument('--num_class', default=200, type=int)

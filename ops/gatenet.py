@@ -8,7 +8,6 @@ from torch.nn.init import normal_, constant_
 
 __all__ = ['GateNet', 'gatenet18', 'gatenet34', 'gatenet50', 'gatenet101', 'gatenet152']
 
-
 model_urls = {
     'gatenet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
     'gatenet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
@@ -16,6 +15,7 @@ model_urls = {
     'gatenet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
     'gatenet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth'
 }
+
 
 def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
     """3x3 convolution with padding"""
@@ -27,10 +27,61 @@ def conv1x1(in_planes, out_planes, stride=1):
     """1x1 convolution"""
     return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
+def list_sum(obj):
+    if isinstance(obj, list):
+        if len(obj)==0:
+            return 0
+        else:
+            return sum(list_sum(x) for x in obj)
+    else:
+        return obj
+
+def product(tuple1):
+    """Calculates the product of a tuple"""
+    prod = 1
+    for x in tuple1:
+        prod = prod * x
+    return prod
+
+
+def count_conv2d_flops(input_data_shape, conv):
+    n, c_in, h_in, w_in = input_data_shape
+    h_out = (h_in + 2 * conv.padding[0] - conv.dilation[0] * (conv.kernel_size[0] - 1) - 1) // conv.stride[0] + 1
+    w_out = (w_in + 2 * conv.padding[1] - conv.dilation[1] * (conv.kernel_size[1] - 1) - 1) // conv.stride[1] + 1
+    c_out = conv.out_channels
+    bias = 1 if conv.bias is not None else 0
+    # print("h:%d->%d"%(h_in,h_out))
+    # print("c:%d->%d"%(c_in,c_out))
+    flops = n * c_out * h_out * w_out * (c_in // conv.groups * conv.kernel_size[0] * conv.kernel_size[1] + bias)
+    # print("flops",flops)
+    return flops, (n, c_out, h_out, w_out)
+
+
+def count_bn_flops(input_data_shape):
+    flops = product(input_data_shape) * 2
+    output_data_shape = input_data_shape
+    return flops, output_data_shape
+
+
+def count_relu_flops(input_data_shape):
+    flops = product(input_data_shape) * 1
+    output_data_shape = input_data_shape
+    return flops, output_data_shape
+
+# def count_max_pool(input_data_shape, maxpool):
+#     n, c_in, h_in, w_in = input_data_shape
+#     h_out = h_in
+#     output_data_shape = n, c_out, h_out, w_out
+
+def count_fc_flops(input_data_shape, fc):
+    output_data_shape = input_data_shape[:-1] + (fc.out_features, )
+    flops = product(output_data_shape) * (fc.in_features + 1)
+    return flops, output_data_shape
+
 
 def gumbel_sigmoid(logits, tau=1, hard=False):
     U = torch.empty_like(logits).uniform_()
-    L = torch.log(U)-torch.log(1-U) # L(U)=logU−log(1−U)
+    L = torch.log(U) - torch.log(1 - U)  # L(U)=logU−log(1−U)
     gumbels = (logits + L) / tau  # ~Gumbel(logits,tau)
     y_soft = gumbels.sigmoid()
 
@@ -45,6 +96,7 @@ def gumbel_sigmoid(logits, tau=1, hard=False):
         # Reparametrization trick.
         ret = y_soft
     return ret
+
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -78,6 +130,15 @@ class BasicBlock(nn.Module):
             constant_(self.gate_fc0.bias, 0)
             normal_(self.gate_fc1.weight, 0, 0.001)
             constant_(self.gate_fc1.bias, 0)
+
+    def count_flops(self, input_data_shape, **kwargs):
+        conv1_flops, conv1_out_shape = count_conv2d_flops(input_data_shape, self.conv1)
+        conv2_flops, conv2_out_shape = count_conv2d_flops(conv1_out_shape, self.conv2)
+        if self.downsample0 is not None:
+            downsample0_flops, _ = count_conv2d_flops(input_data_shape, self.downsample0)
+        else:
+            downsample0_flops = 0
+        return [conv1_flops, conv2_flops, downsample0_flops], conv2_out_shape
 
     def forward(self, x, **kwargs):
         identity = x
@@ -119,7 +180,8 @@ class BasicBlock(nn.Module):
                 print(mask[-1, :max(1, self.mask_dim // 64)])
                 print()
             out = out * mask.unsqueeze(-1).unsqueeze(-1)
-
+        else:
+            mask = None
         out = self.conv2(out)
         out = self.bn2(out)
 
@@ -129,7 +191,7 @@ class BasicBlock(nn.Module):
         out += identity
         out = self.relu(out)
 
-        return out
+        return out, mask
 
 
 class Bottleneck(nn.Module):
@@ -261,7 +323,7 @@ class GateNet(nn.Module):
                 elif isinstance(m, BasicBlock):
                     # for bn in m.bn2s:
                     #     nn.init.constant_(bn.weight, 0)
-                    nn.init.constant_(m.bn2.weight,0)
+                    nn.init.constant_(m.bn2.weight, 0)
 
     def _make_layer(self, block, planes_list_0, blocks, stride=1, dilate=False):
         norm_layer = self._norm_layer
@@ -302,9 +364,38 @@ class GateNet(nn.Module):
     #
     #     return x
 
+    def count_flops(self, input_data_shape, **kwargs):
+        flops_list = []
+        _B, _T, _C, _H, _W = input_data_shape
+        input2d_shape = _B*_T, _C, _H, _W
+        # for t in range(_T):
+        #     flops, data_shape = count_conv2d_flops(input2d_shape, self.conv1)
+        #     flops_sum += flops
+        #
+        #     flops ,data_shape = count_relu_flops()
+        #
+        #     idx=0
+        #     for li, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
+        #         for bi, block in enumerate(layers):
+        #             flops, data_shape = block.count_flops(data_shape, masks[idx], **kwargs)
+        #             flops_sum += flops
+        #             idx += 1
+        #
+        #     flops_sum += count_fc_flops(input_data, self.fc)
+
+        flops_conv1, data_shape = count_conv2d_flops(input2d_shape, self.conv1)
+        data_shape = data_shape[0], data_shape[1], data_shape[2]//2, data_shape[3]//2 #TODO pooling
+        for li, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
+            for bi, block in enumerate(layers):
+                flops, data_shape = block.count_flops(data_shape, **kwargs)
+                flops_list.append(flops)
+        # print(list_sum(flops_list)+flops_conv1+512*200)
+        # print(flops_list)
+        return flops_list
+
     def forward(self, input_data, **kwargs):
 
-        #TODO x.shape
+        # TODO x.shape
         _B, _T, _C, _H, _W = input_data.shape
         out_list = []
 
@@ -319,31 +410,40 @@ class GateNet(nn.Module):
             kwargs["tau"] = 1
             kwargs["inline_test"] = True
 
+        mask_stack_list = []
+        for _, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
+            for _, block in enumerate(layers):
+                mask_stack_list.append([])
+
         for t in range(_T):
             x = self.conv1(input_data[:, t])
             x = self.bn1(x)
             x = self.relu(x)
             x = self.maxpool(x)
 
+            idx = 0
             for li, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
                 for bi, block in enumerate(layers):
-                    x = block(x, **kwargs)
+                    x, mask = block(x, **kwargs)
                     # history_rack[li][bi] = new_history
+                    mask_stack_list[idx].append(mask)
+                    idx += 1
+
             x = self.avgpool(x)
             x = torch.flatten(x, 1)
             out = self.fc(x)
             out_list.append(out)
             # if t == 0:
             #     mode_op += 1
-        return torch.stack(out_list, dim=1)
+        return torch.stack(out_list, dim=1), mask_stack_list
 
 
 def _gatenet(arch, block, layers, pretrained, progress, **kwargs):
     model = GateNet(block, layers, **kwargs)
     if pretrained:
         pretrained_dict = load_state_dict_from_url(model_urls[arch],
-                                              progress=progress)
-        #TODO okay now let's load ResNet to DResNet
+                                                   progress=progress)
+        # TODO okay now let's load ResNet to DResNet
         model_dict = model.state_dict()
         kvs_to_add = []
         old_to_new_pairs = []
@@ -351,7 +451,7 @@ def _gatenet(arch, block, layers, pretrained, progress, **kwargs):
         for k in pretrained_dict:
             # TODO layer4.0.downsample.X.weight -> layer4.0.downsampleX.weight
             if "downsample.0" in k:
-                old_to_new_pairs.append((k, k.replace("downsample.0",  "downsample0")))
+                old_to_new_pairs.append((k, k.replace("downsample.0", "downsample0")))
             elif "downsample.1" in k:
                 old_to_new_pairs.append((k, k.replace("downsample.1", "downsample1")))
 

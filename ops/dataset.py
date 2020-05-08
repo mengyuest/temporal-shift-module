@@ -226,7 +226,9 @@ class TSNDataSet(data.Dataset):
             elif self.center_crop:
                 rescaled = [self.center_crop_proc(process_data, (x, x)) for x in self.reso_list[1:]]
             else:
-                rescaled = [self.rescale_proc(process_data, (x,x)) for xi,x in enumerate(self.reso_list[1:]) if (self.ada_crop_list[xi+1]==1 or xi+1==self.policy_input_offset)]
+                rescaled = [self.rescale_proc(process_data, (x, x)) for x in self.reso_list[1:]]
+                # rescaled = [self.rescale_proc(process_data, (x, x)) for xi, x in enumerate(self.reso_list[1:])
+                #             if (self.ada_crop_list[xi+1]==1 or xi+1 == self.policy_input_offset)]
             return_items = return_items + rescaled
             if self.save_meta:
                 return_items = return_items + [record.path] + [indices] #[torch.tensor(indices)]

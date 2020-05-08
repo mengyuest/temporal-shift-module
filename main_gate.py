@@ -1,0 +1,684 @@
+import warnings
+warnings.filterwarnings("ignore")
+
+import os
+import sys
+import time
+import torch.nn.parallel
+import torch.nn as nn
+import torch.backends.cudnn as cudnn
+import torch.optim
+from torch.nn.utils import clip_grad_norm_
+
+from ops.dataset import TSNDataSet
+from ops.models_gate import TSN_Gate
+from ops.transforms import *
+from ops import dataset_config
+from ops.utils import AverageMeter, accuracy, cal_map, Recorder
+from opts import parser
+
+from tensorboardX import SummaryWriter
+from ops.my_logger import Logger
+
+from tools.net_flops_table import get_gflops_params, feat_dim_dict
+
+# TODO(yue)
+import common
+from os.path import join as ospj
+
+
+best_prec1 = 0
+gflops = 0
+gflops_list = []
+test_mode = None
+def reset_global_variables():
+    global best_prec1, gflops, gflops_list, test_mode
+    best_prec1 = 0
+    test_mode = None
+
+def load_to_sd(model_path):
+    if ".pth" in model_path:
+        if os.path.exists(common.PRETRAIN_PATH+ "/" + model_path):
+            return torch.load(common.PRETRAIN_PATH+ "/" + model_path)['state_dict']
+        elif os.path.exists(common.EXPS_PATH+ "/" + model_path):
+            return torch.load(common.EXPS_PATH + "/" + model_path)['state_dict']
+        else:
+            exit("Cannot find model, exit")
+    else:
+        print("skip loading")
+        return {}
+
+def main():
+    t_start = time.time()
+    global args, best_prec1
+
+    set_random_seed(args.random_seed)
+
+    logger = Logger()
+    sys.stdout = logger
+
+    args.num_class, args.train_list, args.val_list, args.root_path, prefix = dataset_config.return_dataset(args.dataset)
+
+    model = TSN_Gate(args=args)
+    init_gflops_table(model)
+
+    if args.no_optim:
+        policies = [{'params': model.parameters(), 'lr_mult': 1, 'decay_mult': 1, 'name': "parameters"}]
+    else:
+        policies = model.get_optim_policies()
+
+    model = torch.nn.DataParallel(model, device_ids=args.gpus).cuda()
+
+    handle_frozen_things_in(model)
+
+    optimizer = torch.optim.SGD(policies, args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+
+    if args.resume:
+        if os.path.isfile(args.resume):
+            #TODO s
+            print(("=> loading checkpoint '{}'".format(args.resume)))
+            checkpoint = torch.load(args.resume)
+            args.start_epoch = checkpoint['epoch']
+            best_prec1 = checkpoint['best_prec1']
+            model.load_state_dict(checkpoint['state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            print(("=> loaded checkpoint '{}' (epoch {})".format(args.resume, checkpoint['epoch'])))
+        else:
+            print(("=> no checkpoint found at '{}'".format(args.resume)))
+
+    # TODO(yue) loading pretrained weights
+    if test_mode or args.base_pretrained_from != "":
+        if test_mode:
+            the_model_path = ospj(args.test_from, "models", "ckpt.best.pth.tar")
+        else:
+            the_model_path = args.base_pretrained_from
+        model_dict = model.state_dict()
+        sd = load_to_sd(the_model_path)
+        model_dict.update(sd)
+        model.load_state_dict(model_dict)
+
+    cudnn.benchmark = True
+
+    train_loader, val_loader = get_data_loaders(model, prefix)
+
+    # define loss function (criterion) and optimizer
+    criterion = torch.nn.CrossEntropyLoss().cuda()
+
+    exp_full_path = setup_log_directory(logger, args.exp_header)
+
+    if not test_mode:
+        with open(os.path.join(exp_full_path, 'args.txt'), 'w') as f:
+            f.write(str(args))
+    tf_writer = SummaryWriter(log_dir=exp_full_path)
+
+    # TODO(yue)
+    map_record, mmap_record, prec_record = get_recorders(3)
+
+    best_train_usage_str = None
+    best_val_usage_str = None
+    best_tau = args.init_tau
+    val_gflops=-1
+
+    for epoch in range(args.start_epoch, args.epochs):
+        # train for one epoch
+        if not args.skip_training:
+            set_random_seed(args.random_seed + epoch)
+            adjust_learning_rate(optimizer, epoch, args.lr_type, args.lr_steps)
+            train_usage_str = train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_path, tf_writer)
+        else:
+            train_usage_str = "No training usage stats (Eval Mode)"
+
+        # evaluate on validation set
+        if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
+            set_random_seed(args.random_seed)
+            mAP, mmAP, prec1, val_usage_str, val_gflops = validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writer)
+
+            # remember best prec@1 and save checkpoint
+            map_record.update(mAP)
+            mmap_record.update(mmAP)
+            prec_record.update(prec1)
+
+            if mmap_record.is_current_best():
+                best_train_usage_str = train_usage_str
+                best_val_usage_str = val_usage_str
+
+            print('Best mAP: %.3f (epoch=%d)\t\tBest mmAP: %.3f(epoch=%d)\t\tBest Prec@1: %.3f (epoch=%d)' % (
+                map_record.best_val, map_record.best_at,
+                mmap_record.best_val, mmap_record.best_at,
+                prec_record.best_val, prec_record.best_at))
+
+            if args.skip_training:
+                break
+
+            tf_writer.add_scalar('acc/test_top1_best', prec_record.best_val, epoch)
+            save_checkpoint({
+                'epoch': epoch + 1,
+                'arch': args.arch,
+                'state_dict': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'best_prec1': prec_record.best_val,
+            }, mmap_record.is_current_best(), exp_full_path)
+
+            if mmap_record.is_current_best():
+                best_tau = get_current_temperature(epoch)
+
+    if not test_mode:
+        print("Best train usage:%s\nBest val usage:%s" % (best_train_usage_str, best_val_usage_str))
+
+    print("Finished in %.4f seconds\n"%(time.time() - t_start))
+
+    if test_mode:
+        os.rename(logger._log_path, ospj(logger._log_dir_name, logger._log_file_name[:-4] +
+                                         "_mm_%.2f_a_%.2f_f_%.4f.txt"%(mmap_record.best_val, prec_record.best_val,
+                                                                       val_gflops)))
+
+def set_random_seed(the_seed):
+    if args.random_seed >= 0:
+        np.random.seed(the_seed)
+        torch.manual_seed(the_seed)
+
+
+def init_gflops_table(model):
+    global gflops, gflops_list
+    gflops = get_gflops_params(args.backbone_list[0], args.reso_list[0], args.num_class, -1, args=args)[0]
+
+    gflops_list = model.base_model_list[0].count_flops((1, 1, 3, args.reso_list[0], args.reso_list[0]))
+    print("Network@%d (%.4f GFLOPS) has %d blocks" % (args.reso_list[0], gflops, len(gflops_list)))
+    for i, block in enumerate(gflops_list):
+        print("block", i, ",".join(["%.4f GFLOPS"%(x/1e9) for x in block]))
+
+def compute_gflops_by_mask(mask_tensor_list):
+    #TODO:   -> conv1 -> conv2 ->     // inside the block
+    #TODO:    C0   -    C1   -    C2  // channels proc.
+    #TODO:  C1 = s1 + s2 + s3         // current / history / zero out
+    #TODO: saving = s2/C1 * [FLOPS(conv1)] + s3/C1 * [FLOPS(conv1) + FLOPS(conv2)]
+    s2 = [0 for _ in mask_tensor_list]
+    s3 = [torch.mean(mask.detach().cpu()).item() for mask in mask_tensor_list]
+    # print("s2",s2)
+    # print("s3",s3)
+    s2_savings = sum([s2[i] * gflops_list[i][0] for i in range(len(gflops_list))])
+    # print("s2_savings", s2_savings/1e9)
+
+    s3_savings = sum([s3[i] * (gflops_list[i][0] + gflops_list[i][1]) for i in range(len(gflops_list))])
+    # print("s3_savings", s3_savings/1e9)
+    real_gflops = gflops - s2_savings/1e9 - s3_savings/1e9
+    return real_gflops
+
+def print_mask_statistics(mask_tensor_list, num_segments):
+    # overall
+    # t=overall, 0, mid, end
+    #     1. sparsity (blockwise)
+    #     2. variance (blockwise)
+    for b_i in [None, 0]:
+        print("For example(b=0):" if b_i == 0 else "Overall:")
+        b_start = b_i if b_i is not None else 0
+        b_end = b_i+1 if b_i is not None else mask_tensor_list[0].shape[0]
+        for t_i in [None, 0, num_segments//2, num_segments-1]:
+            t_start = t_i if t_i is not None else 0
+            t_end = t_i + 1 if t_i is not None else mask_tensor_list[0].shape[1]
+            s_list = []
+            d_list = []
+            for block_i in range(len(mask_tensor_list)):
+                s_list.append(torch.mean(torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end], dim=-1)))
+                d_list.append(torch.std(torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end], dim=-1), unbiased=not(b_i==0)))
+
+            t = "%3d"%t_i if t_i is not None else "all"
+            print("(t=%s)usage: " % t, " ".join(["%.2f (^%.4f) " % (s, d) for s, d in zip(s_list, d_list)]))
+    print()
+
+def cal_eff(mask_tensor_list):
+    each_losses=[]
+    # TODO r N * T * (#reso+#policy+#skips)
+    gflops_vec = compute_gflops_by_mask(mask_tensor_list)
+    r_loss = torch.tensor(gflops_vec).cuda()
+    loss = torch.sum(0 * r_loss)
+    each_losses.append(loss.detach().cpu().item())
+    return loss, each_losses
+
+
+def reverse_onehot(a):
+    try:
+        return np.array([np.where(r > 0.5)[0][0] for r in a])
+    except Exception as e:
+        print("error stack:",e)
+        print(a)
+        for i, r in enumerate(a):
+            print(i, r)
+        return None
+
+
+def compute_acc_eff_loss_with_weights(acc_loss, eff_loss, each_losses, epoch):
+    if epoch > args.eff_loss_after:
+        acc_weight = args.accuracy_weight
+        eff_weight = args.efficency_weight
+    else:
+        acc_weight = 1.0
+        eff_weight = 0.0
+    return acc_loss * acc_weight, eff_loss * eff_weight, [x * eff_weight for x in each_losses]
+
+
+def compute_every_losses(r, acc_loss, epoch):
+    eff_loss, each_losses = cal_eff(r)
+    acc_loss, eff_loss, each_losses = compute_acc_eff_loss_with_weights(acc_loss, eff_loss, each_losses, epoch)
+    return acc_loss, eff_loss, each_losses
+
+
+def elastic_list_print(l, limit=8):
+    if isinstance(l, str):
+        return l
+    limit = min(limit, len(l))
+    l_output = "[%s," % (",".join([str(x) for x in l[:limit//2]]))
+    if l.shape[0] > limit:
+        l_output += "..."
+    l_output += "%s]" % (",".join([str(x) for x in l[-limit//2:]]))
+    return l_output
+
+
+def compute_exp_decay_tau(epoch):
+    return args.init_tau * np.exp(args.exp_decay_factor * epoch)
+
+
+def get_policy_usage_str(mask_stack):
+    est_gflops = compute_gflops_by_mask(mask_stack)
+    return "Equivalent GFLOPS: %.4f" % (est_gflops), est_gflops
+
+
+def extra_each_loss_str(each_terms):
+    loss_str_list = ["gf"]
+    s = ""
+    if args.uniform_loss_weight > 1e-5:
+        loss_str_list.append("u")
+    if args.head_loss_weight > 1e-5:
+        loss_str_list.append("h")
+    if args.frames_loss_weight > 1e-5:
+        loss_str_list.append("f")
+    for i in range(len(loss_str_list)):
+        s += " %s:(%.4f)" % (loss_str_list[i], each_terms[i].avg)
+    return s
+
+
+def get_current_temperature(num_epoch):
+    if args.exp_decay:
+        tau = compute_exp_decay_tau(num_epoch)
+    else:
+        tau = args.init_tau
+    return tau
+
+
+def get_recorders(number):
+    return [Recorder() for _ in range(number)]
+
+
+def get_average_meters(number):
+    return [AverageMeter() for _ in range(number)]
+
+
+def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_path, tf_writer):
+    batch_time, data_time, losses, top1, top5 = get_average_meters(5)
+    alosses, elosses = get_average_meters(2)
+    each_terms = get_average_meters(10)
+
+    mask_stack_list_list = [[] for _ in gflops_list]
+
+    tau = get_current_temperature(epoch)
+    r_list = []
+
+    model.module.partialBN(not args.no_partialbn)
+
+    # switch to train mode
+    model.train()
+
+    end = time.time()
+    print("#%s# lr:%.4f\ttau:%.4f"%(args.exp_header, optimizer.param_groups[-1]['lr'] * 0.1, tau))
+    for i, input_tuple in enumerate(train_loader):
+        data_time.update(time.time() - end)
+
+        # input and target
+        batchsize = input_tuple[0].size(0)
+        input_var_list=[torch.autograd.Variable(input_item) for input_item in input_tuple[:-1]]
+        target = input_tuple[-1].cuda()
+        target_var = torch.autograd.Variable(target)
+
+        # model forward function
+        output, mask_stack_list, feat_outs, base_outs = model(input=input_var_list, tau=tau)
+
+        # gather masks
+        for block_i, mask_stack in enumerate(mask_stack_list):
+            mask_stack_list_list[block_i].append(mask_stack)
+
+        # measure losses and accuracy
+        acc_loss = criterion(output, target_var[:, 0])
+        acc_loss, eff_loss, each_losses = compute_every_losses(mask_stack_list, acc_loss, epoch)
+        loss = acc_loss + eff_loss
+        prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
+
+        # record losses and accuracy
+        alosses.update(acc_loss.item(), batchsize)
+        elosses.update(eff_loss.item(), batchsize)
+        for l_i, each_loss in enumerate(each_losses):
+            each_terms[l_i].update(each_loss, batchsize)
+        losses.update(loss.item(), batchsize)
+        top1.update(prec1.item(), batchsize)
+        top5.update(prec5.item(), batchsize)
+
+        # compute gradient and do SGD step
+        loss.backward()
+        if args.clip_gradient is not None:
+            clip_grad_norm_(model.parameters(), args.clip_gradient)
+        optimizer.step()
+        optimizer.zero_grad()
+
+        # measure elapsed time
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+        # logging
+        if i % args.print_freq == 0:
+            print_output = ('Epoch:[{0:02d}][{1:03d}/{2:03d}] '
+                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f}) '
+                      '{data_time.val:.3f} ({data_time.avg:.3f})\t'
+                      'Loss {loss.val:.4f} ({loss.avg:.4f}) '
+                      'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) '
+                      'Prec@5 {top5.val:.3f} ({top5.avg:.3f})\t'.format(
+                epoch, i, len(train_loader), batch_time=batch_time,
+                data_time=data_time, loss=losses, top1=top1, top5=top5))  # TODO
+
+            roh_r = "TODOTODO"
+            print_output += ' a {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
+                aloss = alosses, eloss =elosses, r=elastic_list_print(roh_r)
+            )
+            print_output += extra_each_loss_str(each_terms)
+            print(print_output)
+
+    for block_i in range(len(mask_stack_list_list)):
+        mask_stack_list_list[block_i] = torch.cat(mask_stack_list_list[block_i], dim=0)
+
+    usage_str, gflops = get_policy_usage_str(mask_stack_list_list)
+    print(usage_str)
+    if args.print_statistics:
+        print_mask_statistics(mask_stack_list_list, args.num_segments)
+
+    if tf_writer is not None:
+        tf_writer.add_scalar('loss/train', losses.avg, epoch)
+        tf_writer.add_scalar('acc/train_top1', top1.avg, epoch)
+        tf_writer.add_scalar('acc/train_top5', top5.avg, epoch)
+        tf_writer.add_scalar('lr', optimizer.param_groups[-1]['lr'], epoch)
+
+    return usage_str
+
+
+def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writer=None):
+    batch_time, losses, top1, top5 = get_average_meters(4)
+    # TODO(yue)
+    all_results = []
+    all_targets = []
+
+    tau = get_current_temperature(epoch)
+    alosses, elosses = get_average_meters(2)
+
+    mask_stack_list_list = [[] for _ in gflops_list]
+
+    each_terms = get_average_meters(10)
+    r_list = []
+
+    # switch to evaluate mode
+    model.eval()
+
+    end = time.time()
+    with torch.no_grad():
+        for i, input_tuple in enumerate(val_loader):
+            # input and target
+            batchsize = input_tuple[0].size(0)
+            target = input_tuple[-1].cuda()
+
+            # model forward function
+            output, mask_stack_list, feat_outs, base_outs = model(input=input_tuple[:-1], tau=tau)
+
+            # gather masks
+            for block_i, mask_stack in enumerate(mask_stack_list):
+                mask_stack_list_list[block_i].append(mask_stack)
+
+            # measure losses, accuracy and predictions
+            acc_loss = criterion(output, target[:, 0])
+            acc_loss, eff_loss, each_losses = compute_every_losses(mask_stack_list, acc_loss, epoch)
+            loss = acc_loss + eff_loss
+            prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
+            all_results.append(output)
+            all_targets.append(target)
+
+            # record loss and accuracy
+            alosses.update(acc_loss.item(), batchsize)
+            elosses.update(eff_loss.item(), batchsize)
+            for l_i, each_loss in enumerate(each_losses):
+                each_terms[l_i].update(each_loss, batchsize)
+            losses.update(loss.item(), batchsize)
+            top1.update(prec1.item(), batchsize)
+            top5.update(prec5.item(), batchsize)
+
+            # measure elapsed time
+            batch_time.update(time.time() - end)
+            end = time.time()
+
+            if i % args.print_freq == 0:
+                print_output = ('Test: [{0:03d}/{1:03d}] '
+                          'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                          'Loss {loss.val:.4f} ({loss.avg:.4f})'
+                          'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) '
+                          'Prec@5 {top5.val:.3f} ({top5.avg:.3f})\t'.format(
+                    i, len(val_loader), batch_time=batch_time, loss=losses,
+                    top1=top1, top5=top5))
+
+                roh_r = "TODOTODO"
+                print_output += ' a {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
+                    aloss=alosses, eloss=elosses, r=elastic_list_print(roh_r)
+                )
+                print_output += extra_each_loss_str(each_terms)
+                print(print_output)
+
+    mAP,_ = cal_map(torch.cat(all_results,0).cpu(), torch.cat(all_targets,0)[:,0:1].cpu()) # TODO(yue) single-label mAP
+    mmAP, _ = cal_map(torch.cat(all_results, 0).cpu(), torch.cat(all_targets, 0).cpu())    # TODO(yue)  multi-label mAP
+    print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
+              .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses))
+
+    for block_i in range(len(mask_stack_list_list)):
+        mask_stack_list_list[block_i] = torch.cat(mask_stack_list_list[block_i], dim=0)
+
+    usage_str, gflops = get_policy_usage_str(mask_stack_list_list)
+    print(usage_str)
+    if args.print_statistics:
+        print_mask_statistics(mask_stack_list_list, args.num_segments)
+
+    if tf_writer is not None:
+        tf_writer.add_scalar('loss/test', losses.avg, epoch)
+        tf_writer.add_scalar('acc/test_top1', top1.avg, epoch)
+        tf_writer.add_scalar('acc/test_top5', top5.avg, epoch)
+
+    return mAP, mmAP, top1.avg, usage_str, gflops
+
+
+def save_checkpoint(state, is_best, exp_full_path):
+    if is_best:
+        torch.save(state, '%s/models/ckpt.best.pth.tar' % (exp_full_path))
+
+
+def adjust_learning_rate(optimizer, epoch, lr_type, lr_steps):
+    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
+    if lr_type == 'step':
+        decay = 0.1 ** (sum(epoch >= np.array(lr_steps)))
+        lr = args.lr * decay
+        decay = args.weight_decay
+    elif lr_type == 'cos':
+        import math
+        lr = 0.5 * args.lr * (1 + math.cos(math.pi * epoch / args.epochs))
+        decay = args.weight_decay
+    else:
+        raise NotImplementedError
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr * param_group['lr_mult']
+        param_group['weight_decay'] = decay * param_group['decay_mult']
+
+
+def setup_log_directory(logger, exp_header):
+
+    exp_full_name = "g%s_%s"%(logger._timestr, exp_header)
+    if test_mode:
+        exp_full_path = ospj(common.EXPS_PATH, args.test_from)
+    else:
+        exp_full_path = ospj(common.EXPS_PATH, exp_full_name)
+        os.makedirs(exp_full_path)
+        os.makedirs(ospj(exp_full_path,"models"))
+    logger.create_log(exp_full_path, test_mode, args.num_segments, args.batch_size, args.top_k)
+    return exp_full_path
+
+
+def shell():
+    global test_mode
+    test_mode = (args.test_from != "")
+    if test_mode: #TODO test mode
+        print("======== TEST MODE ========")
+        args.skip_training = True
+        #TODO(debug) try check batch size and init tau
+        if args.uno_time:
+            t_list = [args.num_segments]
+        elif args.many_times:
+            t_list = [4, 8, 16, 25, 32, 48, 64]
+        else:
+            t_list = [8, 16, 25]
+        bs_list = [args.batch_size, args.batch_size, args.batch_size//2+1, args.batch_size//4+1, args.batch_size//4+1, args.batch_size//8+1, args.batch_size//8+1]
+
+        for t_i, t in enumerate(t_list):
+            args.num_segments = t
+            args.batch_size = bs_list[t_i]
+            print("======== TEST t:%d bs:%d ========"%(t, bs_list[t_i]))
+            main()
+    else: #TODO normal mode
+        main()
+
+def get_data_loaders(model, prefix):
+    crop_size = model.module.crop_size
+    scale_size = model.module.scale_size
+    input_mean = model.module.input_mean
+    input_std = model.module.input_std
+
+    train_augmentation = model.module.get_augmentation(
+        flip=False if 'something' in args.dataset or 'jester' in args.dataset else True)
+
+    normalize = GroupNormalize(input_mean, input_std)
+    train_loader = torch.utils.data.DataLoader(
+        TSNDataSet(args.root_path, args.train_list, num_segments=args.num_segments,
+                   image_tmpl=prefix,
+                   transform=torchvision.transforms.Compose([
+                       train_augmentation,
+                       Stack(roll=False),
+                       ToTorchFormatTensor(div=True),
+                       normalize,
+                   ]), dense_sample=args.dense_sample,
+                   dataset=args.dataset,
+                   filelist_suffix=args.filelist_suffix,
+                   folder_suffix=args.folder_suffix,
+                   partial_fcvid_eval=args.partial_fcvid_eval,
+                   partial_ratio=args.partial_ratio,
+                   ada_reso_skip=args.ada_reso_skip,
+                   reso_list=args.reso_list,
+                   rescale_to=args.rescale_to,
+                   policy_input_offset=args.policy_input_offset,
+                   save_meta=args.save_meta),
+        batch_size=args.batch_size, shuffle=True,
+        num_workers=args.workers, pin_memory=True,
+        drop_last=True)  # prevent something not % n_GPU
+
+    val_loader = torch.utils.data.DataLoader(
+        TSNDataSet(args.root_path, args.val_list, num_segments=args.num_segments,
+                   image_tmpl=prefix,
+                   random_shift=False,
+                   transform=torchvision.transforms.Compose([
+                       GroupScale(int(scale_size)),
+                       GroupCenterCrop(crop_size),
+                       Stack(roll=False),
+                       ToTorchFormatTensor(div=True),
+                       normalize,
+                   ]), dense_sample=args.dense_sample,
+                   dataset=args.dataset,
+                   filelist_suffix=args.filelist_suffix,
+                   folder_suffix=args.folder_suffix,
+                   partial_fcvid_eval=args.partial_fcvid_eval,
+                   partial_ratio=args.partial_ratio,
+                   ada_reso_skip=args.ada_reso_skip,
+                   reso_list=args.reso_list,
+                   rescale_to=args.rescale_to,
+                   policy_input_offset=args.policy_input_offset,
+                   save_meta=args.save_meta
+                   ),
+        batch_size=args.batch_size, shuffle=False,
+        num_workers=args.workers, pin_memory=True)
+    return train_loader, val_loader
+
+def handle_frozen_things_in(model):
+    # TODO(yue) freeze some params in the policy + lstm layers
+    if args.freeze_policy:
+        for name, param in model.module.named_parameters():
+            if "lite_fc" in name or "lite_backbone" in name or "rnn" in name or "linear" in name:
+                param.requires_grad = False
+
+    if args.freeze_backbone:
+        for name, param in model.module.named_parameters():
+            if "base_model" in name:
+                param.requires_grad = False
+    if len(args.frozen_list) > 0:
+        for name, param in model.module.named_parameters():
+            for keyword in args.frozen_list:
+                if keyword[0] == "*":
+                    if keyword[-1] == "*":  # TODO middle
+                        if keyword[1:-1] in name:
+                            param.requires_grad = False
+                            print(keyword, "->", name, "frozen")
+                    else:  # TODO suffix
+                        if name.endswith(keyword[1:]):
+                            param.requires_grad = False
+                            print(keyword, "->", name, "frozen")
+                elif keyword[-1] == "*":  # TODO prefix
+                    if name.startswith(keyword[:-1]):
+                        param.requires_grad = False
+                        print(keyword, "->", name, "frozen")
+                else:  # TODO exact word
+                    if name == keyword:
+                        param.requires_grad = False
+                        print(keyword, "->", name, "frozen")
+        print("=" * 80)
+        for name, param in model.module.named_parameters():
+            print(param.requires_grad, "\t", name)
+
+    if len(args.frozen_layers) > 0:
+        for layer_idx in args.frozen_layers:
+            for name, param in model.module.named_parameters():
+                if layer_idx == 0:
+                    if "list.0.conv1" in name:
+                        param.requires_grad = False
+                        print(layer_idx, "->", name, "frozen")
+                else:
+                    if "list.0.layer%d" % layer_idx in name and ("conv" in name or "downsample.0" in name):
+                        param.requires_grad = False
+                        print(layer_idx, "->", name, "frozen")
+            if args.freeze_corr_bn:
+                for km in model.named_modules():
+                    k, m = km
+                    if layer_idx == 0:
+                        if "bn1" in k and "layer" not in k and isinstance(m, nn.BatchNorm2d):  # TODO(yue)
+                            m.eval()
+                            m.weight.requires_grad = False
+                            m.bias.requires_grad = False
+                            print(layer_idx, "->", k, "frozen batchnorm")
+                    else:
+                        if "layer%d" % (layer_idx) in k and isinstance(m, nn.BatchNorm2d):  # TODO(yue)
+                            m.eval()
+                            m.weight.requires_grad = False
+                            m.bias.requires_grad = False
+                            print(layer_idx, "->", k, "frozen batchnorm")
+
+        print("=" * 80)
+        for name, param in model.module.named_parameters():
+            print(param.requires_grad, "\t", name)
+
+if __name__ == '__main__':
+    args = parser.parse_args()
+    shell()

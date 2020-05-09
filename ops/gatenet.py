@@ -122,8 +122,14 @@ class BasicBlock(nn.Module):
 
         self.args = args
         if self.args.gate_local_policy:
-            oh_factor = 2 if self.args.gate_gumbel_softmax else 1
-            self.gate_fc0 = nn.Linear(inplanes, self.args.gate_hidden_dim)
+            if self.args.gate_history:
+                oh_factor = 3 if self.args.gate_gumbel_softmax else 1
+            else:
+                oh_factor = 2 if self.args.gate_gumbel_softmax else 1
+            fuse_factor = 1
+            if self.args.gate_history:
+                fuse_factor = 2 if self.args.fusion_type is "cat" else 1
+            self.gate_fc0 = nn.Linear(inplanes * fuse_factor, self.args.gate_hidden_dim)
             self.gate_fc1 = nn.Linear(self.args.gate_hidden_dim, planes * oh_factor)
             self.mask_dim = planes
             normal_(self.gate_fc0.weight, 0, 0.001)
@@ -140,7 +146,7 @@ class BasicBlock(nn.Module):
             downsample0_flops = 0
         return [conv1_flops, conv2_flops, downsample0_flops], conv2_out_shape
 
-    def forward(self, x, **kwargs):
+    def forward(self, x, h_vec, h_map, **kwargs):
         identity = x
 
         out = self.conv1(x)
@@ -149,39 +155,79 @@ class BasicBlock(nn.Module):
 
         # TODO generate channel mask using local policy
         # TODO how to do history-fusion? Fused from history feature map? Or using LSTM here?
+
+        adaptive_policy = not any([self.args.gate_all_zero_policy,
+                                   self.args.gate_all_one_policy,
+                                   self.args.gate_random_soft_policy,
+                                   self.args.gate_random_hard_policy])
+
+        mask = None
+        h_vec_out = None
+        h_map_out = None
+
+        if self.args.gate_history and h_map is None:  # TODO t=0
+            h_map = out
+
         if self.args.gate_local_policy:
-            if self.args.gate_gumbel_sigmoid:
+            factor = 3 if self.args.gate_history else 2
+            if adaptive_policy:
                 x_c = nn.AdaptiveAvgPool2d((1, 1))(x)
                 x_c = torch.flatten(x_c, 1)
+
+                if self.args.gate_history:
+                    if h_vec is None:  # TODO t=0
+                        h_vec = x_c
+                    if self.args.fusion_type == "cat":
+                        x_c = torch.cat([h_vec, x_c], dim=-1)
+                    elif self.args.fusion_type == "add":
+                        x_c = (x_c + h_vec) / 2
+                    else:
+                        exit("haven't implemented other vec fusion yet")
+                    h_vec_out = x_c[:, -1*h_vec.shape[-1]:]
+
                 x_c = self.gate_fc0(x_c)
                 x_c = self.gate_fc1(x_c)
-                mask = gumbel_sigmoid(logits=x_c, tau=kwargs["tau"], hard=not self.args.gate_gumbel_use_soft)
-            elif self.args.gate_gumbel_softmax:
-                x_c = nn.AdaptiveAvgPool2d((1, 1))(x)
-                x_c = torch.flatten(x_c, 1)
-                x_c = self.gate_fc0(x_c)
-                x_c = self.gate_fc1(x_c)
-                x_c2d = x_c.view(x.shape[0], self.mask_dim, 2)
-                x_c2d = torch.log(F.softmax(x_c2d, dim=2))
-                mask2d = F.gumbel_softmax(logits=x_c2d, tau=kwargs["tau"], hard=not self.args.gate_gumbel_use_soft)
-                mask = mask2d[:, :, 1]  # TODO: B*C*2
-            elif self.args.gate_all_zero_policy:
-                mask = torch.zeros(x.shape[0], self.mask_dim, device=x.device)
-            elif self.args.gate_all_one_policy:
-                mask = torch.ones(x.shape[0], self.mask_dim, device=x.device)
-            elif self.args.gate_random_soft_policy:
-                mask = torch.rand(x.shape[0], self.mask_dim, device=x.device)
-            elif self.args.gate_random_hard_policy:
-                tmp_value = torch.rand(x.shape[0], self.mask_dim, device=x.device)
-                mask = torch.zeros_like(tmp_value)
-                mask[torch.where(tmp_value > 0.5)] = 1
+
+                use_hard = not self.args.gate_gumbel_use_soft
+
+                if self.args.gate_history:
+                    if self.args.gate_gumbel_softmax:
+                        x_c2d = x_c.view(x.shape[0], self.mask_dim, 3)
+                        x_c2d = torch.log(F.softmax(x_c2d, dim=2))
+                        mask2d = F.gumbel_softmax(logits=x_c2d, tau=kwargs["tau"], hard=use_hard)
+                        mask = mask2d  # TODO: B*C*3
+                else:
+                    if self.args.gate_gumbel_sigmoid:
+                        mask = gumbel_sigmoid(logits=x_c, tau=kwargs["tau"], hard=use_hard)
+                        mask = torch.stack([1-mask, mask], dim=-1)
+                    elif self.args.gate_gumbel_softmax:
+                        x_c2d = x_c.view(x.shape[0], self.mask_dim, 2)
+                        x_c2d = torch.log(F.softmax(x_c2d, dim=2))
+                        mask2d = F.gumbel_softmax(logits=x_c2d, tau=kwargs["tau"], hard=use_hard)
+                        mask = mask2d  # TODO: B*C*2
+
+            else:
+                if self.args.gate_all_zero_policy:
+                    mask = torch.zeros(x.shape[0], self.mask_dim, factor, device=x.device)
+                elif self.args.gate_all_one_policy:
+                    mask = torch.ones(x.shape[0], self.mask_dim, factor, device=x.device)
+                elif self.args.gate_random_soft_policy:
+                    mask = torch.rand(x.shape[0], self.mask_dim, factor, device=x.device)
+                elif self.args.gate_random_hard_policy:
+                    tmp_value = torch.rand(x.shape[0], self.mask_dim, factor, device=x.device)
+                    mask = torch.zeros_like(tmp_value)
+                    mask[torch.where(tmp_value == torch.max(tmp_value, dim=-1, keepdim=True)[0])] = 1
+
             if self.args.gate_print_policy and "inline_test" in kwargs:
-                print(mask[0, :max(1, self.mask_dim // 64)])
-                print(mask[-1, :max(1, self.mask_dim // 64)])
+                print(mask[0, :max(1, self.mask_dim // 64), -1])
+                print(mask[-1, :max(1, self.mask_dim // 64), -1])
                 print()
-            out = out * mask.unsqueeze(-1).unsqueeze(-1)
-        else:
-            mask = None
+
+            out = out * mask[:, :, -1].unsqueeze(-1).unsqueeze(-1)
+            if self.args.gate_history:
+                out = out + h_map * mask[:, :, -2].unsqueeze(-1).unsqueeze(-1)
+                h_map_out = out
+
         out = self.conv2(out)
         out = self.bn2(out)
 
@@ -191,7 +237,7 @@ class BasicBlock(nn.Module):
         out += identity
         out = self.relu(out)
 
-        return out, mask
+        return out, mask, h_vec_out, h_map_out
 
 
 class Bottleneck(nn.Module):
@@ -405,15 +451,21 @@ class GateNet(nn.Module):
         #     history_rack.append([])
         #     for _ in layers:
         #         history_rack[-1].append(None)
+
+
         if "tau" not in kwargs:
             print("tau not in kwargs. use default=1")
             kwargs["tau"] = 1
             kwargs["inline_test"] = True
 
-        mask_stack_list = []
+        mask_stack_list = []  # TODO list for t-dimension
+        h_vec_stack = []
+        h_map_stack = []
         for _, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
             for _, block in enumerate(layers):
                 mask_stack_list.append([])
+                h_vec_stack.append(None)
+                h_map_stack.append(None)
 
         for t in range(_T):
             x = self.conv1(input_data[:, t])
@@ -424,7 +476,7 @@ class GateNet(nn.Module):
             idx = 0
             for li, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
                 for bi, block in enumerate(layers):
-                    x, mask = block(x, **kwargs)
+                    x, mask, h_vec_stack[idx], h_map_stack[idx] = block(x, h_vec_stack[idx], h_map_stack[idx], **kwargs)
                     # history_rack[li][bi] = new_history
                     mask_stack_list[idx].append(mask)
                     idx += 1

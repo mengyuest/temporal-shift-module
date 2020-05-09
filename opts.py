@@ -272,25 +272,33 @@ parser.add_argument('--direct_lower_mask', action='store_true')
 
 
 
-# TODO (local policy network, and dynamic pruning)
-# TODO GateNet
+# TODO dynamic pruning
 parser.add_argument('--gate', action='store_true')
 parser.add_argument('--gate_hidden_dim', type=int, default=16)
 parser.add_argument('--gate_local_policy', action='store_true')
 parser.add_argument('--gate_history_fusion', action='store_true')
 
+# randomness
 parser.add_argument('--gate_all_one_policy', action='store_true')
 parser.add_argument('--gate_all_zero_policy', action='store_true')
 parser.add_argument('--gate_random_hard_policy', action='store_true')
 parser.add_argument('--gate_random_soft_policy', action='store_true')
 
+# adaptive
 parser.add_argument('--gate_gumbel_sigmoid', action='store_true')
 parser.add_argument('--gate_gumbel_softmax', action='store_true')
 parser.add_argument('--gate_gumbel_use_soft', action='store_true')
 parser.add_argument('--gate_sem_hash', action='store_true')
 parser.add_argument('--gate_tanh', action='store_true')
-parser.add_argument('--gate_hard_concrete', action='store_true')
+parser.add_argument('--gate_sigmoid', action='store_true')
+parser.add_argument('--winner_take_all', action='store_true')  # TODO
+parser.add_argument('--wta_ratio', type=float, default=0)  # TODO
+
+#history branch
+parser.add_argument('--gate_history', action='store_true')
+parser.add_argument('--fusion_type', type=str, choices=['cat', 'add', 'rnn'], default='add')
 
 parser.add_argument('--gate_print_policy', action='store_true')
 parser.add_argument('--print_statistics', action='store_true')
 parser.add_argument('--num_class', default=200, type=int)
+parser.add_argument('--ignore_loading_gate_fc', action='store_true')

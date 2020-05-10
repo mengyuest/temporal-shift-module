@@ -97,6 +97,44 @@ def gumbel_sigmoid(logits, tau=1, hard=False):
         ret = y_soft
     return ret
 
+# https://github.com/tensorflow/tensor2tensor/blob/a9da9635917814af890a31a060c5b29d31b2f906/
+# tensor2tensor/layers/common_layers.py#L161
+def inverse_exp_decay(max_step, min_value = 0.01, curr_step = None):
+    inv_base = torch.exp(torch.log(torch.tensor(min_value))/max_step)
+    return (inv_base ** max(max_step - curr_step, 0.0)).item()
+
+# https://github.com/tensorflow/tensor2tensor/blob/a9da9635917814af890a31a060c5b29d31b2f906/
+# tensor2tensor/layers/common_layers.py#L143
+def saturating_sigmoid(x):
+    # y = tf.sigmoid(x)
+    # return tf.minimum(1.0, tf.maximum(0.0, 1.2 * y - 0.1))
+    y = torch.sigmoid(x)
+    return torch.clamp(1.2 * y - 0.1, 0, 1)
+
+
+def improved_sem_hash(logits, is_training, sem_hash_dense_random, max_step, curr_step):
+    noise = torch.normal(0., 1., logits.shape).to(logits.device) if is_training else 0
+    vn = logits + noise
+    v = saturating_sigmoid(vn)
+    # v1 = torch.relu(torch.clamp_min(1.2 * torch.sigmoid(vn) - 0.1, 1))
+    v_discrete = ((vn < 0).type(v.type()) - v).detach() + v
+
+    if sem_hash_dense_random:
+        mask = torch.randint(0, 2, v.shape).type(v.type()).to(v.device) if is_training else 0
+        return mask * v + (1-mask) * v_discrete
+    else:
+        # if is_training and torch.rand(1, 1).item() > 0.5:
+        #     return v1
+        # else:
+        #     return ((vn < 0).type(v1.type()) - v1).detach() + v1
+        if is_training:
+            threshold = inverse_exp_decay(max_step=max_step, curr_step=curr_step)
+        else:
+            threshold = 1
+        rand = torch.rand_like(v)
+        return torch.where(rand < threshold, v_discrete, v)
+
+
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -122,16 +160,24 @@ class BasicBlock(nn.Module):
 
         self.args = args
         if self.args.gate_local_policy:
+            in_factor = 1
+            out_factor = 2 if self.args.gate_gumbel_softmax else 1
             if self.args.gate_history:
-                oh_factor = 3 if self.args.gate_gumbel_softmax else 1
-            else:
-                oh_factor = 2 if self.args.gate_gumbel_softmax else 1
-            fuse_factor = 1
-            if self.args.gate_history:
-                fuse_factor = 2 if self.args.fusion_type is "cat" else 1
-            self.gate_fc0 = nn.Linear(inplanes * fuse_factor, self.args.gate_hidden_dim)
-            self.gate_fc1 = nn.Linear(self.args.gate_hidden_dim, planes * oh_factor)
-            self.mask_dim = planes
+                in_factor = 2 if self.args.fusion_type == "cat" else 1
+                if self.args.gate_gumbel_softmax:
+                    out_factor = 3
+                elif self.args.gate_sem_hash:
+                    out_factor = 2
+
+            self.gate_fc0 = nn.Linear(inplanes * in_factor, self.args.gate_hidden_dim)
+
+            if self.args.gate_bn_between_fcs:
+                self.gate_bn = nn.BatchNorm1d(self.args.gate_hidden_dim)
+            if self.args.gate_relu_between_fcs:
+                self.gate_relu = nn.ReLU(inplace=True)
+
+            self.gate_fc1 = nn.Linear(self.args.gate_hidden_dim, planes * out_factor)
+            self.num_channels = planes
             normal_(self.gate_fc0.weight, 0, 0.001)
             constant_(self.gate_fc0.bias, 0)
             normal_(self.gate_fc1.weight, 0, 0.001)
@@ -186,41 +232,59 @@ class BasicBlock(nn.Module):
                     h_vec_out = x_c[:, -1*h_vec.shape[-1]:]
 
                 x_c = self.gate_fc0(x_c)
+
+                if self.args.gate_bn_between_fcs:
+                    x_c = self.gate_bn(x_c)
+                if self.args.gate_relu_between_fcs:
+                    x_c = self.gate_relu(x_c)
+
                 x_c = self.gate_fc1(x_c)
 
                 use_hard = not self.args.gate_gumbel_use_soft
 
                 if self.args.gate_history:
                     if self.args.gate_gumbel_softmax:
-                        x_c2d = x_c.view(x.shape[0], self.mask_dim, 3)
+                        x_c2d = x_c.view(x.shape[0], self.num_channels, 3)
                         x_c2d = torch.log(F.softmax(x_c2d, dim=2))
                         mask2d = F.gumbel_softmax(logits=x_c2d, tau=kwargs["tau"], hard=use_hard)
                         mask = mask2d  # TODO: B*C*3
+                    elif self.args.gate_sem_hash:
+                        x_c2d = x_c.view(x.shape[0], self.num_channels, 2)
+                        is_training = "is_training" in kwargs and kwargs["is_training"]
+                        curr_step = 0 if "curr_step" not in kwargs else kwargs["curr_step"]
+                        # print(is_training)
+                        mask2d = improved_sem_hash(x_c2d, is_training=is_training,
+                                                   sem_hash_dense_random=self.args.gate_dense_random,
+                                                   max_step=self.args.isemhash_max_step,
+                                                   curr_step=curr_step)
+                        h_mask = mask2d[:, :, 0]
+                        c_mask = mask2d[:, :, 1]
+                        mask = torch.stack([1+h_mask*c_mask-h_mask-c_mask, h_mask * (1-c_mask), c_mask], dim=-1)
                 else:
                     if self.args.gate_gumbel_sigmoid:
                         mask = gumbel_sigmoid(logits=x_c, tau=kwargs["tau"], hard=use_hard)
                         mask = torch.stack([1-mask, mask], dim=-1)
                     elif self.args.gate_gumbel_softmax:
-                        x_c2d = x_c.view(x.shape[0], self.mask_dim, 2)
+                        x_c2d = x_c.view(x.shape[0], self.num_channels, 2)
                         x_c2d = torch.log(F.softmax(x_c2d, dim=2))
                         mask2d = F.gumbel_softmax(logits=x_c2d, tau=kwargs["tau"], hard=use_hard)
                         mask = mask2d  # TODO: B*C*2
 
             else:
                 if self.args.gate_all_zero_policy:
-                    mask = torch.zeros(x.shape[0], self.mask_dim, factor, device=x.device)
+                    mask = torch.zeros(x.shape[0], self.num_channels, factor, device=x.device)
                 elif self.args.gate_all_one_policy:
-                    mask = torch.ones(x.shape[0], self.mask_dim, factor, device=x.device)
+                    mask = torch.ones(x.shape[0], self.num_channels, factor, device=x.device)
                 elif self.args.gate_random_soft_policy:
-                    mask = torch.rand(x.shape[0], self.mask_dim, factor, device=x.device)
+                    mask = torch.rand(x.shape[0], self.num_channels, factor, device=x.device)
                 elif self.args.gate_random_hard_policy:
-                    tmp_value = torch.rand(x.shape[0], self.mask_dim, factor, device=x.device)
+                    tmp_value = torch.rand(x.shape[0], self.num_channels, factor, device=x.device)
                     mask = torch.zeros_like(tmp_value)
                     mask[torch.where(tmp_value == torch.max(tmp_value, dim=-1, keepdim=True)[0])] = 1
 
             if self.args.gate_print_policy and "inline_test" in kwargs:
-                print(mask[0, :max(1, self.mask_dim // 64), -1])
-                print(mask[-1, :max(1, self.mask_dim // 64), -1])
+                print(mask[0, :max(1, self.num_channels // 64), -1])
+                print(mask[-1, :max(1, self.num_channels // 64), -1])
                 print()
 
             out = out * mask[:, :, -1].unsqueeze(-1).unsqueeze(-1)
@@ -271,7 +335,7 @@ class Bottleneck(nn.Module):
         if self.args.gate_local_policy:
             self.gate_fc0 = nn.Linear(width, self.args.gate_hidden_dim)
             self.gate_fc1 = nn.Linear(self.args.gate_hidden_dim, width)
-            self.mask_dim = width
+            self.num_channels = width
             normal_(self.gate_fc0.weight, 0, 0.001)
             constant_(self.gate_fc0.bias, 0)
             normal_(self.gate_fc1.weight, 0, 0.001)

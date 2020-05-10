@@ -20,7 +20,7 @@ class TSN_Gate(nn.Module):
         self.num_segments = args.num_segments
 
         self.args = args
-        self.base_model_name = self.args.backbone_list[0]
+        self.base_model_name = self.args.arch
         self.num_class = args.num_class
 
         self.reso_dim = 1
@@ -63,7 +63,7 @@ class TSN_Gate(nn.Module):
         self.input_std = [0.229, 0.224, 0.225]
 
         shall_pretrain = len(self.args.model_paths) == 0 or self.args.model_paths[0].lower() != 'none'
-        model = self._prep_a_net(self.args.backbone_list[0], shall_pretrain)
+        model = self._prep_a_net(self.args.arch, shall_pretrain)
         self.base_model_list.append(model)
 
 
@@ -89,13 +89,16 @@ class TSN_Gate(nn.Module):
 
     def forward(self, *argv, **kwargs):
         input_data = kwargs["input"][0]  # TODO(yue) B * (TC) * H * W
+        is_training = kwargs["is_training"]
+        curr_step =  kwargs["curr_step"]
         _b, _tc, _h, _w = input_data.shape
         _t, _c = _tc // 3, 3
 
         if "tau" not in kwargs:
             kwargs["tau"] = None
 
-        feat, mask_stack_list = self.base_model_list[0](input_data.view(_b, _t, _c, _h, _w), tau=kwargs["tau"])
+        feat, mask_stack_list = self.base_model_list[0](input_data.view(_b, _t, _c, _h, _w),
+                                                        tau=kwargs["tau"], is_training=is_training, curr_step=curr_step)
         base_out = self.new_fc_list[0](feat.view(_b * _t, -1)).view(_b, _t, -1)
 
         output = base_out.mean(dim=1).squeeze(1)
@@ -181,6 +184,11 @@ class TSN_Gate(nn.Module):
                 if len(ps) == 2:
                     normal_bias.append(ps[1])
 
+            elif isinstance(m, torch.nn.BatchNorm1d):
+                bn_cnt += 1
+                # later BN's are frozen
+                if not self._enable_pbn or bn_cnt == 1:
+                    bn.extend(list(m.parameters()))
             elif isinstance(m, torch.nn.BatchNorm2d):
                 bn_cnt += 1
                 # later BN's are frozen

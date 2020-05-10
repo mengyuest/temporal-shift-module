@@ -185,10 +185,10 @@ if __name__ == "__main__":
     seg_len=-1
     for resolution in [84, 112, 168, 224]:
         for signal in [0,1,2,3]:
-            gflops, params = get_gflops_params("dmynet50", resolution, k, seg_len,
-                                               num_filters_list=[64,48,32,16], default_signal=signal)
+            base_model_gflops, params = get_gflops_params("dmynet50", resolution, k, seg_len,
+                                                          num_filters_list=[64,48,32,16], default_signal=signal)
             str_list.append("%-25s\tclasses:%d\treso:%3d\tseg_len:%d\tgflops:%.4f\tparams:%.4fM" % (
-                    "dmynet50", k, resolution, seg_len, gflops, params))
+                    "dmynet50", k, resolution, seg_len, base_model_gflops, params))
 
     for s in str_list:
         print(s)

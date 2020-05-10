@@ -1,4 +1,5 @@
 import warnings
+
 warnings.filterwarnings("ignore")
 
 import os
@@ -26,27 +27,30 @@ from tools.net_flops_table import get_gflops_params, feat_dim_dict
 import common
 from os.path import join as ospj
 
-
 best_prec1 = 0
-gflops = 0
+base_model_gflops = 0
 gflops_list = []
 test_mode = None
+
+
 def reset_global_variables():
-    global best_prec1, gflops, gflops_list, test_mode
+    global best_prec1, base_model_gflops, gflops_list, test_mode
     best_prec1 = 0
     test_mode = None
 
+
 def load_to_sd(model_path):
     if ".pth" in model_path:
-        if os.path.exists(common.PRETRAIN_PATH+ "/" + model_path):
-            return torch.load(common.PRETRAIN_PATH+ "/" + model_path)['state_dict']
-        elif os.path.exists(common.EXPS_PATH+ "/" + model_path):
+        if os.path.exists(common.PRETRAIN_PATH + "/" + model_path):
+            return torch.load(common.PRETRAIN_PATH + "/" + model_path)['state_dict']
+        elif os.path.exists(common.EXPS_PATH + "/" + model_path):
             return torch.load(common.EXPS_PATH + "/" + model_path)['state_dict']
         else:
             exit("Cannot find model, exit")
     else:
         print("skip loading")
         return {}
+
 
 def main():
     t_start = time.time()
@@ -75,7 +79,7 @@ def main():
 
     if args.resume:
         if os.path.isfile(args.resume):
-            #TODO s
+            # TODO s
             print(("=> loading checkpoint '{}'".format(args.resume)))
             checkpoint = torch.load(args.resume)
             args.start_epoch = checkpoint['epoch']
@@ -124,7 +128,7 @@ def main():
     best_train_usage_str = None
     best_val_usage_str = None
     best_tau = args.init_tau
-    val_gflops=-1
+    val_gflops = -1
 
     for epoch in range(args.start_epoch, args.epochs):
         # train for one epoch
@@ -138,7 +142,8 @@ def main():
         # evaluate on validation set
         if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
             set_random_seed(args.random_seed)
-            mAP, mmAP, prec1, val_usage_str, val_gflops = validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writer)
+            mAP, mmAP, prec1, val_usage_str, val_gflops = validate(val_loader, model, criterion, epoch, logger,
+                                                                   exp_full_path, tf_writer)
 
             # remember best prec@1 and save checkpoint
             map_record.update(mAP)
@@ -172,12 +177,13 @@ def main():
     if not test_mode:
         print("Best train usage:%s\nBest val usage:%s" % (best_train_usage_str, best_val_usage_str))
 
-    print("Finished in %.4f seconds\n"%(time.time() - t_start))
+    print("Finished in %.4f seconds\n" % (time.time() - t_start))
 
     if test_mode:
         os.rename(logger._log_path, ospj(logger._log_dir_name, logger._log_file_name[:-4] +
-                                         "_mm_%.2f_a_%.2f_f_%.4f.txt"%(mmap_record.best_val, prec_record.best_val,
-                                                                       val_gflops)))
+                                         "_mm_%.2f_a_%.2f_f_%.4f.txt" % (mmap_record.best_val, prec_record.best_val,
+                                                                         val_gflops)))
+
 
 def set_random_seed(the_seed):
     if args.random_seed >= 0:
@@ -186,33 +192,42 @@ def set_random_seed(the_seed):
 
 
 def init_gflops_table(model):
-    global gflops, gflops_list
-    gflops = get_gflops_params(args.backbone_list[0], args.reso_list[0], args.num_class, -1, args=args)[0]
-
+    global base_model_gflops, gflops_list
+    base_model_gflops = get_gflops_params(args.arch, args.reso_list[0], args.num_class, -1, args=args)[0]
     gflops_list = model.base_model_list[0].count_flops((1, 1, 3, args.reso_list[0], args.reso_list[0]))
-    print("Network@%d (%.4f GFLOPS) has %d blocks" % (args.reso_list[0], gflops, len(gflops_list)))
+    print("Network@%d (%.4f GFLOPS) has %d blocks" % (args.reso_list[0], base_model_gflops, len(gflops_list)))
     for i, block in enumerate(gflops_list):
-        print("block", i, ",".join(["%.4f GFLOPS"%(x/1e9) for x in block]))
+        print("block", i, ",".join(["%.4f GFLOPS" % (x / 1e9) for x in block]))
+
 
 def compute_gflops_by_mask(mask_tensor_list):
-    #TODO:   -> conv1 -> conv2 ->     // inside the block
-    #TODO:    C0   -    C1   -    C2  // channels proc.
-    #TODO:  C1 = s0 + s1 + s2         // 0-zero out / 1-history / 2-current     cheap <<< expensive
-    #TODO: saving = s1/C1 * [FLOPS(conv1)] + s0/C1 * [FLOPS(conv1) + FLOPS(conv2)]
-    mask_cpu_list = [mask.detach().cpu() for mask in mask_tensor_list]
-    s0 = [torch.mean(mask_cpu[:, :, :, 0]).item() for mask_cpu in mask_cpu_list]
+    # TODO:   -> conv1 -> conv2 ->     // inside the block
+    # TODO:    C0   -    C1   -    C2  // channels proc.
+    # TODO:  C1 = s0 + s1 + s2         // 0-zero out / 1-history / 2-current     cheap <<< expensive
+    # TODO: saving = s1/C1 * [FLOPS(conv1)] + s0/C1 * [FLOPS(conv1) + FLOPS(conv2)]
+    # mask_cpu_list = [mask.detach().cpu() for mask in mask_tensor_list]
+    # s0 = [torch.mean(mask_cpu[:, :, :, 0]).item() for mask_cpu in mask_cpu_list]
+    # if args.gate_history:
+    #     s1 = [torch.mean(mask_cpu[:, :, :, 1]).item() for mask_cpu in mask_cpu_list]
+    # else:
+    #     s1 = [0 for _ in mask_tensor_list]
+
+    s0 = [torch.mean(mask[:, :, :, 0]) for mask in mask_tensor_list]
     if args.gate_history:
-        s1 = [torch.mean(mask_cpu[:, :, :, 1]).item() for mask_cpu in mask_cpu_list]
+        s1 = [torch.mean(mask[:, :, :, 1]) for mask in mask_tensor_list]
     else:
         s1 = [0 for _ in mask_tensor_list]
+
+
     # print("s0",s0)
     # print("s1",s1)
     s0_savings = sum([s0[i] * (gflops_list[i][0] + gflops_list[i][1]) for i in range(len(gflops_list))])
     s1_savings = sum([s1[i] * gflops_list[i][0] for i in range(len(gflops_list))])
     # print("s0_savings", s0_savings/1e9)
     # print("s1_savings", s1_savings/1e9)
-    real_gflops = gflops - (s0_savings + s1_savings)/1e9
+    real_gflops = base_model_gflops - (s0_savings + s1_savings) / 1e9
     return real_gflops
+
 
 def print_mask_statistics(mask_tensor_list, num_segments):
     # overall
@@ -235,63 +250,68 @@ def print_mask_statistics(mask_tensor_list, num_segments):
                 p_list = []
                 for block_i in range(len(mask_tensor_list)):
                     s_list.append(torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end, :, dim_i]))
-                    d_list.append(torch.std(torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end, :, dim_i], dim=-1), unbiased=not (b_i == 0)))
+                    d_list.append(
+                        torch.std(torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end, :, dim_i], dim=-1),
+                                  unbiased=not (b_i == 0)))
                     # TODO channel-wise fire percentage for instances
                     # TODO this can be a channel percentage histogram, ranged from 0~1, where we only count five buckets
                     # TODO (0.00~0.20) (0.20~0.40) (0.40~0.60) (0.60~0.80) (0.80~1.00)
-                    percentage = torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end, :, dim_i], dim=[0, 1])
+                    percentage = torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end, :, dim_i],
+                                            dim=[0, 1])
                     p_list.append(torch.histc(percentage, bins=5, min=0, max=1) / percentage.shape[0])
                 t = "%3d" % t_i if t_i is not None else "all"
-                print("(t=%s, %s)usage: " % (t, dim_str[dim_i]), "  ".join(["%.4f(%.4f) " % (s, d) for s, d in zip(s_list, d_list)]))
-                print("                 ",
+                print("(t=%s, %s)usage: " % (t, dim_str[dim_i]),
+                      "  ".join(["%.4f(%.4f) " % (s, d) for s, d in zip(s_list, d_list)]))
+                print("                  ",
                       " ".join(["(" + (",".join(["%02d" % (min(99, x * 100)) for x in p])) + ")" for p in p_list]))
         print()
-
-def cal_eff(mask_tensor_list):
-    each_losses=[]
-    # TODO r N * T * (#reso+#policy+#skips)
-    gflops_vec = compute_gflops_by_mask(mask_tensor_list)
-    r_loss = torch.tensor(gflops_vec).cuda()
-    loss = torch.sum(0 * r_loss)
-    each_losses.append(loss.detach().cpu().item())
-    return loss, each_losses
 
 
 def reverse_onehot(a):
     try:
         return np.array([np.where(r > 0.5)[0][0] for r in a])
     except Exception as e:
-        print("error stack:",e)
+        print("error stack:", e)
         print(a)
         for i, r in enumerate(a):
             print(i, r)
         return None
 
 
-def compute_acc_eff_loss_with_weights(acc_loss, eff_loss, each_losses, epoch):
-    if epoch > args.eff_loss_after:
-        acc_weight = args.accuracy_weight
-        eff_weight = args.efficency_weight
+def compute_losses(criterion, prediction, target, mask_stack_list, gflops_tensor):
+    acc_loss = criterion(prediction, target)
+    choice_dim = 3 if args.gate_history else 2
+    assert len(args.gate_norm_loss_factors) == choice_dim
+    gflops_loss = torch.abs(gflops_tensor - args.gate_gflops_bias) * args.gate_gflops_loss_weight
+    mask_norm = torch.stack(
+        [torch.norm(mask, dim=[0, 1, 2], p=args.gate_norm)/(mask.numel()/choice_dim)**(1/args.gate_norm)
+         for mask in mask_stack_list], dim=0).mean(dim=0)
+    skip_mask_loss = (1 - mask_norm[0]) * args.gate_norm_loss_factors[0] * args.gate_norm_loss_weight
+    if args.gate_history:
+        hist_mask_loss = (1 - mask_norm[1]) * args.gate_norm_loss_factors[1] * args.gate_norm_loss_weight
     else:
-        acc_weight = 1.0
-        eff_weight = 0.0
-    return acc_loss * acc_weight, eff_loss * eff_weight, [x * eff_weight for x in each_losses]
-
-
-def compute_every_losses(masks, acc_loss, epoch):
-    eff_loss, each_losses = cal_eff(masks)
-    acc_loss, eff_loss, each_losses = compute_acc_eff_loss_with_weights(acc_loss, eff_loss, each_losses, epoch)
-    return acc_loss, eff_loss, each_losses
+        hist_mask_loss = 0
+    curr_mask_loss = mask_norm[-1] * args.gate_norm_loss_factors[-1] * args.gate_norm_loss_weight
+    loss = acc_loss + gflops_loss + skip_mask_loss + hist_mask_loss + curr_mask_loss
+    return {
+        "loss": loss,
+        "acc_loss": acc_loss,
+        "eff_loss": loss - acc_loss,
+        "gflops_loss": gflops_loss,
+        "skip_mask_loss": skip_mask_loss,
+        "hist_mask_loss": hist_mask_loss,
+        "curr_mask_loss": curr_mask_loss
+    }
 
 
 def elastic_list_print(l, limit=8):
     if isinstance(l, str):
         return l
     limit = min(limit, len(l))
-    l_output = "[%s," % (",".join([str(x) for x in l[:limit//2]]))
+    l_output = "[%s," % (",".join([str(x) for x in l[:limit // 2]]))
     if l.shape[0] > limit:
         l_output += "..."
-    l_output += "%s]" % (",".join([str(x) for x in l[-limit//2:]]))
+    l_output += "%s]" % (",".join([str(x) for x in l[-limit // 2:]]))
     return l_output
 
 
@@ -299,23 +319,8 @@ def compute_exp_decay_tau(epoch):
     return args.init_tau * np.exp(args.exp_decay_factor * epoch)
 
 
-def get_policy_usage_str(mask_stack):
-    est_gflops = compute_gflops_by_mask(mask_stack)
-    return "Equivalent GFLOPS: %.4f" % (est_gflops), est_gflops
-
-
-def extra_each_loss_str(each_terms):
-    loss_str_list = ["gf"]
-    s = ""
-    if args.uniform_loss_weight > 1e-5:
-        loss_str_list.append("u")
-    if args.head_loss_weight > 1e-5:
-        loss_str_list.append("h")
-    if args.frames_loss_weight > 1e-5:
-        loss_str_list.append("f")
-    for i in range(len(loss_str_list)):
-        s += " %s:(%.4f)" % (loss_str_list[i], each_terms[i].avg)
-    return s
+def get_policy_usage_str(gflops):
+    return "Equivalent GFLOPS: %.4f" % (gflops.item())
 
 
 def get_current_temperature(num_epoch):
@@ -335,9 +340,8 @@ def get_average_meters(number):
 
 
 def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_path, tf_writer):
-    batch_time, data_time, losses, top1, top5 = get_average_meters(5)
-    alosses, elosses = get_average_meters(2)
-    each_terms = get_average_meters(10)
+    batch_time, data_time, top1, top5 = get_average_meters(4)
+    losses_dict = {}
 
     mask_stack_list_list = [[] for _ in gflops_list]
 
@@ -350,44 +354,44 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
     model.train()
 
     end = time.time()
-    print("#%s# lr:%.4f\ttau:%.4f"%(args.exp_header, optimizer.param_groups[-1]['lr'] * 0.1, tau))
+    print("#%s# lr:%.4f\ttau:%.4f" % (args.exp_header, optimizer.param_groups[-1]['lr'] * 0.1, tau))
     for i, input_tuple in enumerate(train_loader):
         data_time.update(time.time() - end)
 
         # input and target
         batchsize = input_tuple[0].size(0)
-        input_var_list=[torch.autograd.Variable(input_item) for input_item in input_tuple[:-1]]
+        input_var_list = [torch.autograd.Variable(input_item) for input_item in input_tuple[:-1]]
         target = input_tuple[-1].cuda()
         target_var = torch.autograd.Variable(target)
 
         # model forward function
-        output, mask_stack_list, feat_outs, base_outs = model(input=input_var_list, tau=tau)
-
-        # gather masks
-        for block_i, mask_stack in enumerate(mask_stack_list):
-            mask_stack_list_list[block_i].append(mask_stack)
+        output, mask_stack_list, feat_outs, base_outs = \
+            model(input=input_var_list, tau=tau, is_training=True, curr_step=epoch * len(train_loader) + i)
 
         # measure losses and accuracy
-        acc_loss = criterion(output, target_var[:, 0])
-        acc_loss, eff_loss, each_losses = compute_every_losses(mask_stack_list, acc_loss, epoch)
-        loss = acc_loss + eff_loss
+        gflops_tensor = compute_gflops_by_mask(mask_stack_list)
+
+        loss_dict = compute_losses(criterion, output, target_var[:, 0], mask_stack_list, gflops_tensor)
         prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
 
         # record losses and accuracy
-        alosses.update(acc_loss.item(), batchsize)
-        elosses.update(eff_loss.item(), batchsize)
-        for l_i, each_loss in enumerate(each_losses):
-            each_terms[l_i].update(each_loss, batchsize)
-        losses.update(loss.item(), batchsize)
+        if len(losses_dict)==0:
+            losses_dict = {loss_name: get_average_meters(1)[0] for loss_name in loss_dict}
+        for loss_name in loss_dict:
+            losses_dict[loss_name].update(loss_dict[loss_name].item(), batchsize)
         top1.update(prec1.item(), batchsize)
         top5.update(prec5.item(), batchsize)
 
         # compute gradient and do SGD step
-        loss.backward()
+        loss_dict["loss"].backward()
         if args.clip_gradient is not None:
             clip_grad_norm_(model.parameters(), args.clip_gradient)
         optimizer.step()
         optimizer.zero_grad()
+
+        # gather masks
+        for block_i, mask_stack in enumerate(mask_stack_list):
+            mask_stack_list_list[block_i].append(mask_stack.detach().cpu())
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -396,31 +400,32 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
         # logging
         if i % args.print_freq == 0:
             print_output = ('Epoch:[{0:02d}][{1:03d}/{2:03d}] '
-                      'Time {batch_time.val:.3f} ({batch_time.avg:.3f}) '
-                      '{data_time.val:.3f} ({data_time.avg:.3f})\t'
-                      'Loss {loss.val:.4f} ({loss.avg:.4f}) '
-                      'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) '
-                      'Prec@5 {top5.val:.3f} ({top5.avg:.3f})\t'.format(
+                            'Time {batch_time.val:.3f} ({batch_time.avg:.3f}) '
+                            '{data_time.val:.3f} ({data_time.avg:.3f})\t'
+                            'Loss {loss.val:.4f} ({loss.avg:.4f}) '
+                            'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) '
+                            'Prec@5 {top5.val:.3f} ({top5.avg:.3f})\t'.format(
                 epoch, i, len(train_loader), batch_time=batch_time,
-                data_time=data_time, loss=losses, top1=top1, top5=top5))  # TODO
+                data_time=data_time, loss=losses_dict["loss"], top1=top1, top5=top5))  # TODO
 
-            roh_r = "TODOTODO"
-            print_output += ' a {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
-                aloss = alosses, eloss =elosses, r=elastic_list_print(roh_r)
-            )
-            print_output += extra_each_loss_str(each_terms)
+            for loss_name in losses_dict:
+                if loss_name == "loss":
+                    continue
+                print_output += ' {header:s} {loss.val:.4f}({loss.avg:.4f})'.\
+                    format(header=loss_name[0], loss=losses_dict[loss_name])
             print(print_output)
 
     for block_i in range(len(mask_stack_list_list)):
         mask_stack_list_list[block_i] = torch.cat(mask_stack_list_list[block_i], dim=0)
 
-    usage_str, gflops = get_policy_usage_str(mask_stack_list_list)
+    batch_gflops = compute_gflops_by_mask(mask_stack_list_list)
+    usage_str = get_policy_usage_str(batch_gflops)
     print(usage_str)
     if args.print_statistics:
         print_mask_statistics(mask_stack_list_list, args.num_segments)
 
     if tf_writer is not None:
-        tf_writer.add_scalar('loss/train', losses.avg, epoch)
+        tf_writer.add_scalar('loss/train', losses_dict["loss"].avg, epoch)
         tf_writer.add_scalar('acc/train_top1', top1.avg, epoch)
         tf_writer.add_scalar('acc/train_top5', top5.avg, epoch)
         tf_writer.add_scalar('lr', optimizer.param_groups[-1]['lr'], epoch)
@@ -429,17 +434,16 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
 
 
 def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writer=None):
-    batch_time, losses, top1, top5 = get_average_meters(4)
+    batch_time, top1, top5 = get_average_meters(3)
     # TODO(yue)
     all_results = []
     all_targets = []
 
     tau = get_current_temperature(epoch)
-    alosses, elosses = get_average_meters(2)
 
     mask_stack_list_list = [[] for _ in gflops_list]
 
-    each_terms = get_average_meters(10)
+    losses_dict={}
     r_list = []
 
     # switch to evaluate mode
@@ -453,28 +457,28 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
             target = input_tuple[-1].cuda()
 
             # model forward function
-            output, mask_stack_list, feat_outs, base_outs = model(input=input_tuple[:-1], tau=tau)
-
-            # gather masks
-            for block_i, mask_stack in enumerate(mask_stack_list):
-                mask_stack_list_list[block_i].append(mask_stack)
+            output, mask_stack_list, feat_outs, base_outs = \
+                model(input=input_tuple[:-1], tau=tau, is_training=False, curr_step=0)
 
             # measure losses, accuracy and predictions
-            acc_loss = criterion(output, target[:, 0])
-            acc_loss, eff_loss, each_losses = compute_every_losses(mask_stack_list, acc_loss, epoch)
-            loss = acc_loss + eff_loss
+            gflops_tensor = compute_gflops_by_mask(mask_stack_list)
+            loss_dict = compute_losses(criterion, output, target[:, 0], mask_stack_list, gflops_tensor)
+
             prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
             all_results.append(output)
             all_targets.append(target)
 
             # record loss and accuracy
-            alosses.update(acc_loss.item(), batchsize)
-            elosses.update(eff_loss.item(), batchsize)
-            for l_i, each_loss in enumerate(each_losses):
-                each_terms[l_i].update(each_loss, batchsize)
-            losses.update(loss.item(), batchsize)
+            if len(losses_dict) == 0:
+                losses_dict = {loss_name: get_average_meters(1)[0] for loss_name in loss_dict}
+            for loss_name in loss_dict:
+                losses_dict[loss_name].update(loss_dict[loss_name].item(), batchsize)
             top1.update(prec1.item(), batchsize)
             top5.update(prec5.item(), batchsize)
+
+            # gather masks
+            for block_i, mask_stack in enumerate(mask_stack_list):
+                mask_stack_list_list[block_i].append(mask_stack.detach().cpu())
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -482,39 +486,41 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
 
             if i % args.print_freq == 0:
                 print_output = ('Test: [{0:03d}/{1:03d}] '
-                          'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                          'Loss {loss.val:.4f} ({loss.avg:.4f})'
-                          'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) '
-                          'Prec@5 {top5.val:.3f} ({top5.avg:.3f})\t'.format(
-                    i, len(val_loader), batch_time=batch_time, loss=losses,
-                    top1=top1, top5=top5))
+                                'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
+                                'Loss {loss.val:.4f} ({loss.avg:.4f})'
+                                'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) '
+                                'Prec@5 {top5.val:.3f} ({top5.avg:.3f})\t'.
+                                format(i, len(val_loader), batch_time=batch_time,
+                                       loss=losses_dict["loss"], top1=top1, top5=top5))
 
-                roh_r = "TODOTODO"
-                print_output += ' a {aloss.val:.4f} ({aloss.avg:.4f}) e {eloss.val:.4f} ({eloss.avg:.4f}) r {r}'.format(
-                    aloss=alosses, eloss=elosses, r=elastic_list_print(roh_r)
-                )
-                print_output += extra_each_loss_str(each_terms)
+                for loss_name in losses_dict:
+                    if loss_name == "loss":
+                        continue
+                    print_output += ' {header:s} {loss.val:.4f}({loss.avg:.4f})'. \
+                        format(header=loss_name[0], loss=losses_dict[loss_name])
                 print(print_output)
 
-    mAP,_ = cal_map(torch.cat(all_results,0).cpu(), torch.cat(all_targets,0)[:,0:1].cpu()) # TODO(yue) single-label mAP
-    mmAP, _ = cal_map(torch.cat(all_results, 0).cpu(), torch.cat(all_targets, 0).cpu())    # TODO(yue)  multi-label mAP
+    mAP, _ = cal_map(torch.cat(all_results, 0).cpu(),
+                     torch.cat(all_targets, 0)[:, 0:1].cpu())  # TODO(yue) single-label mAP
+    mmAP, _ = cal_map(torch.cat(all_results, 0).cpu(), torch.cat(all_targets, 0).cpu())  # TODO(yue)  multi-label mAP
     print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
-              .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses))
+          .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses_dict["loss"]))
 
     for block_i in range(len(mask_stack_list_list)):
         mask_stack_list_list[block_i] = torch.cat(mask_stack_list_list[block_i], dim=0)
 
-    usage_str, gflops = get_policy_usage_str(mask_stack_list_list)
+    batch_gflops = compute_gflops_by_mask(mask_stack_list_list)
+    usage_str = get_policy_usage_str(batch_gflops)
     print(usage_str)
     if args.print_statistics:
         print_mask_statistics(mask_stack_list_list, args.num_segments)
 
     if tf_writer is not None:
-        tf_writer.add_scalar('loss/test', losses.avg, epoch)
+        tf_writer.add_scalar('loss/test', losses_dict["loss"].avg, epoch)
         tf_writer.add_scalar('acc/test_top1', top1.avg, epoch)
         tf_writer.add_scalar('acc/test_top5', top5.avg, epoch)
 
-    return mAP, mmAP, top1.avg, usage_str, gflops
+    return mAP, mmAP, top1.avg, usage_str, batch_gflops
 
 
 def save_checkpoint(state, is_best, exp_full_path):
@@ -540,14 +546,13 @@ def adjust_learning_rate(optimizer, epoch, lr_type, lr_steps):
 
 
 def setup_log_directory(logger, exp_header):
-
-    exp_full_name = "g%s_%s"%(logger._timestr, exp_header)
+    exp_full_name = "g%s_%s" % (logger._timestr, exp_header)
     if test_mode:
         exp_full_path = ospj(common.EXPS_PATH, args.test_from)
     else:
         exp_full_path = ospj(common.EXPS_PATH, exp_full_name)
         os.makedirs(exp_full_path)
-        os.makedirs(ospj(exp_full_path,"models"))
+        os.makedirs(ospj(exp_full_path, "models"))
     logger.create_log(exp_full_path, test_mode, args.num_segments, args.batch_size, args.top_k)
     return exp_full_path
 
@@ -555,25 +560,27 @@ def setup_log_directory(logger, exp_header):
 def shell():
     global test_mode
     test_mode = (args.test_from != "")
-    if test_mode: #TODO test mode
+    if test_mode:  # TODO test mode
         print("======== TEST MODE ========")
         args.skip_training = True
-        #TODO(debug) try check batch size and init tau
+        # TODO(debug) try check batch size and init tau
         if args.uno_time:
             t_list = [args.num_segments]
         elif args.many_times:
             t_list = [4, 8, 16, 25, 32, 48, 64]
         else:
             t_list = [8, 16, 25]
-        bs_list = [args.batch_size, args.batch_size, args.batch_size//2+1, args.batch_size//4+1, args.batch_size//4+1, args.batch_size//8+1, args.batch_size//8+1]
+        bs_list = [args.batch_size, args.batch_size, args.batch_size // 2 + 1, args.batch_size // 4 + 1,
+                   args.batch_size // 4 + 1, args.batch_size // 8 + 1, args.batch_size // 8 + 1]
 
         for t_i, t in enumerate(t_list):
             args.num_segments = t
             args.batch_size = bs_list[t_i]
-            print("======== TEST t:%d bs:%d ========"%(t, bs_list[t_i]))
+            print("======== TEST t:%d bs:%d ========" % (t, bs_list[t_i]))
             main()
-    else: #TODO normal mode
+    else:  # TODO normal mode
         main()
+
 
 def get_data_loaders(model, prefix):
     crop_size = model.module.crop_size
@@ -633,6 +640,7 @@ def get_data_loaders(model, prefix):
         batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True)
     return train_loader, val_loader
+
 
 def handle_frozen_things_in(model):
     # TODO(yue) freeze some params in the policy + lstm layers
@@ -699,6 +707,7 @@ def handle_frozen_things_in(model):
         print("=" * 80)
         for name, param in model.module.named_parameters():
             print(param.requires_grad, "\t", name)
+
 
 if __name__ == '__main__':
     args = parser.parse_args()

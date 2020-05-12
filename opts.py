@@ -319,7 +319,15 @@ parser.add_argument('--gate_norm', type=int, choices=[1, 2], default=1)
 
 # prune metrics
 
+# stochastic pretraining
+parser.add_argument('--gate_stoc_ratio', default=[], type=float, nargs="+") # skip|reuse|keep
+
+# history_conv/detach
+parser.add_argument('--gate_history_detach', action='store_true')
+parser.add_argument('--gate_history_conv_type', type=str,
+                    choices=['None', 'conv1x1', 'conv1x1bnrelu','conv1x1_list', 'conv1x1_res'], default='None')
+
+parser.add_argument('--gate_debug', action='store_true')
+parser.add_argument('--gate_linear_phase', type=int, default=0)  # linear-increase to reach 100% at epoch x
 
 # kernel code and recon loss
-
-parser.add_argument('--gate_history_conv', action='store_true')

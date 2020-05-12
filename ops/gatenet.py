@@ -169,6 +169,17 @@ class BasicBlock(nn.Module):
                 elif self.args.gate_sem_hash:
                     out_factor = 2
 
+                if self.args.gate_history_conv_type in ['conv1x1','conv1x1bnrelu']:
+                    self.gate_hist_conv = conv1x1(planes, planes)
+                    if self.args.gate_history_conv_type == 'conv1x1bnrelu':
+                        self.gate_hist_bnrelu = nn.Sequential(norm_layer(planes), nn.ReLU(inplace=True))
+                if self.args.gate_history_conv_type == 'conv1x1_list':
+                    self.gate_hist_conv = torch.nn.ModuleList()
+                    for _t in range(self.args.num_segments):
+                        self.gate_hist_conv.append(conv1x1(planes, planes))
+                if self.args.gate_history_conv_type == 'conv1x1_res':
+                    self.gate_hist_conv = conv1x1(planes, planes)
+
             self.gate_fc0 = nn.Linear(inplanes * in_factor, self.args.gate_hidden_dim)
 
             if self.args.gate_bn_between_fcs:
@@ -190,9 +201,21 @@ class BasicBlock(nn.Module):
             downsample0_flops, _ = count_conv2d_flops(input_data_shape, self.downsample0)
         else:
             downsample0_flops = 0
-        return [conv1_flops, conv2_flops, downsample0_flops], conv2_out_shape
 
-    def forward(self, x, h_vec, h_map, **kwargs):
+        if self.args.gate_history_conv_type in ['conv1x1','conv1x1bnrelu']:
+            gate_history_conv_flops, history_conv_shape = count_conv2d_flops(conv2_out_shape, self.gate_hist_conv)
+            if self.args.gate_history_conv_type == 'conv1x1bnrelu':
+                gate_history_conv_flops += count_bn_flops(history_conv_shape)[0] + count_relu_flops(history_conv_shape)[0]
+        elif self.args.gate_history_conv_type == 'conv1x1_list':
+            gate_history_conv_flops, history_conv_shape = count_conv2d_flops(conv2_out_shape, self.gate_hist_conv[0])
+        elif self.args.gate_history_conv_type == 'conv1x1_res':
+            gate_history_conv_flops, history_conv_shape = count_conv2d_flops(conv2_out_shape, self.gate_hist_conv)
+            gate_history_conv_flops += count_relu_flops(history_conv_shape)[0]
+        else:
+            gate_history_conv_flops = 0
+        return [conv1_flops, conv2_flops, downsample0_flops, gate_history_conv_flops], conv2_out_shape
+
+    def forward(self, x, h_vec, h_map, t, **kwargs):
         identity = x
 
         out = self.conv1(x)
@@ -213,6 +236,18 @@ class BasicBlock(nn.Module):
 
         if self.args.gate_history and h_map is None:  # TODO t=0
             h_map = out
+
+        if self.args.gate_history_detach:
+            h_map = h_map.detach()
+
+        if self.args.gate_history_conv_type in ['conv1x1','conv1x1bnrelu'] and "inline_test" not in kwargs:
+            h_map = self.gate_hist_conv(h_map).detach()
+            if self.args.gate_history_conv_type == 'conv1x1bnrelu':
+                h_map = self.gate_hist_bnrelu(h_map)
+        elif self.args.gate_history_conv_type == 'conv1x1_list' and "inline_test" not in kwargs:
+            h_map = self.gate_hist_conv[t](h_map)
+        elif self.args.gate_history_conv_type == 'conv1x1_res' and "inline_test" not in kwargs:
+            h_map = (self.gate_hist_conv(h_map) + h_map)
 
         if self.args.gate_local_policy:
             factor = 3 if self.args.gate_history else 2
@@ -278,9 +313,20 @@ class BasicBlock(nn.Module):
                 elif self.args.gate_random_soft_policy:
                     mask = torch.rand(x.shape[0], self.num_channels, factor, device=x.device)
                 elif self.args.gate_random_hard_policy:
-                    tmp_value = torch.rand(x.shape[0], self.num_channels, factor, device=x.device)
-                    mask = torch.zeros_like(tmp_value)
-                    mask[torch.where(tmp_value == torch.max(tmp_value, dim=-1, keepdim=True)[0])] = 1
+                    # tmp_value = torch.rand(x.shape[0], self.num_channels, factor, device=x.device)
+                    # mask = torch.zeros_like(tmp_value)
+                    # mask[torch.where(tmp_value == torch.max(tmp_value, dim=-1, keepdim=True)[0])] = 1
+                    tmp_value = torch.rand(x.shape[0], self.num_channels, device=x.device)
+                    mask = torch.zeros(x.shape[0], self.num_channels, factor, device=x.device)
+
+                    if len(self.args.gate_stoc_ratio)>0:
+                        _ratio = self.args.gate_stoc_ratio
+                    else:
+                        _ratio = [0.333, 0.333, 0.334] if self.args.gate_history else [0.5, 0.5]
+                    mask[:, :, 0][torch.where(tmp_value < _ratio[0])] = 1
+                    if self.args.gate_history:
+                        mask[:, :, 1][torch.where((tmp_value < _ratio[1]+_ratio[0]) & (tmp_value > _ratio[0]))] = 1
+                        mask[:, :, 2][torch.where(tmp_value > _ratio[1]+_ratio[0])] = 1
 
             if self.args.gate_print_policy and "inline_test" in kwargs:
                 print(mask[0, :max(1, self.num_channels // 64), -1])
@@ -518,16 +564,18 @@ class GateNet(nn.Module):
 
 
         if "tau" not in kwargs:
-            print("tau not in kwargs. use default=1")
+            print("tau not in kwargs. use default=1 (inline_test)")
             kwargs["tau"] = 1
             kwargs["inline_test"] = True
 
         mask_stack_list = []  # TODO list for t-dimension
+        debug_stack_list = []
         h_vec_stack = []
         h_map_stack = []
         for _, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
             for _, block in enumerate(layers):
                 mask_stack_list.append([])
+                debug_stack_list.append([])
                 h_vec_stack.append(None)
                 h_map_stack.append(None)
 
@@ -540,15 +588,26 @@ class GateNet(nn.Module):
             idx = 0
             for li, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
                 for bi, block in enumerate(layers):
-                    x, mask, h_vec_stack[idx], h_map_stack[idx] = block(x, h_vec_stack[idx], h_map_stack[idx], **kwargs)
+                    x, mask, h_vec_stack[idx], h_map_stack[idx] = block(x, h_vec_stack[idx], h_map_stack[idx], t, **kwargs)
                     # history_rack[li][bi] = new_history
                     mask_stack_list[idx].append(mask)
+                    if self.args.gate_debug:
+                        debug_stack_list[idx].append([torch.norm(h_map_stack[idx],p=1)/h_map_stack[idx].numel(),
+                                                      torch.max(torch.abs(h_map_stack[idx]))])
                     idx += 1
 
             x = self.avgpool(x)
             x = torch.flatten(x, 1)
             out = self.fc(x)
             out_list.append(out)
+        if self.args.gate_debug:
+            print("norm")
+            for t in range(_T):
+                print("t:%d %s"%(t, " ".join(["%.3f"%debug_stack_list[block_i][t][0].detach().cpu().item() for block_i in range(len(debug_stack_list))])))
+            print("max")
+            for t in range(_T):
+                print("t:%d %s"%(t, " ".join(["%.3f"%debug_stack_list[block_i][t][1].detach().cpu().item() for block_i in range(len(debug_stack_list))])))
+
             # if t == 0:
             #     mode_op += 1
         return torch.stack(out_list, dim=1), mask_stack_list

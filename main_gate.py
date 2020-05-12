@@ -222,7 +222,7 @@ def compute_gflops_by_mask(mask_tensor_list):
     # print("s0",s0)
     # print("s1",s1)
     s0_savings = sum([s0[i] * (gflops_list[i][0] + gflops_list[i][1]) for i in range(len(gflops_list))])
-    s1_savings = sum([s1[i] * gflops_list[i][0] for i in range(len(gflops_list))])
+    s1_savings = sum([s1[i] * (gflops_list[i][0] - gflops_list[i][3]) for i in range(len(gflops_list))])
     # print("s0_savings", s0_savings/1e9)
     # print("s1_savings", s1_savings/1e9)
     real_gflops = base_model_gflops - (s0_savings + s1_savings) / 1e9
@@ -278,20 +278,27 @@ def reverse_onehot(a):
         return None
 
 
-def compute_losses(criterion, prediction, target, mask_stack_list, gflops_tensor):
+def compute_losses(criterion, prediction, target, mask_stack_list, gflops_tensor, epoch_i):
+    # linear efficiency loss scheduling
+    if args.gate_linear_phase > 0:
+        factor = 1. / args.gate_linear_phase * min(args.gate_linear_phase, epoch_i)
+    else:
+        factor = 1.
+
     acc_loss = criterion(prediction, target)
     choice_dim = 3 if args.gate_history else 2
-    assert len(args.gate_norm_loss_factors) == choice_dim
-    gflops_loss = torch.abs(gflops_tensor - args.gate_gflops_bias) * args.gate_gflops_loss_weight
+    gflops_loss = torch.abs(gflops_tensor - args.gate_gflops_bias) * args.gate_gflops_loss_weight * factor
     mask_norm = torch.stack(
         [torch.norm(mask, dim=[0, 1, 2], p=args.gate_norm)/(mask.numel()/choice_dim)**(1/args.gate_norm)
          for mask in mask_stack_list], dim=0).mean(dim=0)
-    skip_mask_loss = (1 - mask_norm[0]) * args.gate_norm_loss_factors[0] * args.gate_norm_loss_weight
+    skip_mask_loss = (1 - mask_norm[0]) * args.gate_norm_loss_factors[0] * args.gate_norm_loss_weight * factor
     if args.gate_history:
-        hist_mask_loss = (1 - mask_norm[1]) * args.gate_norm_loss_factors[1] * args.gate_norm_loss_weight
+        hist_mask_loss = (1 - mask_norm[1]) * args.gate_norm_loss_factors[1] * args.gate_norm_loss_weight * factor
     else:
-        hist_mask_loss = 0
-    curr_mask_loss = mask_norm[-1] * args.gate_norm_loss_factors[-1] * args.gate_norm_loss_weight
+        hist_mask_loss = (1 - mask_norm[1]) * 0
+    curr_mask_loss = mask_norm[-1] * args.gate_norm_loss_factors[-1] * args.gate_norm_loss_weight * factor
+
+
     loss = acc_loss + gflops_loss + skip_mask_loss + hist_mask_loss + curr_mask_loss
     return {
         "loss": loss,
@@ -371,7 +378,7 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
         # measure losses and accuracy
         gflops_tensor = compute_gflops_by_mask(mask_stack_list)
 
-        loss_dict = compute_losses(criterion, output, target_var[:, 0], mask_stack_list, gflops_tensor)
+        loss_dict = compute_losses(criterion, output, target_var[:, 0], mask_stack_list, gflops_tensor, epoch)
         prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
 
         # record losses and accuracy
@@ -462,7 +469,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
 
             # measure losses, accuracy and predictions
             gflops_tensor = compute_gflops_by_mask(mask_stack_list)
-            loss_dict = compute_losses(criterion, output, target[:, 0], mask_stack_list, gflops_tensor)
+            loss_dict = compute_losses(criterion, output, target[:, 0], mask_stack_list, gflops_tensor, epoch)
 
             prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
             all_results.append(output)

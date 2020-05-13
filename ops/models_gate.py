@@ -4,6 +4,8 @@ from torch.nn.init import normal_, constant_
 import torch.nn.functional as F
 from efficientnet_pytorch import EfficientNet
 import ops.gatenet as gatenet
+import ops.cgnet as cgnet
+from ops.cg_utils import CGConv2dNew
 
 from tools.net_flops_table import feat_dim_dict
 
@@ -27,7 +29,10 @@ class TSN_Gate(nn.Module):
         self.skip_dim = 0
         self.action_dim = 1  # TODO(yue)
 
-        if not (self.args.gate and self.args.gate_local_policy):
+        self.i_do_need_a_policy_network = \
+            not (self.args.gate and self.args.gate_local_policy) and "cgnet" not in self.args.arch
+
+        if self.i_do_need_a_policy_network:
             self._prepare_policy_net()
         self.base_model_list = nn.ModuleList()
         self.new_fc_list = nn.ModuleList()
@@ -41,6 +46,9 @@ class TSN_Gate(nn.Module):
         if "gatenet" in model_name:
             model = getattr(gatenet, model_name)(shall_pretrain, args=self.args)
             model.last_layer_name = 'fc'
+        elif "cgnet" in model_name:
+            model = getattr(cgnet, model_name)(shall_pretrain, args=self.args)
+            model.last_layer_name = 'fc'
         elif "efficientnet" in model_name:
             if shall_pretrain:
                 model = EfficientNet.from_pretrained(model_name)
@@ -48,7 +56,7 @@ class TSN_Gate(nn.Module):
                 model = EfficientNet.from_named(model_name)
             model.last_layer_name = "_fc"
         else:
-            exit("I don't how to prep this net; see models_gate.py:: _prep_a_net")
+            exit("I don't how to prep this net:%s; see models_gate.py:: _prep_a_net"%model_name)
         return model
 
     def _prepare_policy_net(self):
@@ -61,11 +69,9 @@ class TSN_Gate(nn.Module):
         self.input_size = 224
         self.input_mean = [0.485, 0.456, 0.406]
         self.input_std = [0.229, 0.224, 0.225]
-
         shall_pretrain = len(self.args.model_paths) == 0 or self.args.model_paths[0].lower() != 'none'
         model = self._prep_a_net(self.args.arch, shall_pretrain)
         self.base_model_list.append(model)
-
 
     def _prepare_fc(self, num_class):
         def make_a_linear(input_dim, output_dim):
@@ -74,9 +80,7 @@ class TSN_Gate(nn.Module):
             constant_(linear_model.bias, 0)
             return linear_model
 
-        i_do_need_a_policy_network = not (self.args.gate and self.args.gate_local_policy)
-
-        if i_do_need_a_policy_network:
+        if self.i_do_need_a_policy_network:
             setattr(self.lite_backbone, self.lite_backbone.last_layer_name, nn.Dropout(p=self.args.dropout))
             feed_dim = self.args.hidden_dim if not self.args.frame_independent else self.policy_feat_dim
             self.linear = make_a_linear(feed_dim, self.action_dim)
@@ -97,15 +101,17 @@ class TSN_Gate(nn.Module):
         if "tau" not in kwargs:
             kwargs["tau"] = None
 
-        feat, mask_stack_list = self.base_model_list[0](input_data.view(_b, _t, _c, _h, _w),
-                                                        tau=kwargs["tau"], is_training=is_training, curr_step=curr_step)
+        if "cgnet" in self.args.arch:
+            feat, mask_stack_list = self.base_model_list[0](input_data.view(_b, _t, _c, _h, _w))
+        else:
+            feat, mask_stack_list = self.base_model_list[0](input_data.view(_b, _t, _c, _h, _w),
+                                                    tau=kwargs["tau"], is_training=is_training, curr_step=curr_step)
         base_out = self.new_fc_list[0](feat.view(_b * _t, -1)).view(_b, _t, -1)
 
         output = base_out.mean(dim=1).squeeze(1)
 
         for i in range(len(mask_stack_list)):
-            mask_stack_list[i] = torch.stack(mask_stack_list[i], dim=1)
-
+            mask_stack_list[i] = torch.stack(mask_stack_list[i], dim=1)  # TODO: B*T*K
         return output, mask_stack_list, None, torch.stack([base_out], dim=1)
 
 
@@ -167,8 +173,14 @@ class TSN_Gate(nn.Module):
         conv_cnt = 0
         bn_cnt = 0
         for m in self.modules():
-            if isinstance(m, torch.nn.Conv2d) or isinstance(m, torch.nn.Conv1d):
+            if isinstance(m, torch.nn.Conv2d) or isinstance(m, torch.nn.Conv1d) or isinstance(m, CGConv2dNew):
                 ps = list(m.parameters())
+                if isinstance(m, CGConv2dNew):
+                    # print("len", len(ps))
+                    # print([x[0] for x in m.named_parameters()])
+                    assert len(ps) == 3
+                    custom_ops.append(ps[2])
+
                 conv_cnt += 1
                 if conv_cnt == 1:
                     first_conv_weight.append(ps[0])

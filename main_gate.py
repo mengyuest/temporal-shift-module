@@ -99,6 +99,20 @@ def main():
         model_dict = model.state_dict()
         sd = load_to_sd(the_model_path)
 
+        if args.downsample0_renaming:
+            # TODO batchnorm
+            old_to_new_pairs = []
+            for k in sd:
+                # TODO downsample
+                if "downsample0" in k:
+                    # TODO layer1.0.downsample.0.weight-> layer1.0.downsample0.weight
+                    old_to_new_pairs.append((k, k.replace("downsample0", "downsample.0")))
+                elif "downsample1" in k:
+                    # TODO layer1.0.downsample.0.weight-> layer1.0.downsample0.weight
+                    old_to_new_pairs.append((k, k.replace("downsample1", "downsample.1")))
+            for old_key, new_key in old_to_new_pairs:
+                sd[new_key] = sd.pop(old_key)
+
         del_keys = []
         if args.ignore_loading_gate_fc:
             del_keys += [k for k in sd if "gate_fc" in k]
@@ -193,7 +207,8 @@ def set_random_seed(the_seed):
 
 def init_gflops_table(model):
     global base_model_gflops, gflops_list
-    base_model_gflops = get_gflops_params(args.arch, args.reso_list[0], args.num_class, -1, args=args)[0]
+    # base_model_gflops = get_gflops_params(args.arch, args.reso_list[0], args.num_class, -1, args=args)[0]
+    base_model_gflops = 1.8901
     gflops_list = model.base_model_list[0].count_flops((1, 1, 3, args.reso_list[0], args.reso_list[0]))
     print("Network@%d (%.4f GFLOPS) has %d blocks" % (args.reso_list[0], base_model_gflops, len(gflops_list)))
     for i, block in enumerate(gflops_list):
@@ -212,59 +227,79 @@ def compute_gflops_by_mask(mask_tensor_list):
     # else:
     #     s1 = [0 for _ in mask_tensor_list]
 
-    s0 = [torch.mean(mask[:, :, :, 0]) for mask in mask_tensor_list]
-    if args.gate_history:
-        s1 = [torch.mean(mask[:, :, :, 1]) for mask in mask_tensor_list]
+    if "gate" in args.arch:
+        s0 = [torch.mean(mask[:, :, :, 0]) for mask in mask_tensor_list]
+        if args.gate_history:
+            s1 = [torch.mean(mask[:, :, :, 1]) for mask in mask_tensor_list]
+        else:
+            s1 = [0 for _ in mask_tensor_list]
+        # print("s0",s0)
+        # print("s1",s1)
+        s0_savings = sum([s0[i] * (gflops_list[i][0] + gflops_list[i][1]) for i in range(len(gflops_list))])
+        s1_savings = sum([s1[i] * (gflops_list[i][0] - gflops_list[i][3]) for i in range(len(gflops_list))])
+        # print("s0_savings", s0_savings/1e9)
+        # print("s1_savings", s1_savings/1e9)
+        real_gflops = base_model_gflops - (s0_savings + s1_savings) / 1e9
+
     else:
-        s1 = [0 for _ in mask_tensor_list]
+        # s0 for sparsity savings
+        # s1 for history
+        # print(mask_tensor_list)
+        # for mask in mask_tensor_list:
+        #     print(torch.sum(mask[:, :, 1]), torch.sum(mask[:, :, 0]), torch.sum(mask[:, :, 1]) / torch.sum(mask[:, :, 0]))
+        s0 = [1 - 1.0 * torch.sum(mask[:, :, 1]) / torch.sum(mask[:, :, 0]) for mask in mask_tensor_list]
+        savings = sum([s0[i] * gflops_list[i][0] * (1 - 1.0 / args.partitions) for i in range(len(gflops_list))])
+        real_gflops = base_model_gflops - savings / 1e9
 
-
-    # print("s0",s0)
-    # print("s1",s1)
-    s0_savings = sum([s0[i] * (gflops_list[i][0] + gflops_list[i][1]) for i in range(len(gflops_list))])
-    s1_savings = sum([s1[i] * (gflops_list[i][0] - gflops_list[i][3]) for i in range(len(gflops_list))])
-    # print("s0_savings", s0_savings/1e9)
-    # print("s1_savings", s1_savings/1e9)
-    real_gflops = base_model_gflops - (s0_savings + s1_savings) / 1e9
     return real_gflops
 
 
 def print_mask_statistics(mask_tensor_list, num_segments):
-    # overall
-    # t=overall, 0, mid, end
-    #     1. sparsity (blockwise)
-    #     2. variance (blockwise)
-    dim_str = ["save", "hist", "curr"] if args.gate_history else ["save", "curr"]
-
-    for b_i in [None, 0]:
-        print("For example(b=0):" if b_i == 0 else "Overall:")
-        b_start = b_i if b_i is not None else 0
-        b_end = b_i + 1 if b_i is not None else mask_tensor_list[0].shape[0]
-
-        for t_i in [None, num_segments // 2]:  # "[None, 0, num_segments // 2, num_segments - 1]:
-            t_start = t_i if t_i is not None else 0
-            t_end = t_i + 1 if t_i is not None else mask_tensor_list[0].shape[1]
-            for dim_i in range(len(dim_str)):
-                s_list = []
-                d_list = []
-                p_list = []
-                for block_i in range(len(mask_tensor_list)):
-                    s_list.append(torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end, :, dim_i]))
-                    d_list.append(
-                        torch.std(torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end, :, dim_i], dim=-1),
-                                  unbiased=not (b_i == 0)))
-                    # TODO channel-wise fire percentage for instances
-                    # TODO this can be a channel percentage histogram, ranged from 0~1, where we only count five buckets
-                    # TODO (0.00~0.20) (0.20~0.40) (0.40~0.60) (0.60~0.80) (0.80~1.00)
-                    percentage = torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end, :, dim_i],
-                                            dim=[0, 1])
-                    p_list.append(torch.histc(percentage, bins=5, min=0, max=1) / percentage.shape[0])
-                t = "%3d" % t_i if t_i is not None else "all"
-                print("(t=%s, %s)usage: " % (t, dim_str[dim_i]),
-                      "  ".join(["%.4f(%.4f) " % (s, d) for s, d in zip(s_list, d_list)]))
-                print("                  ",
-                      " ".join(["(" + (",".join(["%02d" % (min(99, x * 100)) for x in p])) + ")" for p in p_list]))
+    if "cgnet" in args.arch:
+        cnt_ = [torch.sum(x, dim=[0, 1]) for x in mask_tensor_list]
+        cnt_out = sum([x[0] for x in cnt_])
+        cnt_full = sum([x[1] for x in cnt_])
+        print("Overall sparsity: %.4f"%(1-1.0*cnt_full/cnt_out))
+        print("Full:  ", " ".join(["%7.4f" % (1.0*x[1]/1e9) for x in cnt_]))
+        print("Total: ", " ".join(["%7.4f" % (1.0*x[0]/1e9) for x in cnt_]))
+        print("Ratio: ", " ".join(["%7.4f" % (1-1.0*x[1]/x[0]) for x in cnt_]))
         print()
+    else:
+        # overall
+        # t=overall, 0, mid, end
+        #     1. sparsity (blockwise)
+        #     2. variance (blockwise)
+        dim_str = ["save", "hist", "curr"] if args.gate_history else ["save", "curr"]
+
+        for b_i in [None, 0]:
+            print("For example(b=0):" if b_i == 0 else "Overall:")
+            b_start = b_i if b_i is not None else 0
+            b_end = b_i + 1 if b_i is not None else mask_tensor_list[0].shape[0]
+
+            for t_i in [None, num_segments // 2]:  # "[None, 0, num_segments // 2, num_segments - 1]:
+                t_start = t_i if t_i is not None else 0
+                t_end = t_i + 1 if t_i is not None else mask_tensor_list[0].shape[1]
+                for dim_i in range(len(dim_str)):
+                    s_list = []
+                    d_list = []
+                    p_list = []
+                    for block_i in range(len(mask_tensor_list)):
+                        s_list.append(torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end, :, dim_i]))
+                        d_list.append(
+                            torch.std(torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end, :, dim_i], dim=-1),
+                                      unbiased=not (b_i == 0)))
+                        # TODO channel-wise fire percentage for instances
+                        # TODO this can be a channel percentage histogram, ranged from 0~1, where we only count five buckets
+                        # TODO (0.00~0.20) (0.20~0.40) (0.40~0.60) (0.60~0.80) (0.80~1.00)
+                        percentage = torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end, :, dim_i],
+                                                dim=[0, 1])
+                        p_list.append(torch.histc(percentage, bins=5, min=0, max=1) / percentage.shape[0])
+                    t = "%3d" % t_i if t_i is not None else "all"
+                    print("(t=%s, %s)usage: " % (t, dim_str[dim_i]),
+                          "  ".join(["%.4f(%.4f) " % (s, d) for s, d in zip(s_list, d_list)]))
+                    print("                  ",
+                          " ".join(["(" + (",".join(["%02d" % (min(99, x * 100)) for x in p])) + ")" for p in p_list]))
+            print()
 
 
 def reverse_onehot(a):
@@ -278,28 +313,49 @@ def reverse_onehot(a):
         return None
 
 
-def compute_losses(criterion, prediction, target, mask_stack_list, gflops_tensor, epoch_i):
+def compute_losses(criterion, prediction, target, mask_stack_list, gflops_tensor, epoch_i, model):
     # linear efficiency loss scheduling
     if args.gate_linear_phase > 0:
         factor = 1. / args.gate_linear_phase * min(args.gate_linear_phase, epoch_i)
     else:
         factor = 1.
 
+    # accuracy loss
     acc_loss = criterion(prediction, target)
-    choice_dim = 3 if args.gate_history else 2
-    gflops_loss = torch.abs(gflops_tensor - args.gate_gflops_bias) * args.gate_gflops_loss_weight * factor
-    mask_norm = torch.stack(
-        [torch.norm(mask, dim=[0, 1, 2], p=args.gate_norm)/(mask.numel()/choice_dim)**(1/args.gate_norm)
-         for mask in mask_stack_list], dim=0).mean(dim=0)
-    skip_mask_loss = (1 - mask_norm[0]) * args.gate_norm_loss_factors[0] * args.gate_norm_loss_weight * factor
-    if args.gate_history:
-        hist_mask_loss = (1 - mask_norm[1]) * args.gate_norm_loss_factors[1] * args.gate_norm_loss_weight * factor
+
+    # gflops loss
+    if args.gate_gflops_loss_weight > 0:
+        gflops_loss = torch.abs(gflops_tensor - args.gate_gflops_bias) * args.gate_gflops_loss_weight * factor
     else:
-        hist_mask_loss = (1 - mask_norm[1]) * 0
-    curr_mask_loss = mask_norm[-1] * args.gate_norm_loss_factors[-1] * args.gate_norm_loss_weight * factor
+        gflops_loss = 0 * acc_loss
 
+    # sparsity loss
+    if args.gate_norm_loss_weight > 0:
+        choice_dim = 3 if args.gate_history else 2
+        mask_norm = torch.stack(
+            [torch.norm(mask, dim=[0, 1, 2], p=args.gate_norm) / (mask.numel() / choice_dim) ** (1 / args.gate_norm)
+             for mask in mask_stack_list], dim=0).mean(dim=0)
+        skip_mask_loss = (1 - mask_norm[0]) * args.gate_norm_loss_factors[0] * args.gate_norm_loss_weight * factor
+        if args.gate_history:
+            hist_mask_loss = (1 - mask_norm[1]) * args.gate_norm_loss_factors[1] * args.gate_norm_loss_weight * factor
+        else:
+            hist_mask_loss = (1 - mask_norm[1]) * 0
+        curr_mask_loss = mask_norm[-1] * args.gate_norm_loss_factors[-1] * args.gate_norm_loss_weight * factor
+    else:
+        skip_mask_loss = acc_loss * 0
+        hist_mask_loss = acc_loss * 0
+        curr_mask_loss = acc_loss * 0
 
-    loss = acc_loss + gflops_loss + skip_mask_loss + hist_mask_loss + curr_mask_loss
+    # threshold loss for cgnet
+    thres_loss = acc_loss * 0
+    if "cgnet" in args.arch:
+        for name, param in model.named_parameters():
+            if 'threshold' in name:
+                # print(param)
+                thres_loss += args.threshold_loss_weight * torch.sum((param-args.gtarget) ** 2)
+
+    loss = acc_loss + gflops_loss + skip_mask_loss + hist_mask_loss + curr_mask_loss + thres_loss
+
     return {
         "loss": loss,
         "acc_loss": acc_loss,
@@ -307,7 +363,8 @@ def compute_losses(criterion, prediction, target, mask_stack_list, gflops_tensor
         "gflops_loss": gflops_loss,
         "skip_mask_loss": skip_mask_loss,
         "hist_mask_loss": hist_mask_loss,
-        "curr_mask_loss": curr_mask_loss
+        "curr_mask_loss": curr_mask_loss,
+        "thres_loss": thres_loss,
     }
 
 
@@ -349,15 +406,11 @@ def get_average_meters(number):
 def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_path, tf_writer):
     batch_time, data_time, top1, top5 = get_average_meters(4)
     losses_dict = {}
-
     mask_stack_list_list = [[] for _ in gflops_list]
-
     tau = get_current_temperature(epoch)
-    r_list = []
-
-    model.module.partialBN(not args.no_partialbn)
 
     # switch to train mode
+    model.module.partialBN(not args.no_partialbn)
     model.train()
 
     end = time.time()
@@ -371,14 +424,13 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
         target = input_tuple[-1].cuda()
         target_var = torch.autograd.Variable(target)
 
-        # model forward function
+        # model forward function & measure losses and accuracy
         output, mask_stack_list, feat_outs, base_outs = \
             model(input=input_var_list, tau=tau, is_training=True, curr_step=epoch * len(train_loader) + i)
 
-        # measure losses and accuracy
         gflops_tensor = compute_gflops_by_mask(mask_stack_list)
 
-        loss_dict = compute_losses(criterion, output, target_var[:, 0], mask_stack_list, gflops_tensor, epoch)
+        loss_dict = compute_losses(criterion, output, target_var[:, 0], mask_stack_list, gflops_tensor, epoch, model)
         prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
 
         # record losses and accuracy
@@ -398,7 +450,7 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
 
         # gather masks
         for block_i, mask_stack in enumerate(mask_stack_list):
-            mask_stack_list_list[block_i].append(mask_stack.detach().cpu())
+                mask_stack_list_list[block_i].append(mask_stack.detach().cpu())
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -407,24 +459,24 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
         # logging
         if i % args.print_freq == 0:
             print_output = ('Epoch:[{0:02d}][{1:03d}/{2:03d}] '
-                            'Time {batch_time.val:.3f} ({batch_time.avg:.3f}) '
+                            'Time {batch_time.val:.3f}({batch_time.avg:.3f}) '
                             '{data_time.val:.3f} ({data_time.avg:.3f})\t'
-                            'Loss {loss.val:.4f} ({loss.avg:.4f}) '
-                            'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) '
-                            'Prec@5 {top5.val:.3f} ({top5.avg:.3f})\t'.format(
+                            'Loss{loss.val:.4f}({loss.avg:.4f}) '
+                            'Prec@1 {top1.val:.3f}({top1.avg:.3f}) '
+                            'Prec@5 {top5.val:.3f}({top5.avg:.3f})\t'.format(
                 epoch, i, len(train_loader), batch_time=batch_time,
                 data_time=data_time, loss=losses_dict["loss"], top1=top1, top5=top5))  # TODO
 
             for loss_name in losses_dict:
                 if loss_name == "loss":
                     continue
-                print_output += ' {header:s} {loss.val:.4f}({loss.avg:.4f})'.\
+                print_output += ' {header:s} {loss.val:.3f}({loss.avg:.3f})'.\
                     format(header=loss_name[0], loss=losses_dict[loss_name])
             print(print_output)
 
+
     for block_i in range(len(mask_stack_list_list)):
         mask_stack_list_list[block_i] = torch.cat(mask_stack_list_list[block_i], dim=0)
-
     batch_gflops = compute_gflops_by_mask(mask_stack_list_list)
     usage_str = get_policy_usage_str(batch_gflops)
     print(usage_str)
@@ -451,7 +503,6 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     mask_stack_list_list = [[] for _ in gflops_list]
 
     losses_dict={}
-    r_list = []
 
     # switch to evaluate mode
     model.eval()
@@ -467,9 +518,10 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
             output, mask_stack_list, feat_outs, base_outs = \
                 model(input=input_tuple[:-1], tau=tau, is_training=False, curr_step=0)
 
-            # measure losses, accuracy and predictions
             gflops_tensor = compute_gflops_by_mask(mask_stack_list)
-            loss_dict = compute_losses(criterion, output, target[:, 0], mask_stack_list, gflops_tensor, epoch)
+
+            # measure losses, accuracy and predictions
+            loss_dict = compute_losses(criterion, output, target[:, 0], mask_stack_list, gflops_tensor, epoch, model)
 
             prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
             all_results.append(output)
@@ -493,17 +545,17 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
 
             if i % args.print_freq == 0:
                 print_output = ('Test: [{0:03d}/{1:03d}] '
-                                'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                                'Loss {loss.val:.4f} ({loss.avg:.4f})'
-                                'Prec@1 {top1.val:.3f} ({top1.avg:.3f}) '
-                                'Prec@5 {top5.val:.3f} ({top5.avg:.3f})\t'.
+                                'Time {batch_time.val:.3f}({batch_time.avg:.3f})\t'
+                                'Loss{loss.val:.4f}({loss.avg:.4f})'
+                                'Prec@1 {top1.val:.3f}({top1.avg:.3f}) '
+                                'Prec@5 {top5.val:.3f}({top5.avg:.3f})\t'.
                                 format(i, len(val_loader), batch_time=batch_time,
                                        loss=losses_dict["loss"], top1=top1, top5=top5))
 
                 for loss_name in losses_dict:
                     if loss_name == "loss":
                         continue
-                    print_output += ' {header:s} {loss.val:.4f}({loss.avg:.4f})'. \
+                    print_output += ' {header:s} {loss.val:.3f}({loss.avg:.3f})'. \
                         format(header=loss_name[0], loss=losses_dict[loss_name])
                 print(print_output)
 

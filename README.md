@@ -49,7 +49,7 @@ python main.py ucf101 RGB --arch resnet50 --num_segments 8 --gd 20 --lr 0.02 --w
 } 
 ```
 
-**[NEW!]** We have released the code of online hand gesture recognition on NVIDIA Jeston Nano. It can achieve real-time recognition at only 8 watts. See [`online_demo`](online_demo) folder for the details. [[Full Video]](https://hanlab.mit.edu/projects/tsm/#live_demo)
+**[NEW!]** We have released the code of online hand gesture recognition on NVIDIA Jeston Nano. It can achieve real-time recognition at only 8 watts. See [`online_demo`](obsolete/online_demo) folder for the details. [[Full Video]](https://hanlab.mit.edu/projects/tsm/#live_demo)
 
 
 ## Overview
@@ -280,5 +280,5 @@ We provided several examples to train TSM with this repo:
 We have build an online hand gesture recognition demo using our TSM. The model is built with MobileNetV2 backbone and trained on Jester dataset. 
 
 - Recorded video of the live demo [[link]](https://hanlab.mit.edu/projects/tsm/#live_demo)
-- Code of the live demo and set up tutorial:  [`online_demo`](online_demo) 
+- Code of the live demo and set up tutorial:  [`online_demo`](obsolete/online_demo) 
 

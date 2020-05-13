@@ -109,3 +109,43 @@ class Recorder:
 
 
 
+def count_conv2d_flops(input_data_shape, conv):
+    n, c_in, h_in, w_in = input_data_shape
+    h_out = (h_in + 2 * conv.padding[0] - conv.dilation[0] * (conv.kernel_size[0] - 1) - 1) // conv.stride[0] + 1
+    w_out = (w_in + 2 * conv.padding[1] - conv.dilation[1] * (conv.kernel_size[1] - 1) - 1) // conv.stride[1] + 1
+    c_out = conv.out_channels
+    bias = 1 if conv.bias is not None else 0
+    # print("h:%d->%d"%(h_in,h_out))
+    # print("c:%d->%d"%(c_in,c_out))
+    flops = n * c_out * h_out * w_out * (c_in // conv.groups * conv.kernel_size[0] * conv.kernel_size[1] + bias)
+    # print("flops",flops)
+    return flops, (n, c_out, h_out, w_out)
+
+
+def product(tuple1):
+    """Calculates the product of a tuple"""
+    prod = 1
+    for x in tuple1:
+        prod = prod * x
+    return prod
+
+def count_bn_flops(input_data_shape):
+    flops = product(input_data_shape) * 2
+    output_data_shape = input_data_shape
+    return flops, output_data_shape
+
+
+def count_relu_flops(input_data_shape):
+    flops = product(input_data_shape) * 1
+    output_data_shape = input_data_shape
+    return flops, output_data_shape
+
+# def count_max_pool(input_data_shape, maxpool):
+#     n, c_in, h_in, w_in = input_data_shape
+#     h_out = h_in
+#     output_data_shape = n, c_out, h_out, w_out
+
+def count_fc_flops(input_data_shape, fc):
+    output_data_shape = input_data_shape[:-1] + (fc.out_features, )
+    flops = product(output_data_shape) * (fc.in_features + 1)
+    return flops, output_data_shape

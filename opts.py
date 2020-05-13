@@ -296,6 +296,8 @@ parser.add_argument('--wta_ratio', type=float, default=0)  # TODO
 
 parser.add_argument('--gate_bn_between_fcs', action='store_true')
 parser.add_argument('--gate_relu_between_fcs', action='store_true')
+parser.add_argument('--gate_tanh_between_fcs', action='store_true')
+
 
 # History branch
 parser.add_argument('--gate_history', action='store_true')
@@ -331,3 +333,16 @@ parser.add_argument('--gate_debug', action='store_true')
 parser.add_argument('--gate_linear_phase', type=int, default=0)  # linear-increase to reach 100% at epoch x
 
 # kernel code and recon loss
+
+
+# channel-gating network
+parser.add_argument('--threshold_loss_weight', default=0.0001, type=float)
+parser.add_argument('--partitions', default=4, type=int)
+parser.add_argument('--ginit', default=0.0, type=float)  # initial value for threshold
+parser.add_argument('--alpha', default=2.0, type=float)  # slope of the gate backprop
+parser.add_argument('--gtarget', default=1.0, type=float)  # gating target
+parser.add_argument('--use_group', action='store_true')  # use group conv as the base path
+parser.add_argument('--shuffle', action='store_true')    # add channel shuffling
+parser.add_argument('--sparse_bp', action='store_true')  # sparse backprop of PGConv2d
+
+parser.add_argument('--downsample0_renaming', action='store_true')  # sparse backprop of PGConv2d

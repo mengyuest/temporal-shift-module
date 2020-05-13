@@ -118,6 +118,10 @@ if "diva" in host_name:
 K400_FRAMES = ospj(K400_PATH, 'images')
 
 
+#TODO(yue) cifar-10
+CIFAR10_PATH=ospj(DATA_PATH, "cifar10_data")
+CIFAR10_META_PATH = CIFAR10_PATH
+
 EXPS_PATH=ospj(ROOT_DIR, LOG_PREFIX,"logs_tsm")
 
 from os.path import expanduser

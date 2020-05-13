@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-
 from __future__ import print_function
 from __future__ import division
 from __future__ import absolute_import
 
 import os
 import sys  # TODO(yue)
+import math
+import time
 
-from imta_dataloader import get_dataloaders
-from imta_args import arg_parser
-from imta_adaptive_inference import dynamic_evaluate
-import imta_models
-
+from obsolete.imta_dataloader import get_dataloaders
+from obsolete.imta_args import arg_parser
+from obsolete.imta_opcounter import measure_model
+from obsolete.imta_adaptive_inference import dynamic_evaluate
+from obsolete import imta_models
 from ops.utils import cal_map
 import common
 from os.path import join as ospj
@@ -19,7 +20,7 @@ import warnings  # TODO(yue)
 warnings.filterwarnings("ignore")  # TODO(yue)
 
 args = arg_parser.parse_args()
-# os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
+# os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu  # TODO(yue)
 
 args.grFactor = list(map(int, args.grFactor.split('-')))
 args.bnFactor = list(map(int, args.bnFactor.split('-')))
@@ -41,10 +42,11 @@ elif args.data == 'actnet':  # TODO (yue)
 else:
     args.num_classes = 1000
 
+import torch
+import torch.nn as nn
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim
-from imta_utils import *
 
 torch.manual_seed(args.seed)
 
@@ -61,6 +63,7 @@ class Logger(object):
     def flush(self):
         pass
 
+
 def main():
 
     global args
@@ -71,7 +74,8 @@ def main():
     else:
         IMAGE_SIZE = 224
 
-    args.save = common.EXPS_PATH + "/imta/" + args.save  # TODO(Yue)
+
+    args.save = common.EXPS_PATH+"/imta/"+args.save  # TODO(Yue)
 
     if not os.path.exists(args.save):
         os.makedirs(args.save)
@@ -79,9 +83,20 @@ def main():
     sys.stdout = Logger(os.path.join(args.save, 'log.txt'))  # TODO(Yue)
 
     model = getattr(imta_models, args.arch)(args)
+    #   print(model)
+    n_flops, n_params = measure_model(model, IMAGE_SIZE, IMAGE_SIZE)
+    # print("------------------------------")
+    print(n_flops, n_params)
+    # print("------------------------------")
+    torch.save(n_flops, os.path.join(args.save, 'flop.pth'))
+    del(model)
+    torch.save(args, os.path.join(args.save, 'args.pth'))
 
-    if not os.path.exists(os.path.join(args.save, 'args.pth')): 
-        torch.save(args, os.path.join(args.save, 'args.pth'))
+    # return 
+
+    model = getattr(imta_models, args.arch)(args)
+    # fout = open('model.txt', 'w')
+    # print(model, file=fout)
 
     if args.arch.startswith('alexnet') or args.arch.startswith('vgg'):
         model.features = torch.nn.DataParallel(model.features)
@@ -89,25 +104,18 @@ def main():
     else:
         model = torch.nn.DataParallel(model, device_ids=[int(x) for x in args.gpu.split(",")]).cuda()  # TODO(yue)
 
-    # define loss function (criterion) and pptimizer
-    for param in model.module.net.parameters():
-        param.requires_grad = False
-
-    optimizer = torch.optim.SGD([
-        {'params': model.module.classifier.parameters()},
-        {'params': model.module.isc_modules.parameters()}
-                                ],
-                                args.lr,
+    # define loss function (criterion) and optimizer
+    criterion = nn.CrossEntropyLoss().cuda()
+    # define optimizer
+    optimizer = torch.optim.SGD(model.parameters(), args.lr,
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
-    
-    kd_loss = KDLoss(args)
-    
+
     # optionally resume from a checkpoint
     if args.resume:
         checkpoint = load_checkpoint(args)
         if checkpoint is not None:
-            args.start_epoch = checkpoint['epoch']
+            args.start_epoch = checkpoint['epoch'] + 1
             best_acc1 = checkpoint['best_acc1']
             model.load_state_dict(checkpoint['state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer'])
@@ -124,20 +132,22 @@ def main():
         model.load_state_dict(m['state_dict'])
 
         if args.evalmode == 'anytime':
-            validate(test_loader, model, kd_loss)
+            validate(test_loader, model, criterion)
         else:
             dynamic_evaluate(model, test_loader, val_loader, args)
         return
 
+
     if args.imagenet_pretrained:   # TODO(yue)
         sd = torch.load(ospj(common.PYTORCH_CKPT_DIR, "msdnet-step4-block5.pth"))["state_dict"]
         state_dict = model.state_dict()
-        new_sd = {k.replace("module.","module.net."): sd[k] for k in sd if "classifier" not in k}
+        new_sd = {k: sd[k] for k in sd if "classifier" not in k}
         state_dict.update(new_sd)
         model.load_state_dict(state_dict)
 
     # set up logging
     global log_print
+
 
     def log_print(*args):
         print(*args)
@@ -150,12 +160,13 @@ def main():
               '\tval_acc1\ttrain_acc5\tval_acc5']
 
     for epoch in range(args.start_epoch, args.epochs):
-        
+
         # train for one epoch
-        train_loss, train_acc1, train_acc5, lr = train(train_loader, model, kd_loss, optimizer, epoch)
+        train_loss, train_acc1, train_acc5, lr = train(train_loader, model, criterion, optimizer, epoch)
 
         # evaluate on validation set
-        val_loss, val_acc1, val_acc5 = validate(test_loader, model, kd_loss)
+        # val_loss, val_acc1, val_acc5 = validate(val_loader, model, criterion)
+        val_loss, val_acc1, val_acc5 = validate(test_loader, model, criterion)
 
         # save scores to a tsv file, rewrite the whole file to prevent
         # accidental deletion
@@ -180,7 +191,7 @@ def main():
 
     print('Best val_acc1: {:.4f} at epoch {}'.format(best_acc1, best_epoch))
 
-def train(train_loader, model, kd_loss, optimizer, epoch):
+def train(train_loader, model, criterion, optimizer, epoch):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -220,16 +231,19 @@ def train(train_loader, model, kd_loss, optimizer, epoch):
         target_var = torch.autograd.Variable(target)
 
         # compute output
-        output, soft_target = model(input_var)
+        output, _ = model(input_var)
         if not isinstance(output, list):
             output = [output]
 
         if args.data == 'actnet':  # TODO (yue)
             output = [x.view(_b, _tc//3, args.num_classes).mean(dim=1) for x in output]
-            soft_target = soft_target.view(_b, _tc//3, args.num_classes).mean(dim=1)
 
-        loss = kd_loss.loss_fn_kd(output, target_var, soft_target)
+        loss = 0.0
+        for j in range(len(output)):
+            loss += criterion(output[j], target_var)
+        # measure acc and record loss
         losses.update(loss.item(), input.size(0))
+
         for j in range(len(output)):
             acc1, acc5 = accuracy(output[j].data, target, topk=(1, 5))
             top1[j].update(acc1.item(), input.size(0))
@@ -246,18 +260,18 @@ def train(train_loader, model, kd_loss, optimizer, epoch):
 
         if i % args.print_freq == 0:
             print('Epoch: [{0}][{1}/{2}](lr={3:.5f})\t'
-                  'Time {batch_time.avg:.3f}({batch_time.avg:.3f})\t'
-                  'Data {data_time.avg:.3f}({data_time.avg:.3f})\t'
+                  'Time {batch_time.val:.3f}({batch_time.avg:.3f})\t'
+                  'Data {data_time.val:.3f}({data_time.avg:.3f})\t'
                   'Loss {loss.val:.4f}({loss.avg:.4f})\t'
                   'Acc@1 {top1.val:.4f}({top1.avg:.4f})\t'
                   'Acc@5 {top5.val:.4f}({top5.avg:.4f})'.format(
-                    epoch, i + 1, len(train_loader), lr,
+                    epoch, i, len(train_loader), lr,
                     batch_time=batch_time, data_time=data_time,
                     loss=losses, top1=top1[-1], top5=top5[-1]))
 
     return losses.avg, top1[-1].avg, top5[-1].avg, running_lr
 
-def validate(val_loader, model, kd_loss):
+def validate(val_loader, model, criterion):
     batch_time = AverageMeter()
     losses = AverageMeter()
     data_time = AverageMeter()
@@ -296,7 +310,7 @@ def validate(val_loader, model, kd_loss):
             data_time.update(time.time() - end)
 
             # compute output
-            output = model(input_var)
+            output, _ = model(input_var)  # TODO(yue) strange, why mistake like this
             if not isinstance(output, list):
                 output = [output]
 
@@ -305,14 +319,13 @@ def validate(val_loader, model, kd_loss):
             if len(pred_list_list)==0:  # TODO (yue)
                 pred_list_list = [[] for _ in range(len(output))]
 
-            loss = kd_loss.loss_fn_kd(output, target_var, output[-1])
-
+            loss = 0.0
             for j in range(len(output)):
+                loss += criterion(output[j], target_var)
                 pred_list_list[j].append(output[j])  # TODO (yue)
             target_list.append(target)  # TODO (yue)
             mtarget_list.append(mtarget)  # TODO (yue)
-
-            # measure error and record loss
+            # measure acc and record loss
             losses.update(loss.item(), input.size(0))
 
             for j in range(len(output)):
@@ -326,40 +339,42 @@ def validate(val_loader, model, kd_loss):
 
             if i % args.print_freq == 0:
                 print('Epoch: [{0}/{1}]\t'
-                      'Time {batch_time.avg:.3f}({batch_time.avg:.3f})\t'
-                      'Data {data_time.avg:.3f}({data_time.avg:.3f})\t'
+                      'Time {batch_time.val:.3f}({batch_time.avg:.3f})\t'
+                      'Data {data_time.val:.3f}({data_time.avg:.3f})\t'
                       'Loss {loss.val:.4f}({loss.avg:.4f})\t'
                       'Acc@1 {top1.val:.4f}({top1.avg:.4f})\t'
                       'Acc@5 {top5.val:.4f}({top5.avg:.4f})'.format(
-                        i + 1, len(val_loader),
+                        i, len(val_loader),
                         batch_time=batch_time, data_time=data_time,
                         loss=losses, top1=top1[-1], top5=top5[-1]))
                 # break
+
     for j in range(args.nBlocks):
         # TODO(yue)
         mAP, _ = cal_map(torch.cat(pred_list_list[j], 0).cpu(),
                          torch.cat(mtarget_list, 0)[:, 0:1].cpu())  # TODO(yue) single-label mAP
         mmAP, _ = cal_map(torch.cat(pred_list_list[j], 0).cpu(),
                           torch.cat(mtarget_list, 0).cpu())  # TODO(yue)  multi-label mAP
+
         print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}  mAP {mAP:.3f}  mmAP {mmAP:.3f}'.
               format(top1=top1[j], top5=top5[j], mAP=mAP, mmAP=mmAP))  #TODO(yue)
         """
         print('Exit {}\t'
-              'Err@1 {:.4f}\t'
-              'Err@5 {:.4f}'.format(
+              'Acc@1 {:.4f}\t'
+              'Acc5 {:.4f}'.format(
               j, top1[j].avg, top5[j].avg))
         """
-    # print(' * Err@1 {top1.avg:.3f} Err@5 {top5.avg:.3f}'.format(top1=top1[-1], top5=top5[-1]))
+    # print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'.format(top1=top1[-1], top5=top5[-1]))
     return losses.avg, top1[-1].avg, top5[-1].avg
 
 def save_checkpoint(state, args, is_best, filename, result):
-    # print(args)  #TODO(yue)
+    # print(args)
     result_filename = os.path.join(args.save, 'scores.tsv')
     model_dir = os.path.join(args.save, 'save_models')
     latest_filename = os.path.join(model_dir, 'latest.txt')
     model_filename = os.path.join(model_dir, filename)
     best_filename = os.path.join(model_dir, 'model_best.pth.tar')
-    if is_best:  #TODO(yue)
+    if is_best:
         os.makedirs(args.save, exist_ok=True)
         os.makedirs(model_dir, exist_ok=True)
         torch.save(state, best_filename)
@@ -402,7 +417,7 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
 def accuracy(output, target, topk=(1,)):
-    """Computes the error@k for the specified values of k"""
+    """Computes the acc@k for the specified values of k"""
     maxk = max(topk)
     batch_size = target.size(0)
 

@@ -6,6 +6,8 @@ from torch.hub import load_state_dict_from_url
 import torch.nn.functional as F
 from torch.nn.init import normal_, constant_
 
+from ops.utils import count_relu_flops, count_bn_flops, count_fc_flops, count_conv2d_flops
+
 __all__ = ['GateNet', 'gatenet18', 'gatenet34', 'gatenet50', 'gatenet101', 'gatenet152']
 
 model_urls = {
@@ -35,48 +37,6 @@ def list_sum(obj):
             return sum(list_sum(x) for x in obj)
     else:
         return obj
-
-def product(tuple1):
-    """Calculates the product of a tuple"""
-    prod = 1
-    for x in tuple1:
-        prod = prod * x
-    return prod
-
-
-def count_conv2d_flops(input_data_shape, conv):
-    n, c_in, h_in, w_in = input_data_shape
-    h_out = (h_in + 2 * conv.padding[0] - conv.dilation[0] * (conv.kernel_size[0] - 1) - 1) // conv.stride[0] + 1
-    w_out = (w_in + 2 * conv.padding[1] - conv.dilation[1] * (conv.kernel_size[1] - 1) - 1) // conv.stride[1] + 1
-    c_out = conv.out_channels
-    bias = 1 if conv.bias is not None else 0
-    # print("h:%d->%d"%(h_in,h_out))
-    # print("c:%d->%d"%(c_in,c_out))
-    flops = n * c_out * h_out * w_out * (c_in // conv.groups * conv.kernel_size[0] * conv.kernel_size[1] + bias)
-    # print("flops",flops)
-    return flops, (n, c_out, h_out, w_out)
-
-
-def count_bn_flops(input_data_shape):
-    flops = product(input_data_shape) * 2
-    output_data_shape = input_data_shape
-    return flops, output_data_shape
-
-
-def count_relu_flops(input_data_shape):
-    flops = product(input_data_shape) * 1
-    output_data_shape = input_data_shape
-    return flops, output_data_shape
-
-# def count_max_pool(input_data_shape, maxpool):
-#     n, c_in, h_in, w_in = input_data_shape
-#     h_out = h_in
-#     output_data_shape = n, c_out, h_out, w_out
-
-def count_fc_flops(input_data_shape, fc):
-    output_data_shape = input_data_shape[:-1] + (fc.out_features, )
-    flops = product(output_data_shape) * (fc.in_features + 1)
-    return flops, output_data_shape
 
 
 def gumbel_sigmoid(logits, tau=1, hard=False):
@@ -160,11 +120,18 @@ class BasicBlock(nn.Module):
 
         self.args = args
         if self.args.gate_local_policy:
+
+            if self.args.gate_tanh:
+                self.tanh = nn.Tanh()
+                self.relu_not_inplace = nn.ReLU(inplace=False)
+            elif self.args.gate_sigmoid:
+                self.sigmoid = nn.Sigmoid()
+
             in_factor = 1
-            out_factor = 2 if self.args.gate_gumbel_softmax else 1
+            out_factor = 2 if any([self.args.gate_gumbel_softmax, self.args.gate_tanh, self.args.gate_sigmoid]) else 1
             if self.args.gate_history:
                 in_factor = 2 if self.args.fusion_type == "cat" else 1
-                if self.args.gate_gumbel_softmax:
+                if self.args.gate_gumbel_softmax or self.args.gate_tanh or self.args.gate_sigmoid:
                     out_factor = 3
                 elif self.args.gate_sem_hash:
                     out_factor = 2
@@ -272,8 +239,16 @@ class BasicBlock(nn.Module):
                     x_c = self.gate_bn(x_c)
                 if self.args.gate_relu_between_fcs:
                     x_c = self.gate_relu(x_c)
+                if self.args.gate_tanh_between_fcs:
+                    x_c = self.tanh(x_c)
 
                 x_c = self.gate_fc1(x_c)
+
+                if self.args.gate_tanh:
+                    x_c = self.tanh(x_c)
+                    x_c = self.relu_not_inplace(x_c)
+                elif self.args.gate_sigmoid:
+                    x_c = self.sigmoid(x_c)
 
                 use_hard = not self.args.gate_gumbel_use_soft
 
@@ -295,6 +270,10 @@ class BasicBlock(nn.Module):
                         h_mask = mask2d[:, :, 0]
                         c_mask = mask2d[:, :, 1]
                         mask = torch.stack([1+h_mask*c_mask-h_mask-c_mask, h_mask * (1-c_mask), c_mask], dim=-1)
+                    elif self.args.gate_tanh:  # TODO using tanh
+                        mask = x_c.view(x.shape[0], self.num_channels, 3)  # TODO: B*C*3
+                    elif self.args.gate_sigmoid:
+                        mask = x_c.view(x.shape[0], self.num_channels, 3)  # TODO: B*C*3
                 else:
                     if self.args.gate_gumbel_sigmoid:
                         mask = gumbel_sigmoid(logits=x_c, tau=kwargs["tau"], hard=use_hard)
@@ -304,6 +283,10 @@ class BasicBlock(nn.Module):
                         x_c2d = torch.log(F.softmax(x_c2d, dim=2))
                         mask2d = F.gumbel_softmax(logits=x_c2d, tau=kwargs["tau"], hard=use_hard)
                         mask = mask2d  # TODO: B*C*2
+                    elif self.args.gate_tanh:  # TODO using tanh
+                        mask = x_c.view(x.shape[0], self.num_channels, 2)  # TODO: B*C*2
+                    elif self.args.gate_sigmoid:
+                        mask = x_c.view(x.shape[0], self.num_channels, 2)  # TODO: B*C*2
 
             else:
                 if self.args.gate_all_zero_policy:

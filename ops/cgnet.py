@@ -58,7 +58,13 @@ class BasicBlock(nn.Module):
 
         self.bn1 = norm_layer(planes)
         self.relu = nn.ReLU(inplace=True)
-        self.conv2 = conv3x3(planes, planes)
+        if args.dense_in_block:
+            self.conv2 = G.CGConv2dNew(planes, planes, kernel_size=3,
+                          stride=1, padding=1, bias=False,
+                          p=args.partitions, th=args.ginit, alpha=args.alpha,
+                          use_group=args.use_group, shuffle=args.shuffle, sparse_bp=args.sparse_bp)
+        else:
+            self.conv2 = conv3x3(planes, planes)
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
         self.stride = stride
@@ -69,8 +75,11 @@ class BasicBlock(nn.Module):
         out, n_all_pos = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
-
-        out = self.conv2(out)
+        if self.args.dense_in_block:
+            out, n_all_pos2 = self.conv2(out)
+        else:
+            n_all_pos2 = None
+            out = self.conv2(out)
         out = self.bn2(out)
 
         if self.downsample is not None:
@@ -79,7 +88,7 @@ class BasicBlock(nn.Module):
         out += identity
         out = self.relu(out)
 
-        return out, n_all_pos
+        return out, n_all_pos, n_all_pos2
 
     def count_flops(self, input_data_shape, **kwargs):
         conv1_flops, conv1_out_shape = count_conv2d_flops(input_data_shape, self.conv1)
@@ -231,6 +240,8 @@ class CGNet(nn.Module):
         for _, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
             for _, block in enumerate(layers):
                 mask_stack_list.append([])
+                if self.args.dense_in_block:
+                    mask_stack_list.append([])
 
         for t in range(_T):
             x = self.conv1(input_data[:, t])
@@ -241,10 +252,15 @@ class CGNet(nn.Module):
             idx = 0
             for li, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
                 for bi, block in enumerate(layers):
-                    x, n_all_pos = block(x, **kwargs)
-                    # history_rack[li][bi] = new_history
-                    mask_stack_list[idx].append(n_all_pos)
-                    idx += 1
+                    if self.args.dense_in_block:
+                        x, n_all_pos, n_all_pos2 = block(x, **kwargs)
+                        mask_stack_list[idx].append(n_all_pos)
+                        mask_stack_list[idx+1].append(n_all_pos2)
+                        idx += 2
+                    else:
+                        x, n_all_pos = block(x, **kwargs)
+                        mask_stack_list[idx].append(n_all_pos)
+                        idx += 1
 
             x = self.avgpool(x)
             x = torch.flatten(x, 1)
@@ -252,6 +268,7 @@ class CGNet(nn.Module):
             out_list.append(out)
         # print(mask_stack_list)
         return torch.stack(out_list, dim=1), mask_stack_list
+
 
 
 

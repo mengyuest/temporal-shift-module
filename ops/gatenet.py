@@ -195,7 +195,8 @@ class BasicBlock(nn.Module):
         adaptive_policy = not any([self.args.gate_all_zero_policy,
                                    self.args.gate_all_one_policy,
                                    self.args.gate_random_soft_policy,
-                                   self.args.gate_random_hard_policy])
+                                   self.args.gate_random_hard_policy,
+                                   self.args.gate_threshold])
 
         mask = None
         h_vec_out = None
@@ -310,6 +311,28 @@ class BasicBlock(nn.Module):
                     if self.args.gate_history:
                         mask[:, :, 1][torch.where((tmp_value < _ratio[1]+_ratio[0]) & (tmp_value > _ratio[0]))] = 1
                         mask[:, :, 2][torch.where(tmp_value > _ratio[1]+_ratio[0])] = 1
+
+                elif self.args.gate_threshold:
+                    stat = torch.norm(out, dim=[2, 3], p=1) / out.shape[2] / out.shape[3]
+                    mask = torch.ones_like(stat).float()
+                    if self.args.absolute_threshold is not None:
+                        mask[torch.where(stat < self.args.absolute_threshold)] = 0
+                    else:
+                        if self.args.relative_max_threshold is not None:
+                            mask[torch.where(stat < torch.max(stat, dim=1)[0].unsqueeze(-1) * self.args.relative_max_threshold)] = 0
+                        else:
+                            mask = torch.zeros_like(stat)
+                            c_ids = torch.topk(stat, k=int(mask.shape[1] * self.args.relative_keep_threshold), dim=1)[1]  # TODO B*K
+                            b_ids = torch.tensor([iii for iii in range(mask.shape[0])]).to(mask.device).unsqueeze(-1).expand(c_ids.shape)  # TODO B*K
+                            # print("b", b_ids.detach().flatten())
+                            # print("c", c_ids.detach().flatten())
+                            mask[b_ids.detach().flatten(), c_ids.detach().flatten()] = 1
+                    # print("stat", stat[:,:10])
+                    # print("big", torch.max(stat, dim=1)[0] * self.args.relative_max_threshold)
+                    # print("mask", mask[:,:10])
+                    # print(mask.mean(dim=1))
+                    mask = torch.stack([1-mask, mask], dim=-1)
+
 
             if self.args.gate_print_policy and "inline_test" in kwargs:
                 print(mask[0, :max(1, self.num_channels // 64), -1])
@@ -594,6 +617,7 @@ class GateNet(nn.Module):
             # if t == 0:
             #     mode_op += 1
         return torch.stack(out_list, dim=1), mask_stack_list
+
 
 
 def _gatenet(arch, block, layers, pretrained, progress, **kwargs):

@@ -17,6 +17,7 @@ import ops.cg_utils
 import ops.msdnet
 import ops.mernet
 
+
 feat_dim_dict = {
     "resnet18": 512,
     "resnet34": 512,

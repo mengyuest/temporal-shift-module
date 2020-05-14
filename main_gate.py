@@ -227,6 +227,7 @@ def compute_gflops_by_mask(mask_tensor_list):
     # else:
     #     s1 = [0 for _ in mask_tensor_list]
 
+
     if "gate" in args.arch:
         s0 = [torch.mean(mask[:, :, :, 0]) for mask in mask_tensor_list]
         if args.gate_history:
@@ -248,7 +249,14 @@ def compute_gflops_by_mask(mask_tensor_list):
         # for mask in mask_tensor_list:
         #     print(torch.sum(mask[:, :, 1]), torch.sum(mask[:, :, 0]), torch.sum(mask[:, :, 1]) / torch.sum(mask[:, :, 0]))
         s0 = [1 - 1.0 * torch.sum(mask[:, :, 1]) / torch.sum(mask[:, :, 0]) for mask in mask_tensor_list]
-        savings = sum([s0[i] * gflops_list[i][0] * (1 - 1.0 / args.partitions) for i in range(len(gflops_list))])
+
+        if args.dense_in_block:
+            savings0 = sum([s0[i*2] * gflops_list[i][0] * (1 - 1.0 / args.partitions) for i in range(len(gflops_list))])
+            savings1 = sum([s0[i*2+1] * gflops_list[i][1] * (1 - 1.0 / args.partitions) for i in range(len(gflops_list))])
+            savings = savings0 + savings1
+        else:
+            savings = sum([s0[i] * gflops_list[i][0] * (1 - 1.0 / args.partitions) for i in range(len(gflops_list))])
+
         real_gflops = base_model_gflops - savings / 1e9
 
     return real_gflops
@@ -267,8 +275,8 @@ def print_mask_statistics(mask_tensor_list, num_segments):
     else:
         # overall
         # t=overall, 0, mid, end
-        #     1. sparsity (blockwise)
-        #     2. variance (blockwise)
+        #     1. sparsity (layerwise)
+        #     2. variance (layerwise)
         dim_str = ["save", "hist", "curr"] if args.gate_history else ["save", "curr"]
 
         for b_i in [None, 0]:
@@ -283,15 +291,15 @@ def print_mask_statistics(mask_tensor_list, num_segments):
                     s_list = []
                     d_list = []
                     p_list = []
-                    for block_i in range(len(mask_tensor_list)):
-                        s_list.append(torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end, :, dim_i]))
+                    for layer_i in range(len(mask_tensor_list)):
+                        s_list.append(torch.mean(mask_tensor_list[layer_i][b_start:b_end, t_start:t_end, :, dim_i]))
                         d_list.append(
-                            torch.std(torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end, :, dim_i], dim=-1),
+                            torch.std(torch.mean(mask_tensor_list[layer_i][b_start:b_end, t_start:t_end, :, dim_i], dim=-1),
                                       unbiased=not (b_i == 0)))
                         # TODO channel-wise fire percentage for instances
                         # TODO this can be a channel percentage histogram, ranged from 0~1, where we only count five buckets
                         # TODO (0.00~0.20) (0.20~0.40) (0.40~0.60) (0.60~0.80) (0.80~1.00)
-                        percentage = torch.mean(mask_tensor_list[block_i][b_start:b_end, t_start:t_end, :, dim_i],
+                        percentage = torch.mean(mask_tensor_list[layer_i][b_start:b_end, t_start:t_end, :, dim_i],
                                                 dim=[0, 1])
                         p_list.append(torch.histc(percentage, bins=5, min=0, max=1) / percentage.shape[0])
                     t = "%3d" % t_i if t_i is not None else "all"
@@ -406,7 +414,7 @@ def get_average_meters(number):
 def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_path, tf_writer):
     batch_time, data_time, top1, top5 = get_average_meters(4)
     losses_dict = {}
-    mask_stack_list_list = [[] for _ in gflops_list]
+    mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _ in gflops_list]
     tau = get_current_temperature(epoch)
 
     # switch to train mode
@@ -449,8 +457,8 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
         optimizer.zero_grad()
 
         # gather masks
-        for block_i, mask_stack in enumerate(mask_stack_list):
-                mask_stack_list_list[block_i].append(mask_stack.detach().cpu())
+        for layer_i, mask_stack in enumerate(mask_stack_list):
+                mask_stack_list_list[layer_i].append(mask_stack.detach().cpu())
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -475,8 +483,8 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
             print(print_output)
 
 
-    for block_i in range(len(mask_stack_list_list)):
-        mask_stack_list_list[block_i] = torch.cat(mask_stack_list_list[block_i], dim=0)
+    for layer_i in range(len(mask_stack_list_list)):
+        mask_stack_list_list[layer_i] = torch.cat(mask_stack_list_list[layer_i], dim=0)
     batch_gflops = compute_gflops_by_mask(mask_stack_list_list)
     usage_str = get_policy_usage_str(batch_gflops)
     print(usage_str)
@@ -500,7 +508,10 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
 
     tau = get_current_temperature(epoch)
 
-    mask_stack_list_list = [[] for _ in gflops_list]
+    # mask_stack_list_list = [[] for _ in gflops_list]
+    mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _
+                                                                                                               in
+                                                                                                               gflops_list]
 
     losses_dict={}
 
@@ -536,8 +547,8 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
             top5.update(prec5.item(), batchsize)
 
             # gather masks
-            for block_i, mask_stack in enumerate(mask_stack_list):
-                mask_stack_list_list[block_i].append(mask_stack.detach().cpu())
+            for layer_i, mask_stack in enumerate(mask_stack_list):
+                mask_stack_list_list[layer_i].append(mask_stack.detach().cpu())
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -565,8 +576,8 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
     print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
           .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses_dict["loss"]))
 
-    for block_i in range(len(mask_stack_list_list)):
-        mask_stack_list_list[block_i] = torch.cat(mask_stack_list_list[block_i], dim=0)
+    for layer_i in range(len(mask_stack_list_list)):
+        mask_stack_list_list[layer_i] = torch.cat(mask_stack_list_list[layer_i], dim=0)
 
     batch_gflops = compute_gflops_by_mask(mask_stack_list_list)
     usage_str = get_policy_usage_str(batch_gflops)

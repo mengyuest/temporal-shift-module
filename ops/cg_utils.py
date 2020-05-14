@@ -161,6 +161,8 @@ class CGConv2dNew(torch.nn.Conv2d):
         """ n!umber of output features computed using all input channels """
         self.num_full = 0
 
+        self.masked_weight = self.weight * self.mask #TODO
+
 
     def forward(self, input):
         """
@@ -170,7 +172,8 @@ class CGConv2dNew(torch.nn.Conv2d):
         """
         if self.shuffle:
             input = channel_shuffle(input, self.p)
-        Yp = F.conv2d(input, self.weight * self.mask, self.bias, self.stride, self.padding, self.dilation, self.groups)
+        # Yp = F.conv2d(input, self.weight * self.mask, self.bias, self.stride, self.padding, self.dilation, self.groups)
+        Yp = F.conv2d(input, self.masked_weight, self.bias, self.stride, self.padding, self.dilation, self.groups) #TODO
         """ Calculate the gating decison d """
         d = self.gt(torch.sigmoid(self.alpha*(self.bn(Yp)-self.threshold)) - 0.5 * torch.ones_like(Yp))
         """ update report """
@@ -182,8 +185,8 @@ class CGConv2dNew(torch.nn.Conv2d):
 
         b_pos = torch.sum(d > 0, dim=[i + 1 for i, _ in enumerate(d[0].shape)])  # batchwise positive numbers
         b_all = torch.ones_like(b_pos) * d[0].numel()  # batchwise total numbers (should be same everywhere)
-
         b_stat = torch.stack([b_all, b_pos], dim=-1).float()
+
         return Y * d + Yp * (torch.ones_like(d) - d), b_stat  # d.numel(), d[d>0].numel()
 
 

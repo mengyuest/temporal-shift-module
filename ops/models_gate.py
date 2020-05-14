@@ -98,6 +98,10 @@ class TSN_Gate(nn.Module):
         _b, _tc, _h, _w = input_data.shape
         _t, _c = _tc // 3, 3
 
+        if self.args.all_same_frames:
+            input_data = input_data.view(_b,_t,_c,_h,_w)
+            input_data = input_data[:, _t//2:_t//2+1].expand(input_data.shape)
+
         if "tau" not in kwargs:
             kwargs["tau"] = None
 

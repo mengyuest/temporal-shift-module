@@ -335,6 +335,7 @@ parser.add_argument('--gate_linear_phase', type=int, default=0)  # linear-increa
 # kernel code and recon loss
 
 
+
 # channel-gating network
 parser.add_argument('--threshold_loss_weight', default=0.0001, type=float)
 parser.add_argument('--partitions', default=4, type=int)
@@ -346,3 +347,17 @@ parser.add_argument('--shuffle', action='store_true')    # add channel shuffling
 parser.add_argument('--sparse_bp', action='store_true')  # sparse backprop of PGConv2d
 
 parser.add_argument('--downsample0_renaming', action='store_true')  # sparse backprop of PGConv2d
+
+parser.add_argument('--dense_in_block', action='store_true')
+
+
+# toy operations
+parser.add_argument('--all_same_frames', action='store_true')
+
+
+# thresholding methods (naive approach: absolute, relative)
+parser.add_argument('--gate_threshold', action='store_true')
+parser.add_argument('--gate_dense_gating', action='store_true')
+parser.add_argument('--absolute_threshold', default=None, type=float)
+parser.add_argument('--relative_max_threshold', default=None, type=float)
+parser.add_argument('--relative_keep_threshold', default=None, type=float)

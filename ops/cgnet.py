@@ -258,7 +258,7 @@ class CGNet(nn.Module):
                         mask_stack_list[idx+1].append(n_all_pos2)
                         idx += 2
                     else:
-                        x, n_all_pos = block(x, **kwargs)
+                        x, n_all_pos, n_all_pos2 = block(x, **kwargs)
                         mask_stack_list[idx].append(n_all_pos)
                         idx += 1
 

@@ -132,7 +132,10 @@ class BasicBlock(nn.Module):
             if self.args.gate_history:
                 in_factor = 2 if self.args.fusion_type == "cat" else 1
                 if self.args.gate_gumbel_softmax or self.args.gate_tanh or self.args.gate_sigmoid:
-                    out_factor = 3
+                    if self.args.gate_no_skipping:
+                        out_factor = 2
+                    else:
+                        out_factor = 3
                 elif self.args.gate_sem_hash:
                     out_factor = 2
 
@@ -218,7 +221,7 @@ class BasicBlock(nn.Module):
             h_map = (self.gate_hist_conv(h_map) + h_map)
 
         if self.args.gate_local_policy:
-            factor = 3 if self.args.gate_history else 2
+
             if adaptive_policy:
                 x_c = nn.AdaptiveAvgPool2d((1, 1))(x)
                 x_c = torch.flatten(x_c, 1)
@@ -255,7 +258,10 @@ class BasicBlock(nn.Module):
 
                 if self.args.gate_history:
                     if self.args.gate_gumbel_softmax:
-                        x_c2d = x_c.view(x.shape[0], self.num_channels, 3)
+                        if self.args.gate_no_skipping:
+                            x_c2d = x_c.view(x.shape[0], self.num_channels, 2)
+                        else:
+                            x_c2d = x_c.view(x.shape[0], self.num_channels, 3)
                         x_c2d = torch.log(F.softmax(x_c2d, dim=2))
                         mask2d = F.gumbel_softmax(logits=x_c2d, tau=kwargs["tau"], hard=use_hard)
                         mask = mask2d  # TODO: B*C*3
@@ -272,9 +278,15 @@ class BasicBlock(nn.Module):
                         c_mask = mask2d[:, :, 1]
                         mask = torch.stack([1+h_mask*c_mask-h_mask-c_mask, h_mask * (1-c_mask), c_mask], dim=-1)
                     elif self.args.gate_tanh:  # TODO using tanh
-                        mask = x_c.view(x.shape[0], self.num_channels, 3)  # TODO: B*C*3
+                        if self.args.gate_no_skipping:
+                            mask = x_c.view(x.shape[0], self.num_channels, 2)
+                        else:
+                            mask = x_c.view(x.shape[0], self.num_channels, 3)  # TODO: B*C*3
                     elif self.args.gate_sigmoid:
-                        mask = x_c.view(x.shape[0], self.num_channels, 3)  # TODO: B*C*3
+                        if self.args.gate_no_skipping:
+                            mask = x_c.view(x.shape[0], self.num_channels, 2)  # TODO: B*C*3
+                        else:
+                            mask = x_c.view(x.shape[0], self.num_channels, 3)  # TODO: B*C*3
                 else:
                     if self.args.gate_gumbel_sigmoid:
                         mask = gumbel_sigmoid(logits=x_c, tau=kwargs["tau"], hard=use_hard)
@@ -290,6 +302,8 @@ class BasicBlock(nn.Module):
                         mask = x_c.view(x.shape[0], self.num_channels, 2)  # TODO: B*C*2
 
             else:
+                factor = 3 if self.args.gate_history else 2
+
                 if self.args.gate_all_zero_policy:
                     mask = torch.zeros(x.shape[0], self.num_channels, factor, device=x.device)
                 elif self.args.gate_all_one_policy:

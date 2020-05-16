@@ -113,6 +113,49 @@ def return_ministh(modality):
         raise NotImplementedError('no such modality:' + modality)
     return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
 
+def return_tinysth(modality):
+    filename_categories = ospj(common.MINISTH_META_PATH, 'classIndTinySth2.txt')
+    if modality == 'RGB':
+        root_data = common.MINISTH_FRAMES
+        filename_imglist_train = ospj(common.MINISTH_META_PATH, 'tiny_train_sth2.txt')
+        filename_imglist_val = ospj(common.MINISTH_META_PATH, 'tiny_val_sth2.txt')
+        prefix = '{:05d}.jpg'
+    else:
+        raise NotImplementedError('no such modality:' + modality)
+    return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
+
+def return_teenysth(modality):
+    filename_categories = ospj(common.MINISTH_META_PATH, 'classIndTeenySth2.txt')
+    if modality == 'RGB':
+        root_data = common.MINISTH_FRAMES
+        filename_imglist_train = ospj(common.MINISTH_META_PATH, 'teeny_train_sth2.txt')
+        filename_imglist_val = ospj(common.MINISTH_META_PATH, 'teeny_val_sth2.txt')
+        prefix = '{:05d}.jpg'
+    else:
+        raise NotImplementedError('no such modality:' + modality)
+    return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
+
+def return_low20sth(modality):
+    filename_categories = ospj(common.MINISTH_META_PATH, 'classIndLow20Sth2.txt')
+    if modality == 'RGB':
+        root_data = common.MINISTH_FRAMES
+        filename_imglist_train = ospj(common.MINISTH_META_PATH, 'low20_train_sth2.txt')
+        filename_imglist_val = ospj(common.MINISTH_META_PATH, 'low20_val_sth2.txt')
+        prefix = '{:05d}.jpg'
+    else:
+        raise NotImplementedError('no such modality:' + modality)
+    return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
+
+def return_low42sth(modality):
+    filename_categories = ospj(common.MINISTH_META_PATH, 'classIndLow42Sth2.txt')
+    if modality == 'RGB':
+        root_data = common.MINISTH_FRAMES
+        filename_imglist_train = ospj(common.MINISTH_META_PATH, 'low42_train_sth2.txt')
+        filename_imglist_val = ospj(common.MINISTH_META_PATH, 'low42_val_sth2.txt')
+        prefix = '{:05d}.jpg'
+    else:
+        raise NotImplementedError('no such modality:' + modality)
+    return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
 
 def return_minik(modality):
     filename_categories = 200
@@ -156,7 +199,11 @@ def return_dataset(dataset):
                    'ucf101': return_ucf101, 'hmdb51': return_hmdb51,
                    'kinetics': return_kinetics,
                    'actnet': return_actnet, 'fcvid':return_fcvid,
-                   'ministh': return_ministh, 'minik': return_minik} # TODO(yue)
+                   'ministh': return_ministh, 'minik': return_minik,
+                   'tinysth': return_tinysth,
+                   'teenysth': return_teenysth,
+                   'low20sth': return_low20sth,
+                   'low42sth': return_low42sth} # TODO(yue)
     if dataset in dict_single:
         file_categories, file_imglist_train, file_imglist_val, root_data, prefix = dict_single[dataset]('RGB')
     else:

@@ -207,8 +207,10 @@ def set_random_seed(the_seed):
 
 def init_gflops_table(model):
     global base_model_gflops, gflops_list
-    # base_model_gflops = get_gflops_params(args.arch, args.reso_list[0], args.num_class, -1, args=args)[0]
-    base_model_gflops = 1.8901
+    if "cgnet" in args.arch:
+        base_model_gflops = 1.8188
+    else:
+        base_model_gflops = get_gflops_params(args.arch, args.reso_list[0], args.num_class, -1, args=args)[0]
     gflops_list = model.base_model_list[0].count_flops((1, 1, 3, args.reso_list[0], args.reso_list[0]))
     print("Network@%d (%.4f GFLOPS) has %d blocks" % (args.reso_list[0], base_model_gflops, len(gflops_list)))
     for i, block in enumerate(gflops_list):
@@ -229,18 +231,24 @@ def compute_gflops_by_mask(mask_tensor_list):
 
 
     if "gate" in args.arch:
-        s0 = [torch.mean(mask[:, :, :, 0]) for mask in mask_tensor_list]
-        if args.gate_history:
-            s1 = [torch.mean(mask[:, :, :, 1]) for mask in mask_tensor_list]
+        if args.gate_no_skipping:
+            if args.gate_history:
+                s1 = [torch.mean(mask[:, :, :, 0]) for mask in mask_tensor_list]
+            s1_savings = sum([s1[i] * (gflops_list[i][0] - gflops_list[i][3]) for i in range(len(gflops_list))])
+            real_gflops = base_model_gflops - s1_savings / 1e9
         else:
-            s1 = [0 for _ in mask_tensor_list]
-        # print("s0",s0)
-        # print("s1",s1)
-        s0_savings = sum([s0[i] * (gflops_list[i][0] + gflops_list[i][1]) for i in range(len(gflops_list))])
-        s1_savings = sum([s1[i] * (gflops_list[i][0] - gflops_list[i][3]) for i in range(len(gflops_list))])
-        # print("s0_savings", s0_savings/1e9)
-        # print("s1_savings", s1_savings/1e9)
-        real_gflops = base_model_gflops - (s0_savings + s1_savings) / 1e9
+            s0 = [torch.mean(mask[:, :, :, 0]) for mask in mask_tensor_list]
+            if args.gate_history:
+                s1 = [torch.mean(mask[:, :, :, 1]) for mask in mask_tensor_list]
+            else:
+                s1 = [0 for _ in mask_tensor_list]
+            # print("s0",s0)
+            # print("s1",s1)
+            s0_savings = sum([s0[i] * (gflops_list[i][0] + gflops_list[i][1]) for i in range(len(gflops_list))])
+            s1_savings = sum([s1[i] * (gflops_list[i][0] - gflops_list[i][3]) for i in range(len(gflops_list))])
+            # print("s0_savings", s0_savings/1e9)
+            # print("s1_savings", s1_savings/1e9)
+            real_gflops = base_model_gflops - (s0_savings + s1_savings) / 1e9
 
     else:
         # s0 for sparsity savings
@@ -277,7 +285,13 @@ def print_mask_statistics(mask_tensor_list, num_segments):
         # t=overall, 0, mid, end
         #     1. sparsity (layerwise)
         #     2. variance (layerwise)
-        dim_str = ["save", "hist", "curr"] if args.gate_history else ["save", "curr"]
+        if args.gate_history:
+            if args.gate_no_skipping:
+                dim_str = ["hist", "curr"]
+            else:
+                dim_str = ["save", "hist", "curr"]
+        else:
+            dim_str = ["save", "curr"]
 
         for b_i in [None, 0]:
             print("For example(b=0):" if b_i == 0 else "Overall:")
@@ -339,15 +353,21 @@ def compute_losses(criterion, prediction, target, mask_stack_list, gflops_tensor
 
     # sparsity loss
     if args.gate_norm_loss_weight > 0:
-        choice_dim = 3 if args.gate_history else 2
+        choice_dim = 3 if (args.gate_history and not args.gate_no_skipping) else 2
         mask_norm = torch.stack(
             [torch.norm(mask, dim=[0, 1, 2], p=args.gate_norm) / (mask.numel() / choice_dim) ** (1 / args.gate_norm)
              for mask in mask_stack_list], dim=0).mean(dim=0)
-        skip_mask_loss = (1 - mask_norm[0]) * args.gate_norm_loss_factors[0] * args.gate_norm_loss_weight * factor
-        if args.gate_history:
-            hist_mask_loss = (1 - mask_norm[1]) * args.gate_norm_loss_factors[1] * args.gate_norm_loss_weight * factor
+        if args.gate_history and args.gate_no_skipping:
+            skip_mask_loss = acc_loss * 0
         else:
-            hist_mask_loss = (1 - mask_norm[1]) * 0
+            skip_mask_loss = (1 - mask_norm[0]) * args.gate_norm_loss_factors[0] * args.gate_norm_loss_weight * factor
+        if args.gate_history:
+            if args.gate_no_skipping:
+                hist_mask_loss = (1 - mask_norm[0]) * args.gate_norm_loss_factors[0] * args.gate_norm_loss_weight * factor
+            else:
+                hist_mask_loss = (1 - mask_norm[1]) * args.gate_norm_loss_factors[1] * args.gate_norm_loss_weight * factor
+        else:
+            hist_mask_loss = acc_loss * 0
         curr_mask_loss = mask_norm[-1] * args.gate_norm_loss_factors[-1] * args.gate_norm_loss_weight * factor
     else:
         skip_mask_loss = acc_loss * 0

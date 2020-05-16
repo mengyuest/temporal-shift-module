@@ -361,3 +361,8 @@ parser.add_argument('--gate_dense_gating', action='store_true')
 parser.add_argument('--absolute_threshold', default=None, type=float)
 parser.add_argument('--relative_max_threshold', default=None, type=float)
 parser.add_argument('--relative_keep_threshold', default=None, type=float)
+
+
+# no skipping
+parser.add_argument('--gate_no_skipping', action='store_true')
+

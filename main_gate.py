@@ -99,9 +99,17 @@ def main():
         model_dict = model.state_dict()
         sd = load_to_sd(the_model_path)
 
+        # print("loaded")
+        # for k in sd:
+        #     print(k)
+        # print()
+        # print("network")
+        # for k in model_dict:
+        #     print(k)
+
+        old_to_new_pairs = []
         if args.downsample0_renaming:
             # TODO batchnorm
-            old_to_new_pairs = []
             for k in sd:
                 # TODO downsample
                 if "downsample0" in k:
@@ -110,8 +118,31 @@ def main():
                 elif "downsample1" in k:
                     # TODO layer1.0.downsample.0.weight-> layer1.0.downsample0.weight
                     old_to_new_pairs.append((k, k.replace("downsample1", "downsample.1")))
-            for old_key, new_key in old_to_new_pairs:
-                sd[new_key] = sd.pop(old_key)
+
+        if args.downsample_0_renaming:
+            # TODO batchnorm
+            for k in sd:
+                # TODO downsample
+                if "downsample.0" in k:
+                    # TODO layer1.0.downsample.0.weight-> layer1.0.downsample0.weight
+                    old_to_new_pairs.append((k, k.replace("downsample.0", "downsample0")))
+                elif "downsample.1" in k:
+                    # TODO layer1.0.downsample.0.weight-> layer1.0.downsample0.weight
+                    old_to_new_pairs.append((k, k.replace("downsample.1", "downsample1")))
+
+        for old_key, new_key in old_to_new_pairs:
+            sd[new_key] = sd.pop(old_key)
+        old_to_new_pairs = []
+
+        if args.load_base_to_adaptive:
+            for k in sd:
+                if "base_model." in k:
+                    old_to_new_pairs.append((k, k.replace("base_model.", "base_model_list.0.")))
+                if "new_fc." in k:
+                    old_to_new_pairs.append((k, k.replace("new_fc.", "new_fc_list.0.")))
+
+        for old_key, new_key in old_to_new_pairs:
+            sd[new_key] = sd.pop(old_key)
 
         del_keys = []
         if args.ignore_loading_gate_fc:
@@ -230,7 +261,7 @@ def compute_gflops_by_mask(mask_tensor_list):
     #     s1 = [0 for _ in mask_tensor_list]
 
 
-    if "gate" in args.arch:
+    if "gate" in args.arch or "bate" in args.arch:
         if args.gate_no_skipping:
             if args.gate_history:
                 s1 = [torch.mean(mask[:, :, :, 0]) for mask in mask_tensor_list]
@@ -383,7 +414,6 @@ def compute_losses(criterion, prediction, target, mask_stack_list, gflops_tensor
                 thres_loss += args.threshold_loss_weight * torch.sum((param-args.gtarget) ** 2)
 
     loss = acc_loss + gflops_loss + skip_mask_loss + hist_mask_loss + curr_mask_loss + thres_loss
-
     return {
         "loss": loss,
         "acc_loss": acc_loss,
@@ -456,6 +486,8 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
         output, mask_stack_list, feat_outs, base_outs = \
             model(input=input_var_list, tau=tau, is_training=True, curr_step=epoch * len(train_loader) + i)
 
+
+
         gflops_tensor = compute_gflops_by_mask(mask_stack_list)
 
         loss_dict = compute_losses(criterion, output, target_var[:, 0], mask_stack_list, gflops_tensor, epoch, model)
@@ -471,6 +503,8 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
 
         # compute gradient and do SGD step
         loss_dict["loss"].backward()
+
+
         if args.clip_gradient is not None:
             clip_grad_norm_(model.parameters(), args.clip_gradient)
         optimizer.step()
@@ -653,7 +687,6 @@ def shell():
     if test_mode:  # TODO test mode
         print("======== TEST MODE ========")
         args.skip_training = True
-        # TODO(debug) try check batch size and init tau
         if args.uno_time:
             t_list = [args.num_segments]
         elif args.many_times:

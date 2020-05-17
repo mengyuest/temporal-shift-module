@@ -13,7 +13,7 @@ from torch.nn import DataParallel
 from .zz_config import ARNetConfig
 from .zz_arnet import ARNet
 from ..builders import build_activities_from_outputs_and_proposals
-from ..ops import transforms
+from ops import transforms
 
 __all__ = ['ARNetActivityClassifier']
 

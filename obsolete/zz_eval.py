@@ -7,13 +7,13 @@ import torch.nn.parallel
 import torch.backends.cudnn as cudnn
 import torch.optim
 
-from ops.zz_data_loader import ARNetDataSet
+from obsolete.ops.zz_data_loader import ARNetDataSet
 from ops.transforms import *
 from opts import parser
 from ops import dataset_config
 from ops.utils import AverageMeter, accuracy, cal_map
 from tools.net_flops_table import get_gflops_params, feat_dim_dict
-from ops.zz_arnet import ARNet
+from obsolete.ops.zz_arnet import ARNet
 import common
 
 

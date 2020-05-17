@@ -4,6 +4,7 @@ from torch.nn.init import normal_, constant_
 import torch.nn.functional as F
 from efficientnet_pytorch import EfficientNet
 import ops.gatenet as gatenet
+import ops.batenet as batenet
 import ops.cgnet as cgnet
 from ops.cg_utils import CGConv2dNew
 
@@ -29,8 +30,7 @@ class TSN_Gate(nn.Module):
         self.skip_dim = 0
         self.action_dim = 1  # TODO(yue)
 
-        self.i_do_need_a_policy_network = \
-            not (self.args.gate and self.args.gate_local_policy) and "cgnet" not in self.args.arch
+        self.i_do_need_a_policy_network = self.args.gate == False and "cgnet" not in self.args.arch
 
         if self.i_do_need_a_policy_network:
             self._prepare_policy_net()
@@ -45,6 +45,9 @@ class TSN_Gate(nn.Module):
     def _prep_a_net(self, model_name, shall_pretrain):
         if "gatenet" in model_name:
             model = getattr(gatenet, model_name)(shall_pretrain, args=self.args)
+            model.last_layer_name = 'fc'
+        elif "batenet" in model_name:
+            model = getattr(batenet, model_name)(shall_pretrain, args=self.args)
             model.last_layer_name = 'fc'
         elif "cgnet" in model_name:
             model = getattr(cgnet, model_name)(shall_pretrain, args=self.args)
@@ -91,6 +94,7 @@ class TSN_Gate(nn.Module):
         self.new_fc_list.append(new_fc)
         setattr(self.base_model_list[0], self.base_model_list[0].last_layer_name, nn.Dropout(p=self.args.dropout))
 
+
     def forward(self, *argv, **kwargs):
         input_data = kwargs["input"][0]  # TODO(yue) B * (TC) * H * W
         is_training = kwargs["is_training"]
@@ -107,6 +111,9 @@ class TSN_Gate(nn.Module):
 
         if "cgnet" in self.args.arch:
             feat, mask_stack_list = self.base_model_list[0](input_data.view(_b, _t, _c, _h, _w))
+        elif "batenet" in self.args.arch:
+            feat, mask_stack_list = self.base_model_list[0](input_data.view(_b * _t, _c, _h, _w),
+                                                    tau=kwargs["tau"], is_training=is_training, curr_step=curr_step)
         else:
             feat, mask_stack_list = self.base_model_list[0](input_data.view(_b, _t, _c, _h, _w),
                                                     tau=kwargs["tau"], is_training=is_training, curr_step=curr_step)
@@ -114,8 +121,9 @@ class TSN_Gate(nn.Module):
 
         output = base_out.mean(dim=1).squeeze(1)
 
-        for i in range(len(mask_stack_list)):
-            mask_stack_list[i] = torch.stack(mask_stack_list[i], dim=1)  # TODO: B*T*K
+        if "batenet" not in self.args.arch:
+            for i in range(len(mask_stack_list)):
+                mask_stack_list[i] = torch.stack(mask_stack_list[i], dim=1)  # TODO: B*T*K
         return output, mask_stack_list, None, torch.stack([base_out], dim=1)
 
 

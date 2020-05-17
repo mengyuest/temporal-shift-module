@@ -63,6 +63,19 @@ def return_hmdb51(modality):
     return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
 
 
+
+def return_charades(modality):
+    filename_categories = ospj(common.CHARADES_META_PATH, 'categories.txt')
+    if modality == 'RGB':
+        root_data = common.CHARADES_FRAMES
+        filename_imglist_train = ospj(common.CHARADES_META_PATH, 'train_segments.txt')
+        filename_imglist_val = ospj(common.CHARADES_META_PATH, 'validation_segments.txt')
+        prefix = '{:06d}.jpg'
+    else:
+        raise NotImplementedError('no such modality:' + modality)
+    return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
+
+
 def return_something(modality):
     filename_categories = 'something/v1/category.txt'
     if modality == 'RGB':
@@ -199,6 +212,7 @@ def return_dataset(dataset):
                    'ucf101': return_ucf101, 'hmdb51': return_hmdb51,
                    'kinetics': return_kinetics,
                    'actnet': return_actnet, 'fcvid':return_fcvid,
+                   'charades': return_charades,
                    'ministh': return_ministh, 'minik': return_minik,
                    'tinysth': return_tinysth,
                    'teenysth': return_teenysth,

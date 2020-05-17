@@ -11,6 +11,7 @@ from ops.cnn3d.mobilenet3dv2 import mobilenet3d_v2
 from ops.cnn3d.shufflenet3d import ShuffleNet3D
 import ops.dmynet
 import ops.dhsnet
+import ops.batenet
 import ops.gatenet
 import ops.cgnet
 import ops.cg_utils
@@ -51,6 +52,10 @@ feat_dim_dict = {
     'gatenet34': 512,
     'gatenet50': 2048,
     'gatenet101': 2048,
+    'batenet18': 512,
+    'batenet34': 512,
+    'batenet50': 2048,
+    'batenet101': 2048,
     'cgnet18': 512,
     'cgnet34': 512,
     'cgnet50': 2048,
@@ -114,6 +119,9 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
         model = getattr(ops.gatenet, model_name)(pretrained=False, args=args)
         last_layer = "fc"
         # print(model.count_flops((1, 1, 3, 224, 224)))
+    elif "batenet" in model_name:
+        model = getattr(ops.batenet, model_name)(pretrained=False, args=args)
+        last_layer = "fc"
     elif "cgnet" in model_name:
         model = getattr(ops.cgnet, model_name)(pretrained=False, args=args)
         last_layer = "fc"
@@ -152,11 +160,13 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
     if "dmynet" in model_name:
         hooks = {ops.dmynet.Conv2dMY: ops.dmynet.count_conv_my}
     if "dhsnet" in model_name or "gatenet" in model_name or "cgnet" in model_name:  # TODO: step-by-step solution
-        dummy_data = torch.randn(2, 8, 3, resolution, resolution)
+        dummy_data = torch.randn(1, args.num_segments, 3, resolution, resolution)
         if "dhsnet" in model_name:
             hooks = {ops.dhsnet.Conv2dHS: ops.dhsnet.count_conv_hs}
         if "cgnet" in model_name:
             hooks = {ops.cg_utils.CGConv2dNew: ops.cg_utils.count_cg_conv2d}
+    if "batenet" in model_name:
+        dummy_data = torch.randn(1 * args.num_segments, 3, resolution, resolution)
 
             # print(model)
     # print(model.layer1[0].conv1)
@@ -165,8 +175,8 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
     # for k,m in model.named_modules():
     #     if isinstance(m, torch.nn.Conv2d):
     #         print(k, m.total_ops)
-    if "dhsnet" in model_name or "gatenet" in model_name or "cgnet" in model_name:
-        flops = flops / 16
+    if "dhsnet" in model_name or "gatenet" in model_name or "cgnet" in model_name or "batenet" in model_name:
+        flops = flops / args.num_segments
     gflops = flops / 1e9
     params = params / 1e6
 

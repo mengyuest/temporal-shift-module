@@ -327,14 +327,13 @@ parser.add_argument('--gate_stoc_ratio', default=[], type=float, nargs="+") # sk
 # history_conv/detach
 parser.add_argument('--gate_history_detach', action='store_true')
 parser.add_argument('--gate_history_conv_type', type=str,
-                    choices=['None', 'conv1x1', 'conv1x1bnrelu','conv1x1_list', 'conv1x1_res'], default='None')
+                    choices=['None', 'conv1x1', 'conv1x1bnrelu','conv1x1_list', 'conv1x1_res', 'ghost', 'ghostbnrelu'],
+                    default='None')
 
 parser.add_argument('--gate_debug', action='store_true')
 parser.add_argument('--gate_linear_phase', type=int, default=0)  # linear-increase to reach 100% at epoch x
 
 # kernel code and recon loss
-
-
 
 # channel-gating network
 parser.add_argument('--threshold_loss_weight', default=0.0001, type=float)
@@ -366,3 +365,7 @@ parser.add_argument('--relative_keep_threshold', default=None, type=float)
 # no skipping
 parser.add_argument('--gate_no_skipping', action='store_true')
 
+# base->adaptive one loading
+parser.add_argument('--load_base_to_adaptive', action='store_true')
+parser.add_argument('--downsample_0_renaming', action='store_true')
+parser.add_argument('--verbose', action='store_true')

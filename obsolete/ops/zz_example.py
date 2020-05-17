@@ -1,4 +1,4 @@
-from ops.zz_arnet import ARNet
+from obsolete.ops.zz_arnet import ARNet
 
 class ARNetWrapper:
     def __init__(self, model, state):

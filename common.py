@@ -97,6 +97,14 @@ if "dcc" in host_name:
 MINISTH_META_PATH = MINISTH_PATH
 MINISTH_FRAMES=ospj(MINISTH_PATH, 'frames')
 
+
+#TODO(yue) charades
+CHARADES_PATH = ospj(DATA_PATH, "charades")
+if "dcc" in host_name:
+    CHARADES_PATH = CHARADES_PATH.replace("longxun/datasets", "multimodalvideo")
+CHARADES_META_PATH = CHARADES_PATH
+CHARADES_FRAMES=ospj(CHARADES_PATH, 'Charades_v1_rgb')
+
 #TODO(yue) mini-kinetics
 MINIK_PATH=ospj(DATA_PATH, "kinetics-qf")
 if "dcc" in host_name:

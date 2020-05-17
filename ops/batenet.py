@@ -8,14 +8,14 @@ from torch.nn.init import normal_, constant_
 
 from ops.utils import count_relu_flops, count_bn_flops, count_fc_flops, count_conv2d_flops
 
-__all__ = ['GateNet', 'gatenet18', 'gatenet34', 'gatenet50', 'gatenet101', 'gatenet152']
+__all__ = ['BateNet', 'batenet18', 'batenet34', 'batenet50', 'batenet101', 'batenet152']
 
 model_urls = {
-    'gatenet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
-    'gatenet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
-    'gatenet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
-    'gatenet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
-    'gatenet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth'
+    'batenet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
+    'batenet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
+    'batenet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
+    'batenet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
+    'batenet152': 'https://download.pytorch.org/models/resnet152-b121ed2d.pth'
 }
 
 
@@ -137,22 +137,25 @@ class PolicyBlock(nn.Module):
         constant_(self.gate_fc1.bias, 0)
 
 
-    def forward(self, x, h_vec, **kwargs):
+    def forward(self, x, **kwargs):
         # data preparation
         x_c = nn.AdaptiveAvgPool2d((1, 1))(x)
-        x_c = torch.flatten(x_c, 1)
+        x_c = torch.flatten(x_c, 1)  # BT*C
         if self.args.gate_history:
-            if h_vec is None:  # TODO t=0
-                h_vec = x_c
             if self.args.fusion_type == "cat":
+                _nt, _c = x_c.shape
+                _t = self.args.num_segments
+                _n = _nt // _t
+                x_c_reshape = x_c.view(_n, _t, _c)
+                h_vec = torch.zeros_like(x_c_reshape)
+                h_vec[:, 1:] = x_c_reshape[:, :-1]
+                h_vec = h_vec.view(_nt, _c)
                 x_c = torch.cat([h_vec, x_c], dim=-1)
-            elif self.args.fusion_type == "add":
-                x_c = (x_c + h_vec) / 2
             else:
                 exit("haven't implemented other vec fusion yet")
-            h_vec_out = x_c[:, -1 * h_vec.shape[-1]:]
-        else:
-            h_vec_out = None
+            # h_vec_out = x_c[:, -1 * h_vec.shape[-1]:]
+        # else:
+        #     h_vec_out = None
 
 
         # fully-connected layers
@@ -174,6 +177,11 @@ class PolicyBlock(nn.Module):
 
         # gating operations
         use_hard = not self.args.gate_gumbel_use_soft
+
+        _nt = x_c.shape[0]
+        _t = self.args.num_segments
+        _n = _nt // _t
+
         if self.args.gate_history:
             action_dim = 2 if self.args.gate_no_skipping else 3
             if self.args.gate_gumbel_softmax:
@@ -183,7 +191,7 @@ class PolicyBlock(nn.Module):
                 x_c2d = torch.log(F.softmax(x_c2d, dim=2).clamp(min=1e-8))
 
                 mask2d = F.gumbel_softmax(logits=x_c2d, tau=kwargs["tau"], hard=use_hard)
-                mask = mask2d  # TODO: B*C*ACT_DIM
+                mask = mask2d  # TODO: BT*C*ACT_DIM
             elif self.args.gate_sem_hash:
                 x_c2d = x_c.view(x.shape[0], self.num_channels, action_dim - 1)
                 is_training = "is_training" in kwargs and kwargs["is_training"]
@@ -196,7 +204,7 @@ class PolicyBlock(nn.Module):
                 c_mask = mask2d[:, :, 1]
                 mask = torch.stack([1 + h_mask * c_mask - h_mask - c_mask, h_mask * (1 - c_mask), c_mask], dim=-1)
             elif self.args.gate_tanh or self.args.gate_sigmoid:
-                mask = x_c.view(x.shape[0], self.num_channels, action_dim) # TODO: B*C*ACT_DIM
+                mask = x_c.view(x.shape[0], self.num_channels, action_dim) # TODO: BT*C*ACT_DIM
 
         else:
             if self.args.gate_gumbel_sigmoid:
@@ -210,7 +218,7 @@ class PolicyBlock(nn.Module):
             elif self.args.gate_tanh or self.args.gate_sigmoid:
                 mask = x_c.view(x.shape[0], self.num_channels, 2)  # TODO: B*C*2
 
-        return mask, h_vec_out
+        return mask #, h_vec_out  # TODO nt*..*..
 
 
 class BasicBlock(nn.Module):
@@ -305,7 +313,7 @@ class BasicBlock(nn.Module):
             gate_history_conv_flops = 0
         return [conv1_flops, conv2_flops, downsample0_flops, gate_history_conv_flops], conv2_out_shape
 
-    def forward(self, x, h_vec, h_map, t, **kwargs):
+    def forward(self, x, **kwargs):
         identity = x
 
         if self.args.shift:
@@ -316,19 +324,20 @@ class BasicBlock(nn.Module):
         out = self.relu(out)
 
         if self.adaptive_policy:
-            h_map_updated = self.get_hmap(h_map, out, **kwargs)
-            mask, h_vec_out = self.policy_net(x, h_vec, **kwargs)
+            # print("out.shape", out.shape)
+            out_reshaped = out.view((-1, self.args.num_segments)+out.shape[1:])
+            h_map_updated = self.get_hmap(out_reshaped, **kwargs)
+            mask = self.policy_net(x, **kwargs)
         else:
             h_map_updated = None
             mask = self.handcraft_policy_for_masks(x, out)
-            h_vec_out = None
 
         # if self.args.gate_print_policy and "inline_test" in kwargs:
         #     print(mask[0, :max(1, self.num_channels // 64), -1])
         #     print(mask[-1, :max(1, self.num_channels // 64), -1])
         #     print()
 
-        out, h_map_out = self.fuse_out_with_mask(out, mask, h_map_updated)
+        out = self.fuse_out_with_mask(out, mask, h_map_updated)
         out = self.conv2(out)
         out = self.bn2(out)
 
@@ -337,31 +346,34 @@ class BasicBlock(nn.Module):
             identity = self.downsample1(y)
         out += identity
         out = self.relu(out)
-        return out, mask, h_vec_out, h_map_out
+        return out, mask.view((-1, self.args.num_segments) + mask.shape[1:])
 
-    def get_hmap(self, h_map, out, **kwargs):
-        if self.args.gate_history and h_map is None:  # TODO t=0
-            h_map = out
+    def get_hmap(self, out_reshaped, **kwargs):
+        if self.args.gate_history:
+            h_map_reshaped = torch.zeros_like(out_reshaped)  # TODO(yue) n, t, c, h, w
+            h_map_reshaped[:, 1:] = out_reshaped[:, :-1]
+        else:
+            return None
 
         if self.args.gate_history_detach:
-            h_map = h_map.detach()
+            h_map_reshaped = h_map_reshaped.detach()
         # if "inline_test" not in kwargs:
-        if self.args.gate_history_conv_type in ['conv1x1', 'conv1x1bnrelu']:
-            h_map_updated = self.gate_hist_conv(h_map).detach()
-            if self.args.gate_history_conv_type == 'conv1x1bnrelu':
-                h_map_updated = self.gate_hist_bnrelu(h_map_updated)
+        if self.args.gate_history_conv_type != "None":
+            h_map = h_map_reshaped.view((-1,)+h_map_reshaped.shape[2:])
+            if self.args.gate_history_conv_type in ['conv1x1', 'conv1x1bnrelu']:
+                h_map_updated = self.gate_hist_conv(h_map).detach()
+                if self.args.gate_history_conv_type == 'conv1x1bnrelu':
+                    h_map_updated = self.gate_hist_bnrelu(h_map_updated)
 
-        elif self.args.gate_history_conv_type == 'conv1x1_res':
-            h_map_updated = (self.gate_hist_conv(h_map) + h_map)
+            elif self.args.gate_history_conv_type == 'conv1x1_res':
+                h_map_updated = (self.gate_hist_conv(h_map) + h_map)
 
-        elif self.args.gate_history_conv_type in ['ghost', 'ghostbnrelu']:
-            h_map_updated = self.gate_hist_conv(h_map).detach()
-            if self.args.gate_history_conv_type == 'ghostbnrelu':
-                h_map_updated = self.gate_hist_bnrelu(h_map_updated)
+            elif self.args.gate_history_conv_type in ['ghost', 'ghostbnrelu']:
+                h_map_updated = self.gate_hist_conv(h_map).detach()
+                if self.args.gate_history_conv_type == 'ghostbnrelu':
+                    h_map_updated = self.gate_hist_bnrelu(h_map_updated)
         else:
-            h_map_updated = h_map
-        # else:
-        #     h_map_updated = h_map
+            h_map_updated = h_map_reshaped.view((-1,)+out_reshaped.shape[2:])
         return h_map_updated
 
     def handcraft_policy_for_masks(self, x, out):
@@ -407,13 +419,11 @@ class BasicBlock(nn.Module):
 
     def fuse_out_with_mask(self, out, mask, h_map):
         out = out * mask[:, :, -1].unsqueeze(-1).unsqueeze(-1)
-        h_map_out = None
 
         if self.args.gate_history:
             out = out + h_map * mask[:, :, -2].unsqueeze(-1).unsqueeze(-1)
-            h_map_out = out
 
-        return out, h_map_out
+        return out
 
 
 class Bottleneck(nn.Module):
@@ -480,12 +490,12 @@ class Bottleneck(nn.Module):
         return out
 
 
-class GateNet(nn.Module):
+class BateNet(nn.Module):
 
     def __init__(self, block, layers, num_classes=1000, zero_init_residual=False,
                  groups=1, width_per_group=64, replace_stride_with_dilation=None,
                  norm_layer=None, args=None):
-        super(GateNet, self).__init__()
+        super(BateNet, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         self._norm_layer = norm_layer
@@ -561,41 +571,10 @@ class GateNet(nn.Module):
                                 norm_layer=norm_layer, args=self.args))
         return layers
 
-    # def _forward_impl(self, x):
-    #     # See note [TorchScript super()]
-    #     x = self.conv1(x)
-    #     x = self.bn1(x)
-    #     x = self.relu(x)
-    #     x = self.maxpool(x)
-    #     x = self.layer1(x)
-    #     x = self.layer2(x)
-    #     x = self.layer3(x)
-    #     x = self.layer4(x)
-    #
-    #     x = self.avgpool(x)
-    #     x = torch.flatten(x, 1)
-    #     x = self.fc(x)
-    #
-    #     return x
-
     def count_flops(self, input_data_shape, **kwargs):
         flops_list = []
         _B, _T, _C, _H, _W = input_data_shape
         input2d_shape = _B*_T, _C, _H, _W
-        # for t in range(_T):
-        #     flops, data_shape = count_conv2d_flops(input2d_shape, self.conv1)
-        #     flops_sum += flops
-        #
-        #     flops ,data_shape = count_relu_flops()
-        #
-        #     idx=0
-        #     for li, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
-        #         for bi, block in enumerate(layers):
-        #             flops, data_shape = block.count_flops(data_shape, masks[idx], **kwargs)
-        #             flops_sum += flops
-        #             idx += 1
-        #
-        #     flops_sum += count_fc_flops(input_data, self.fc)
 
         flops_conv1, data_shape = count_conv2d_flops(input2d_shape, self.conv1)
         data_shape = data_shape[0], data_shape[1], data_shape[2]//2, data_shape[3]//2 #TODO pooling
@@ -608,64 +587,39 @@ class GateNet(nn.Module):
         return flops_list
 
     def forward(self, input_data, **kwargs):
-        # TODO x.shape
-        _B, _T, _C, _H, _W = input_data.shape
-        out_list = []
-
+        # TODO x.shape (nt, c, h, w)
         if "tau" not in kwargs:
             print("tau not in kwargs. use default=1 (inline_test)")
             kwargs["tau"] = 1
             kwargs["inline_test"] = True
 
         mask_stack_list = []  # TODO list for t-dimension
-        debug_stack_list = []
-        h_vec_stack = []
-        h_map_stack = []
         for _, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
             for _, block in enumerate(layers):
-                mask_stack_list.append([])
-                debug_stack_list.append([])
-                h_vec_stack.append(None)
-                h_map_stack.append(None)
+                mask_stack_list.append(None)
 
-        for t in range(_T):
-            x = self.conv1(input_data[:, t])
-            x = self.bn1(x)
-            x = self.relu(x)
-            x = self.maxpool(x)
+        x = self.conv1(input_data)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
 
-            idx = 0
-            for li, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
-                for bi, block in enumerate(layers):
-                    x, mask, h_vec_stack[idx], h_map_stack[idx] = block(x, h_vec_stack[idx], h_map_stack[idx], t, **kwargs)
-                    # history_rack[li][bi] = new_history
-                    mask_stack_list[idx].append(mask)
-                    if self.args.gate_debug:
-                        debug_stack_list[idx].append([torch.norm(h_map_stack[idx],p=1)/h_map_stack[idx].numel(),
-                                                      torch.max(torch.abs(h_map_stack[idx]))])
-                    idx += 1
+        idx = 0
+        for li, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
+            for bi, block in enumerate(layers):
+                x, mask = block(x, **kwargs)
+                mask_stack_list[idx] = mask
+                idx += 1
 
-            x = self.avgpool(x)
-            x = torch.flatten(x, 1)
-            out = self.fc(x)
-            out_list.append(out)
-        if self.args.gate_debug:
-            print("norm")
-            for t in range(_T):
-                print("t:%d %s"%(t, " ".join(["%.3f"%debug_stack_list[block_i][t][0].detach().cpu().item() for block_i in range(len(debug_stack_list))])))
-            print("max")
-            for t in range(_T):
-                print("t:%d %s"%(t, " ".join(["%.3f"%debug_stack_list[block_i][t][1].detach().cpu().item() for block_i in range(len(debug_stack_list))])))
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        out = self.fc(x)
 
-            # if t == 0:
-            #     mode_op += 1
-
-        return torch.stack(out_list, dim=1), mask_stack_list
+        return out, mask_stack_list
 
 
 
-def _gatenet(arch, block, layers, pretrained, progress, **kwargs):
-    model = GateNet(block, layers, **kwargs)
+def _batenet(arch, block, layers, pretrained, progress, **kwargs):
+    model = BateNet(block, layers, **kwargs)
     if pretrained:
         pretrained_dict = load_state_dict_from_url(model_urls[arch],
                                                    progress=progress)
@@ -694,56 +648,56 @@ def _gatenet(arch, block, layers, pretrained, progress, **kwargs):
     return model
 
 
-def gatenet18(pretrained=False, progress=True, **kwargs):
+def batenet18(pretrained=False, progress=True, **kwargs):
     r"""ResNet-18 model from
     `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         progress (bool): If True, displays a progress bar of the download to stderr
     """
-    return _gatenet('gatenet18', BasicBlock, [2, 2, 2, 2], pretrained, progress,
+    return _batenet('batenet18', BasicBlock, [2, 2, 2, 2], pretrained, progress,
                     **kwargs)
 
 
-def gatenet34(pretrained=False, progress=True, **kwargs):
+def batenet34(pretrained=False, progress=True, **kwargs):
     r"""ResNet-34 model from
     `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         progress (bool): If True, displays a progress bar of the download to stderr
     """
-    return _gatenet('gatenet34', BasicBlock, [3, 4, 6, 3], pretrained, progress,
+    return _batenet('batenet34', BasicBlock, [3, 4, 6, 3], pretrained, progress,
                     **kwargs)
 
 
-def gatenet50(pretrained=False, progress=True, **kwargs):
+def batenet50(pretrained=False, progress=True, **kwargs):
     r"""ResNet-50 model from
     `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         progress (bool): If True, displays a progress bar of the download to stderr
     """
-    return _gatenet('gatenet50', Bottleneck, [3, 4, 6, 3], pretrained, progress,
+    return _batenet('batenet50', Bottleneck, [3, 4, 6, 3], pretrained, progress,
                     **kwargs)
 
 
-def gatenet101(pretrained=False, progress=True, **kwargs):
+def batenet101(pretrained=False, progress=True, **kwargs):
     r"""ResNet-101 model from
     `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         progress (bool): If True, displays a progress bar of the download to stderr
     """
-    return _gatenet('gatenet101', Bottleneck, [3, 4, 23, 3], pretrained, progress,
+    return _batenet('batenet101', Bottleneck, [3, 4, 23, 3], pretrained, progress,
                     **kwargs)
 
 
-def gatenet152(pretrained=False, progress=True, **kwargs):
+def batenet152(pretrained=False, progress=True, **kwargs):
     r"""ResNet-152 model from
     `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
     Args:
         pretrained (bool): If True, returns a model pre-trained on ImageNet
         progress (bool): If True, displays a progress bar of the download to stderr
     """
-    return _gatenet('gatenet152', Bottleneck, [3, 8, 36, 3], pretrained, progress,
+    return _batenet('batenet152', Bottleneck, [3, 8, 36, 3], pretrained, progress,
                     **kwargs)

@@ -149,3 +149,36 @@ def count_fc_flops(input_data_shape, fc):
     output_data_shape = input_data_shape[:-1] + (fc.out_features, )
     flops = product(output_data_shape) * (fc.in_features + 1)
     return flops, output_data_shape
+
+# # for debug NaN and Inf
+# def debug_check(t, name="x", soft=False):
+#     # assert not ((t != t).any())
+#     # assert not ((t == float("inf")).any())
+#
+#     if ((t != t).any()):
+#         if soft:
+#             return "NaN"
+#         else:
+#             import ipdb
+#             ipdb.set_trace()
+#     if ((t == float("inf")).any()):
+#         if soft:
+#             return "Inf"
+#         else:
+#             import ipdb
+#             ipdb.set_trace()
+#     if soft:
+#         return "normal"
+#
+# def debug_check_list(t_list):
+#     stack_list=[]
+#     for k, v in t_list:
+#
+#         # print(k, v)
+#         debug_check(v, k)
+#
+#         if v.requires_grad and v.grad is not None:
+#             stack_list.append([k+"_grad", debug_check(v.grad, k+"_grad", soft=True)])
+#     if any([x[1]!="normal" for x in stack_list]):
+#         import ipdb
+#         ipdb.set_trace()

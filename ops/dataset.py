@@ -13,12 +13,17 @@ from numpy.random import randint
 
 
 class VideoRecord(object):
-    def __init__(self, row):
+    def __init__(self, row, set_offset=False):
         self._data = row
         self._labels = torch.tensor([-1, -1, -1])
-        labels=sorted(list(set([int(x) for x in self._data[2:]])))
-        for i,l in enumerate(labels):
-            self._labels[i]=l
+        if set_offset:
+            self._offset = int(self._data[2])
+            self._labels[0] = int(self._data[3])
+        else:
+            self._offset = 0
+            labels=sorted(list(set([int(x) for x in self._data[2:]])))
+            for i, l in enumerate(labels):
+                self._labels[i]=l
 
     @property
     def path(self):
@@ -31,6 +36,10 @@ class VideoRecord(object):
     @property
     def label(self):
         return self._labels
+
+    @property
+    def offset(self):
+        return self._offset
 
 
 class TSNDataSet(data.Dataset):
@@ -77,9 +86,13 @@ class TSNDataSet(data.Dataset):
 
         self._parse_list()
 
+
     def _load_image(self, directory, idx):
         try:
-            return [Image.open(os.path.join(self.root_path, directory, self.image_tmpl.format(idx))).convert('RGB')]
+            header = ""
+            if self.dataset=="charades":
+                header = "%s-"%(directory.split("/")[-1])
+            return [Image.open(os.path.join(self.root_path, directory, header+self.image_tmpl.format(idx))).convert('RGB')]
         except Exception:
             print('error loading image:', os.path.join(self.root_path, directory, self.image_tmpl.format(idx)))
             return [Image.open(os.path.join(self.root_path, directory, self.image_tmpl.format(1))).convert('RGB')]
@@ -97,13 +110,16 @@ class TSNDataSet(data.Dataset):
         if self.dataset == "kinetics":
             tmp = [[x[0], x[-2], x[-1]] for x in tmp]
 
+        if self.dataset == "charades":
+            tmp = [[x[0], int(x[2])-int(x[1]), x[1], x[-1]] for x in tmp]
+
         if not self.test_mode or self.remove_missing:
             tmp = [item for item in tmp if int(item[1]) >= 3]
 
         if self.partial_fcvid_eval and self.dataset=="fcvid":
             tmp = tmp[:int(len(tmp)*self.partial_ratio)]
 
-        self.video_list = [VideoRecord(item) for item in tmp]
+        self.video_list = [VideoRecord(item, set_offset=(self.dataset=="charades")) for item in tmp]
 
         if self.image_tmpl == '{:06d}-{}_{:05d}.jpg':
             for v in self.video_list:
@@ -182,21 +198,29 @@ class TSNDataSet(data.Dataset):
             file_name = self.image_tmpl.format(int(record.path), 'x', 1)
             full_path = os.path.join(self.root_path, '{:06d}'.format(int(record.path)), file_name)
         else:
-            file_name = self.image_tmpl.format(1)
+            header = ""
+            if self.dataset == "charades":
+                header = "%s-" % (record.path.split("/")[-1])
+
+            file_name = header + self.image_tmpl.format(1)
             full_path = os.path.join(self.root_path, record.path, file_name)
 
+        counter=0
         while not os.path.exists(full_path):
             print('################## Not Found:', os.path.join(self.root_path, record.path, file_name))
+            counter+=1
+            if counter>200:
+                exit("We cannot find enough images to continue")
             index = np.random.randint(len(self.video_list))
             record = self.video_list[index]
             if self.image_tmpl == 'flow_{}_{:05d}.jpg':
-                file_name = self.image_tmpl.format('x', 1)
+                file_name = header + self.image_tmpl.format('x', 1)
                 full_path = os.path.join(self.root_path, record.path, file_name)
             elif self.image_tmpl == '{:06d}-{}_{:05d}.jpg':
-                file_name = self.image_tmpl.format(int(record.path), 'x', 1)
+                file_name = header + self.image_tmpl.format(int(record.path), 'x', 1)
                 full_path = os.path.join(self.root_path, '{:06d}'.format(int(record.path)), file_name)
             else:
-                file_name = self.image_tmpl.format(1)
+                file_name = header + self.image_tmpl.format(1)
                 full_path = os.path.join(self.root_path, record.path, file_name)
 
         if not self.test_mode:
@@ -205,11 +229,12 @@ class TSNDataSet(data.Dataset):
             segment_indices = self._get_test_indices(record)
         return self.get(record, segment_indices)
 
+
     def get(self, record, indices):
 
         images = list()
         for seg_ind in indices:
-            images.extend(self._load_image(record.path, int(seg_ind)))
+            images.extend(self._load_image(record.path, record.offset+int(seg_ind)))
         # for seg_ind in indices:
         #     p = int(seg_ind)
         #     for i in range(1):

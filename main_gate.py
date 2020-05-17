@@ -144,6 +144,14 @@ def main():
         for old_key, new_key in old_to_new_pairs:
             sd[new_key] = sd.pop(old_key)
 
+        old_to_new_pairs = []
+        if args.shift and args.load_base_to_adaptive:
+            for k in sd:
+                if "conv1.net." in k:
+                    old_to_new_pairs.append((k, k.replace("conv1.net.", "conv1.")))
+        for old_key, new_key in old_to_new_pairs:
+            sd[new_key] = sd.pop(old_key)
+
         del_keys = []
         if args.ignore_loading_gate_fc:
             del_keys += [k for k in sd if "gate_fc" in k]

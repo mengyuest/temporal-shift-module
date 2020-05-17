@@ -369,3 +369,5 @@ parser.add_argument('--gate_no_skipping', action='store_true')
 parser.add_argument('--load_base_to_adaptive', action='store_true')
 parser.add_argument('--downsample_0_renaming', action='store_true')
 parser.add_argument('--verbose', action='store_true')
+
+parser.add_argument('--fade', action='store_true')

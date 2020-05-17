@@ -350,8 +350,11 @@ class BasicBlock(nn.Module):
 
     def get_hmap(self, out_reshaped, **kwargs):
         if self.args.gate_history:
-            h_map_reshaped = torch.zeros_like(out_reshaped)  # TODO(yue) n, t, c, h, w
-            h_map_reshaped[:, 1:] = out_reshaped[:, :-1]
+            if self.args.fade == False:
+                h_map_reshaped = torch.zeros_like(out_reshaped)  # TODO(yue) n, t, c, h, w
+                h_map_reshaped[:, 1:] = out_reshaped[:, :-1]
+            else:
+                return None
         else:
             return None
 
@@ -421,9 +424,25 @@ class BasicBlock(nn.Module):
         out = out * mask[:, :, -1].unsqueeze(-1).unsqueeze(-1)
 
         if self.args.gate_history:
-            out = out + h_map * mask[:, :, -2].unsqueeze(-1).unsqueeze(-1)
-
-        return out
+            if self.args.fade:
+                # out_list=[out[:, 0]]
+                # for t in range(1, mask.shape[1]):
+                #     out_list.append( out[:, t] + out[:, t-1] * mask[:, t, -2].unsqueeze(-1).unsqueeze(-1) )
+                #     # out[:, t] = out[:, t] + h_map[:, t] * mask[:, t, -2].unsqueeze(-1).unsqueeze(-1)
+                #     # if t != mask.shape[1]-1:
+                #     #     h_map[:, t+1] = out[:, t]
+                # out = torch.stack(out_list, dim=1)
+                mask_chw = mask.unsqueeze(-1).unsqueeze(-1)
+                new_out = torch.zeros_like(out)
+                new_out[:, 0] = out[:, 0]
+                for t in range(1, mask.shape[1]):
+                    new_out[:, t] = out[:, t] + out[:, t-1] * mask_chw[:, t, -2]
+                return new_out
+            else:
+                out = out + h_map * mask[:, :, -2].unsqueeze(-1).unsqueeze(-1)
+                return out
+        else:
+            return out
 
 
 class Bottleneck(nn.Module):

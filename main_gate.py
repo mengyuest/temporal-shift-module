@@ -271,10 +271,13 @@ def compute_gflops_by_mask(mask_tensor_list):
 
     if "gate" in args.arch or "bate" in args.arch:
         if args.gate_no_skipping:
-            if args.gate_history:
-                s1 = [torch.mean(mask[:, :, :, 0]) for mask in mask_tensor_list]
-            s1_savings = sum([s1[i] * (gflops_list[i][0] - gflops_list[i][3]) for i in range(len(gflops_list))])
-            real_gflops = base_model_gflops - s1_savings / 1e9
+            if args.fade:
+                if args.gate_history:
+                    s1 = [torch.mean(mask[:, :, :, 0]) for mask in mask_tensor_list]
+                s1_savings = sum([s1[i] * (gflops_list[i][0] - gflops_list[i][3]) for i in range(len(gflops_list))])
+                real_gflops = base_model_gflops - s1_savings / 1e9
+            else:
+                real_gflops = base_model_gflops
         else:
             s0 = [torch.mean(mask[:, :, :, 0]) for mask in mask_tensor_list]
             if args.gate_history:
@@ -283,12 +286,17 @@ def compute_gflops_by_mask(mask_tensor_list):
                 s1 = [0 for _ in mask_tensor_list]
             # print("s0",s0)
             # print("s1",s1)
-            s0_savings = sum([s0[i] * (gflops_list[i][0] + gflops_list[i][1]) for i in range(len(gflops_list))])
-            s1_savings = sum([s1[i] * (gflops_list[i][0] - gflops_list[i][3]) for i in range(len(gflops_list))])
-            # print("s0_savings", s0_savings/1e9)
-            # print("s1_savings", s1_savings/1e9)
+            if args.fade:
+                s0_savings = sum([s0[i] * (gflops_list[i][0] + gflops_list[i][1]) for i in range(len(gflops_list))])
+                s1_savings = sum([s1[i] * (gflops_list[i][0] - gflops_list[i][3]) for i in range(len(gflops_list))])
+                # print("s0_savings", s0_savings/1e9)
+                # print("s1_savings", s1_savings/1e9)
+                # real_gflops = base_model_gflops - (s0_savings + s1_savings) / 1e9
+            else:
+                s0_savings = sum([s0[i] * gflops_list[i][1] for i in range(len(gflops_list))])
+                s1_savings = 0
+                # real_gflops = base_model_gflops - s0_savings / 1e9
             real_gflops = base_model_gflops - (s0_savings + s1_savings) / 1e9
-
     else:
         # s0 for sparsity savings
         # s1 for history

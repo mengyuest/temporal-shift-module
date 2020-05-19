@@ -97,7 +97,6 @@ def improved_sem_hash(logits, is_training, sem_hash_dense_random, max_step, curr
         return torch.where(rand < threshold, v_discrete, v)
 
 
-
 class PolicyBlock(nn.Module):
     def __init__(self, in_planes, out_planes, norm_layer, args):
         super(PolicyBlock, self).__init__()
@@ -613,7 +612,7 @@ class GateNet(nn.Module):
         out_list = []
 
         if "tau" not in kwargs:
-            print("tau not in kwargs. use default=1 (inline_test)")
+            # print("tau not in kwargs. use default=1 (inline_test)")
             kwargs["tau"] = 1
             kwargs["inline_test"] = True
 

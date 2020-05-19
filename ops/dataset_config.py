@@ -233,5 +233,5 @@ def return_dataset(dataset):
     else:  # number of categories
         categories = [None] * file_categories
     n_class = len(categories)
-    print('{}: {} classes'.format(dataset, n_class))
+    # print('{}: {} classes'.format(dataset, n_class))
     return n_class, file_imglist_train, file_imglist_val, root_data, prefix

@@ -49,7 +49,7 @@ class TSNDataSet(data.Dataset):
                  remove_missing=False, dense_sample=False, twice_sample=False,
                  dataset=None, filelist_suffix="", folder_suffix=None, partial_fcvid_eval=False, partial_ratio=None,
                  ada_reso_skip=False, reso_list=None, random_crop=False, center_crop=False, ada_crop_list=None,
-                 rescale_to=224, policy_input_offset=None, save_meta=False):
+                 rescale_to=224, policy_input_offset=None, save_meta=False, rank=0):
 
         self.root_path = root_path
         # self.list_file = list_file
@@ -78,11 +78,14 @@ class TSNDataSet(data.Dataset):
         self.rescale_to = rescale_to
         self.policy_input_offset = policy_input_offset
         self.save_meta = save_meta
+        self.rank = rank
 
         if self.dense_sample:
-            print('=> Using dense sample for the dataset...')
+            if self.rank==0:
+                print('=> Using dense sample for the dataset...')
         if self.twice_sample:
-            print('=> Using twice sample for the dataset...')
+            if self.rank == 0:
+                print('=> Using twice sample for the dataset...')
 
         self._parse_list()
 
@@ -94,7 +97,8 @@ class TSNDataSet(data.Dataset):
                 header = "%s-"%(directory.split("/")[-1])
             return [Image.open(os.path.join(self.root_path, directory, header+self.image_tmpl.format(idx))).convert('RGB')]
         except Exception:
-            print('error loading image:', os.path.join(self.root_path, directory, self.image_tmpl.format(idx)))
+            if self.rank == 0:
+                print('error loading image:', os.path.join(self.root_path, directory, self.image_tmpl.format(idx)))
             return [Image.open(os.path.join(self.root_path, directory, self.image_tmpl.format(1))).convert('RGB')]
 
     def _parse_list(self):
@@ -124,7 +128,8 @@ class TSNDataSet(data.Dataset):
         if self.image_tmpl == '{:06d}-{}_{:05d}.jpg':
             for v in self.video_list:
                 v._data[1] = int(v._data[1]) / 2
-        print('video number:%d' % (len(self.video_list)))
+        if self.rank == 0:
+            print('video number:%d' % (len(self.video_list)))
 
     def _sample_indices(self, record):
         """
@@ -207,7 +212,8 @@ class TSNDataSet(data.Dataset):
 
         counter=0
         while not os.path.exists(full_path):
-            print('################## Not Found:', os.path.join(self.root_path, record.path, file_name))
+            if self.rank == 0:
+                print('################## Not Found:', os.path.join(self.root_path, record.path, file_name))
             counter+=1
             if counter>200:
                 exit("We cannot find enough images to continue")

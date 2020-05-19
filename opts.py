@@ -371,3 +371,28 @@ parser.add_argument('--downsample_0_renaming', action='store_true')
 parser.add_argument('--verbose', action='store_true')
 
 parser.add_argument('--fade', action='store_true')
+
+parser.add_argument('--choose_best_by', type=str, choices=['map', 'mmap', 'acc'], default='acc')
+
+
+
+# for distributed learning
+parser.add_argument('--sync-bn', action='store_true', help='sync BN across GPUs')
+# parser.add_argument('--expand_hidden_dim', action='store_true',  help=' ')
+parser.add_argument('--world-size', default=1, type=int, help='number of nodes for distributed training')
+parser.add_argument('--rank', default=0, type=int, help='node rank for distributed training')
+parser.add_argument('--dist-url', default='tcp://127.0.0.1:23456', type=str, help='url used to set up distributed training')
+parser.add_argument('--dist-backend', default='nccl', type=str, help='distributed backend')
+parser.add_argument('--hostfile', default='', type=str, help='hostfile distributed learning')
+parser.add_argument('--multiprocessing-distributed', action='store_true',
+                    help='Use multi-processing distributed training to launch '
+                         'N processes per node, which has N GPUs. This is the '
+                         'fastest way to use PyTorch for either single node or '
+                         'multi node data parallel training')
+
+# parser.add_argument('--annealing_factor', default=-0.2, type=float)
+parser.add_argument('--auto_resume', action='store_true', help='auto resume for aimos')
+
+parser.add_argument('--not_pin_memory', action='store_true', help='not pin memory')
+parser.add_argument('--relative_hidden_size', type=float, default=-1.0)
+parser.add_argument('--precise', action='store_true', help='compute precised flops savings')

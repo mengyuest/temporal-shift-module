@@ -38,97 +38,48 @@ def list_sum(obj):
     else:
         return obj
 
+def shift(x, n_segment, fold_div=3, inplace=False):
+    nt, c, h, w = x.size()
+    n_batch = nt // n_segment
+    x = x.view(n_batch, n_segment, c, h, w)
 
-def gumbel_sigmoid(logits, tau=1, hard=False):
-    U = torch.empty_like(logits).uniform_()
-    L = torch.log(U) - torch.log(1 - U)  # L(U)=logU−log(1−U)
-    gumbels = (logits + L) / tau  # ~Gumbel(logits,tau)
-    y_soft = gumbels.sigmoid()
-
-    if hard:
-        # Straight through.
-        # index = y_soft.max(dim, keepdim=True)[1]
-        # y_hard = torch.zeros_like(logits).scatter_(dim, index, 1.0)
-        y_hard = torch.zeros_like(y_soft)
-        y_hard[torch.where(y_soft > 0.5)] = 1
-        ret = y_hard - y_soft.detach() + y_soft
+    fold = c // fold_div
+    if inplace:
+        # Due to some out of order error when performing parallel computing.
+        # May need to write a CUDA kernel.
+        raise NotImplementedError
+        # out = InplaceShift.apply(x, fold)
     else:
-        # Reparametrization trick.
-        ret = y_soft
-    return ret
+        out = torch.zeros_like(x)
+        out[:, :-1, :fold] = x[:, 1:, :fold]  # shift left
+        out[:, 1:, fold: 2 * fold] = x[:, :-1, fold: 2 * fold]  # shift right
+        out[:, :, 2 * fold:] = x[:, :, 2 * fold:]  # not shift
 
-# https://github.com/tensorflow/tensor2tensor/blob/a9da9635917814af890a31a060c5b29d31b2f906/
-# tensor2tensor/layers/common_layers.py#L161
-def inverse_exp_decay(max_step, min_value = 0.01, curr_step = None):
-    inv_base = torch.exp(torch.log(torch.tensor(min_value))/max_step)
-    return (inv_base ** max(max_step - curr_step, 0.0)).item()
-
-# https://github.com/tensorflow/tensor2tensor/blob/a9da9635917814af890a31a060c5b29d31b2f906/
-# tensor2tensor/layers/common_layers.py#L143
-def saturating_sigmoid(x):
-    # y = tf.sigmoid(x)
-    # return tf.minimum(1.0, tf.maximum(0.0, 1.2 * y - 0.1))
-    y = torch.sigmoid(x)
-    return torch.clamp(1.2 * y - 0.1, 0, 1)
-
-# new version using inverse_lin_decay;
-# an older version using 50%:50%
-# https://github.com/tensorflow/tensor2tensor/blob/36528bb7dc4b4e9430c7f803d1c645e8746b7189/tensor2tensor/layers/discretization.py#L664
-def improved_sem_hash(logits, is_training, sem_hash_dense_random, max_step, curr_step):
-    noise = torch.normal(0., 1., logits.shape).to(logits.device) if is_training else 0
-    vn = logits + noise
-    v = saturating_sigmoid(vn)
-    # v1 = torch.relu(torch.clamp_min(1.2 * torch.sigmoid(vn) - 0.1, 1))
-    v_discrete = ((vn < 0).type(v.type()) - v).detach() + v
-
-    if sem_hash_dense_random:
-        mask = torch.randint(0, 2, v.shape).type(v.type()).to(v.device) if is_training else 0
-        return mask * v + (1-mask) * v_discrete
-    else:
-        # if is_training and torch.rand(1, 1).item() > 0.5:
-        #     return v1
-        # else:
-        #     return ((vn < 0).type(v1.type()) - v1).detach() + v1
-        if is_training:
-            threshold = inverse_exp_decay(max_step=max_step, curr_step=curr_step)
-        else:
-            threshold = 1
-        rand = torch.rand_like(v)
-        return torch.where(rand < threshold, v_discrete, v)
-
-
+    return out.view(nt, c, h, w)
 
 class PolicyBlock(nn.Module):
     def __init__(self, in_planes, out_planes, norm_layer, args):
         super(PolicyBlock, self).__init__()
         self.args = args
 
-        if self.args.gate_tanh:
-            self.tanh = nn.Tanh()
-            self.relu_not_inplace = nn.ReLU(inplace=False)
-        elif self.args.gate_sigmoid:
-            self.sigmoid = nn.Sigmoid()
-
         in_factor = 1
-        out_factor = 2 if any([self.args.gate_gumbel_softmax, self.args.gate_tanh, self.args.gate_sigmoid]) else 1
+        out_factor = 2
         if self.args.gate_history:
-            in_factor = 2 if self.args.fusion_type == "cat" else 1
-            if self.args.gate_gumbel_softmax or self.args.gate_tanh or self.args.gate_sigmoid:
-                if self.args.gate_no_skipping:
-                    out_factor = 2
-                else:
-                    out_factor = 3
-            elif self.args.gate_sem_hash:
-                out_factor = 2
+            in_factor = 2
+            if not self.args.gate_no_skipping:
+                out_factor = 3
+        self.action_dim = out_factor
 
-        self.gate_fc0 = nn.Linear(in_planes * in_factor, self.args.gate_hidden_dim)
-
+        if self.args.relative_hidden_size > 0:
+            hidden_dim = int(self.args.relative_hidden_size * out_planes)
+        else:
+            hidden_dim = self.args.gate_hidden_dim
+        self.gate_fc0 = nn.Linear(in_planes * in_factor, hidden_dim)
         if self.args.gate_bn_between_fcs:
-            self.gate_bn = nn.BatchNorm1d(self.args.gate_hidden_dim)
+            self.gate_bn = nn.BatchNorm1d(hidden_dim)
         if self.args.gate_relu_between_fcs:
             self.gate_relu = nn.ReLU(inplace=True)
-
-        self.gate_fc1 = nn.Linear(self.args.gate_hidden_dim, out_planes * out_factor)
+        self.gate_fc1 = nn.Linear(hidden_dim, out_planes * out_factor)
         self.num_channels = out_planes
 
         normal_(self.gate_fc0.weight, 0, 0.001)
@@ -140,85 +91,98 @@ class PolicyBlock(nn.Module):
     def forward(self, x, **kwargs):
         # data preparation
         x_c = nn.AdaptiveAvgPool2d((1, 1))(x)
-        x_c = torch.flatten(x_c, 1)  # BT*C
+        x_c = torch.flatten(x_c, 1)
+        _nt, _c = x_c.shape
+        _t = self.args.num_segments
+        _n = _nt // _t
+
+        # history
         if self.args.gate_history:
-            if self.args.fusion_type == "cat":
-                _nt, _c = x_c.shape
-                _t = self.args.num_segments
-                _n = _nt // _t
-                x_c_reshape = x_c.view(_n, _t, _c)
-                h_vec = torch.zeros_like(x_c_reshape)
-                h_vec[:, 1:] = x_c_reshape[:, :-1]
-                h_vec = h_vec.view(_nt, _c)
-                x_c = torch.cat([h_vec, x_c], dim=-1)
-            else:
-                exit("haven't implemented other vec fusion yet")
-            # h_vec_out = x_c[:, -1 * h_vec.shape[-1]:]
-        # else:
-        #     h_vec_out = None
+            x_c_reshape = x_c.view(_n, _t, _c)
+            h_vec = torch.zeros_like(x_c_reshape)
+            h_vec[:, 1:] = x_c_reshape[:, :-1]
+            h_vec = h_vec.view(_nt, _c)
+            x_c = torch.cat([h_vec, x_c], dim=-1)
 
-
-        # fully-connected layers
+        # fully-connected embedding
         x_c = self.gate_fc0(x_c)
         if self.args.gate_bn_between_fcs:
             x_c = self.gate_bn(x_c)
         if self.args.gate_relu_between_fcs:
             x_c = self.gate_relu(x_c)
-        if self.args.gate_tanh_between_fcs:
-            x_c = self.tanh(x_c)
-
         x_c = self.gate_fc1(x_c)
 
-        if self.args.gate_tanh:
-            x_c = self.tanh(x_c)
-            x_c = self.relu_not_inplace(x_c)
-        elif self.args.gate_sigmoid:
-            x_c = self.sigmoid(x_c)
-
         # gating operations
-        use_hard = not self.args.gate_gumbel_use_soft
+        x_c2d = x_c.view(x.shape[0], self.num_channels, self.action_dim)
+        x_c2d = torch.log(F.softmax(x_c2d, dim=2).clamp(min=1e-8))
+        mask = F.gumbel_softmax(logits=x_c2d, tau=kwargs["tau"], hard=not self.args.gate_gumbel_use_soft)
 
-        _nt = x_c.shape[0]
-        _t = self.args.num_segments
-        _n = _nt // _t
+        return mask  # TODO: BT*C*ACT_DIM
 
-        if self.args.gate_history:
-            action_dim = 2 if self.args.gate_no_skipping else 3
-            if self.args.gate_gumbel_softmax:
-                x_c2d = x_c.view(x.shape[0], self.num_channels, action_dim)
 
-                # x_c2d = torch.log(F.softmax(x_c2d, dim=2))
-                x_c2d = torch.log(F.softmax(x_c2d, dim=2).clamp(min=1e-8))
+def handcraft_policy_for_masks(x, out, num_channels, args):
+    factor = 3 if args.gate_history else 2
 
-                mask2d = F.gumbel_softmax(logits=x_c2d, tau=kwargs["tau"], hard=use_hard)
-                mask = mask2d  # TODO: BT*C*ACT_DIM
-            elif self.args.gate_sem_hash:
-                x_c2d = x_c.view(x.shape[0], self.num_channels, action_dim - 1)
-                is_training = "is_training" in kwargs and kwargs["is_training"]
-                curr_step = 0 if "curr_step" not in kwargs else kwargs["curr_step"]
-                mask2d = improved_sem_hash(x_c2d, is_training=is_training,
-                                           sem_hash_dense_random=self.args.gate_dense_random,
-                                           max_step=self.args.isemhash_max_step,
-                                           curr_step=curr_step)
-                h_mask = mask2d[:, :, 0]
-                c_mask = mask2d[:, :, 1]
-                mask = torch.stack([1 + h_mask * c_mask - h_mask - c_mask, h_mask * (1 - c_mask), c_mask], dim=-1)
-            elif self.args.gate_tanh or self.args.gate_sigmoid:
-                mask = x_c.view(x.shape[0], self.num_channels, action_dim) # TODO: BT*C*ACT_DIM
+    if args.gate_all_zero_policy:
+        mask = torch.zeros(x.shape[0], num_channels, factor, device=x.device)
+    elif args.gate_all_one_policy:
+        mask = torch.ones(x.shape[0], num_channels, factor, device=x.device)
+    elif args.gate_random_soft_policy:
+        mask = torch.rand(x.shape[0], num_channels, factor, device=x.device)
+    elif args.gate_random_hard_policy:
+        tmp_value = torch.rand(x.shape[0], num_channels, device=x.device)
+        mask = torch.zeros(x.shape[0], num_channels, factor, device=x.device)
 
+        if len(args.gate_stoc_ratio) > 0:
+            _ratio = args.gate_stoc_ratio
         else:
-            if self.args.gate_gumbel_sigmoid:
-                mask = gumbel_sigmoid(logits=x_c, tau=kwargs["tau"], hard=use_hard)
-                mask = torch.stack([1 - mask, mask], dim=-1)
-            elif self.args.gate_gumbel_softmax:
-                x_c2d = x_c.view(x.shape[0], self.num_channels, 2)
-                # x_c2d = torch.log(F.softmax(x_c2d, dim=2))
-                x_c2d = torch.log(F.softmax(x_c2d, dim=2).clamp(min=1e-8))
-                mask = F.gumbel_softmax(logits=x_c2d, tau=kwargs["tau"], hard=use_hard)
-            elif self.args.gate_tanh or self.args.gate_sigmoid:
-                mask = x_c.view(x.shape[0], self.num_channels, 2)  # TODO: B*C*2
+            _ratio = [0.333, 0.333, 0.334] if args.gate_history else [0.5, 0.5]
+        mask[:, :, 0][torch.where(tmp_value < _ratio[0])] = 1
+        if args.gate_history:
+            mask[:, :, 1][torch.where((tmp_value < _ratio[1] + _ratio[0]) & (tmp_value > _ratio[0]))] = 1
+            mask[:, :, 2][torch.where(tmp_value > _ratio[1] + _ratio[0])] = 1
 
-        return mask #, h_vec_out  # TODO nt*..*..
+    elif args.gate_threshold:
+        stat = torch.norm(out, dim=[2, 3], p=1) / out.shape[2] / out.shape[3]
+        mask = torch.ones_like(stat).float()
+        if args.absolute_threshold is not None:
+            mask[torch.where(stat < args.absolute_threshold)] = 0
+        else:
+            if args.relative_max_threshold is not None:
+                mask[torch.where(
+                    stat < torch.max(stat, dim=1)[0].unsqueeze(-1) * args.relative_max_threshold)] = 0
+            else:
+                mask = torch.zeros_like(stat)
+                c_ids = torch.topk(stat, k=int(mask.shape[1] * args.relative_keep_threshold), dim=1)[1]  # TODO B*K
+                b_ids = torch.tensor([iii for iii in range(mask.shape[0])]).to(mask.device).unsqueeze(-1).expand(c_ids.shape)  # TODO B*K
+                mask[b_ids.detach().flatten(), c_ids.detach().flatten()] = 1
+
+        mask = torch.stack([1 - mask, mask], dim=-1)
+
+    return mask
+
+
+def get_hmap(out, args, **kwargs):
+    out_reshaped = out.view((-1, args.num_segments) + out.shape[1:])
+
+    if args.gate_history:
+        h_map_reshaped = torch.zeros_like(out_reshaped)  # TODO(yue) n, t, c, h, w
+        h_map_reshaped[:, 1:] = out_reshaped[:, :-1]
+    else:
+        return None
+
+    if args.gate_history_detach:
+        h_map_reshaped = h_map_reshaped.detach()
+
+    h_map_updated = h_map_reshaped.view((-1,) + out_reshaped.shape[2:])
+    return h_map_updated
+
+
+def fuse_out_with_mask(out, mask, h_map, args):
+    out = out * mask[:, :, -1].unsqueeze(-1).unsqueeze(-1)
+    if args.gate_history:
+        out = out + h_map * mask[:, :, -2].unsqueeze(-1).unsqueeze(-1)
+    return out
 
 
 class BasicBlock(nn.Module):
@@ -242,10 +206,8 @@ class BasicBlock(nn.Module):
         self.downsample0 = downsample0
         self.downsample1 = downsample1
         self.stride = stride
+
         self.args = args
-
-
-
         self.num_channels = planes
         self.adaptive_policy = not any([self.args.gate_all_zero_policy,
                                         self.args.gate_all_one_policy,
@@ -254,39 +216,9 @@ class BasicBlock(nn.Module):
                                         self.args.gate_threshold])
         if self.adaptive_policy:
             self.policy_net = PolicyBlock(in_planes=inplanes, out_planes=planes, norm_layer=norm_layer, args=args)
-            if self.args.gate_history_conv_type in ['conv1x1', 'conv1x1bnrelu']:
-                self.gate_hist_conv = conv1x1(planes, planes)
-                if self.args.gate_history_conv_type == 'conv1x1bnrelu':
-                    self.gate_hist_bnrelu = nn.Sequential(norm_layer(planes), nn.ReLU(inplace=True))
 
-            elif self.args.gate_history_conv_type == 'conv1x1_res':
-                self.gate_hist_conv = conv1x1(planes, planes)
-
-            elif self.args.gate_history_conv_type in ['ghost', 'ghostbnrelu']:
-                self.gate_hist_conv = conv3x3(planes, planes, groups=planes)
-                if self.args.gate_history_conv_type == 'ghostbnrelu':
-                    self.gate_hist_bnrelu = nn.Sequential(norm_layer(planes), nn.ReLU(inplace=True))
-
-    @staticmethod
-    def shift(x, n_segment, fold_div=3, inplace=False):
-        nt, c, h, w = x.size()
-        n_batch = nt // n_segment
-        x = x.view(n_batch, n_segment, c, h, w)
-
-        fold = c // fold_div
-        if inplace:
-            # Due to some out of order error when performing parallel computing.
-            # May need to write a CUDA kernel.
-            raise NotImplementedError
-            # out = InplaceShift.apply(x, fold)
-        else:
-            out = torch.zeros_like(x)
-            out[:, :-1, :fold] = x[:, 1:, :fold]  # shift left
-            out[:, 1:, fold: 2 * fold] = x[:, :-1, fold: 2 * fold]  # shift right
-            out[:, :, 2 * fold:] = x[:, :, 2 * fold:]  # not shift
-
-        return out.view(nt, c, h, w)
-
+            if self.args.dense_in_block:
+                self.policy_net2 = PolicyBlock(in_planes=planes, out_planes=planes, norm_layer=norm_layer, args=args)
 
     def count_flops(self, input_data_shape, **kwargs):
         conv1_flops, conv1_out_shape = count_conv2d_flops(input_data_shape, self.conv1)
@@ -296,153 +228,51 @@ class BasicBlock(nn.Module):
         else:
             downsample0_flops = 0
 
-        if self.args.gate_history_conv_type in ['conv1x1','conv1x1bnrelu']:
-            gate_history_conv_flops, history_conv_shape = count_conv2d_flops(conv2_out_shape, self.gate_hist_conv)
-            if self.args.gate_history_conv_type == 'conv1x1bnrelu':
-                gate_history_conv_flops += count_bn_flops(history_conv_shape)[0] + count_relu_flops(history_conv_shape)[0]
-        elif self.args.gate_history_conv_type in ['ghost','ghostbnrelu']:
-            gate_history_conv_flops, history_conv_shape = count_conv2d_flops(conv2_out_shape, self.gate_hist_conv)
-            if self.args.gate_history_conv_type == 'ghostbnrelu':
-                gate_history_conv_flops += count_bn_flops(history_conv_shape)[0] + count_relu_flops(history_conv_shape)[0]
-        elif self.args.gate_history_conv_type == 'conv1x1_list':
-            gate_history_conv_flops, history_conv_shape = count_conv2d_flops(conv2_out_shape, self.gate_hist_conv[0])
-        elif self.args.gate_history_conv_type == 'conv1x1_res':
-            gate_history_conv_flops, history_conv_shape = count_conv2d_flops(conv2_out_shape, self.gate_hist_conv)
-            gate_history_conv_flops += count_relu_flops(history_conv_shape)[0]
-        else:
-            gate_history_conv_flops = 0
-        return [conv1_flops, conv2_flops, downsample0_flops, gate_history_conv_flops], conv2_out_shape
+        return [conv1_flops, conv2_flops, downsample0_flops, 0], conv2_out_shape
 
     def forward(self, x, **kwargs):
         identity = x
 
+        # shift operations
         if self.args.shift:
-            x = self.shift(x, self.args.num_segments, fold_div=self.args.shift_div, inplace=False)
+            x = shift(x, self.args.num_segments, fold_div=self.args.shift_div, inplace=False)
 
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
 
+        # gate functions
+        h_map_updated = get_hmap(out, self.args, **kwargs)
         if self.adaptive_policy:
-            # print("out.shape", out.shape)
-            out_reshaped = out.view((-1, self.args.num_segments)+out.shape[1:])
-            h_map_updated = self.get_hmap(out_reshaped, **kwargs)
             mask = self.policy_net(x, **kwargs)
         else:
-            h_map_updated = None
-            mask = self.handcraft_policy_for_masks(x, out)
+            mask = handcraft_policy_for_masks(x, out, self.num_channels, self.args)
+        out = fuse_out_with_mask(out, mask, h_map_updated, self.args)
 
-        # if self.args.gate_print_policy and "inline_test" in kwargs:
-        #     print(mask[0, :max(1, self.num_channels // 64), -1])
-        #     print(mask[-1, :max(1, self.num_channels // 64), -1])
-        #     print()
-
-        out = self.fuse_out_with_mask(out, mask, h_map_updated)
+        x2 = out
         out = self.conv2(out)
         out = self.bn2(out)
+
+        # gate functions
+        if self.args.dense_in_block:
+            h_map_updated2 = get_hmap(out, self.args, **kwargs)
+            if self.adaptive_policy:
+                mask2 = self.policy_net2(x2, **kwargs)
+            else:
+                mask2 = handcraft_policy_for_masks(x2, out, self.num_channels, self.args)
+            out = fuse_out_with_mask(out, mask2, h_map_updated2, self.args)
+            mask2 = mask2.view((-1, self.args.num_segments) + mask2.shape[1:])
+        else:
+            mask2 = None
 
         if self.downsample0 is not None:
             y = self.downsample0(x)
             identity = self.downsample1(y)
         out += identity
         out = self.relu(out)
-        return out, mask.view((-1, self.args.num_segments) + mask.shape[1:])
+        return out, mask.view((-1, self.args.num_segments) + mask.shape[1:]), mask2
 
-    def get_hmap(self, out_reshaped, **kwargs):
-        if self.args.gate_history:
-            if self.args.fade == False:
-                h_map_reshaped = torch.zeros_like(out_reshaped)  # TODO(yue) n, t, c, h, w
-                h_map_reshaped[:, 1:] = out_reshaped[:, :-1]
-            else:
-                return None
-        else:
-            return None
 
-        if self.args.gate_history_detach:
-            h_map_reshaped = h_map_reshaped.detach()
-        # if "inline_test" not in kwargs:
-        if self.args.gate_history_conv_type != "None":
-            h_map = h_map_reshaped.view((-1,)+h_map_reshaped.shape[2:])
-            if self.args.gate_history_conv_type in ['conv1x1', 'conv1x1bnrelu']:
-                h_map_updated = self.gate_hist_conv(h_map).detach()
-                if self.args.gate_history_conv_type == 'conv1x1bnrelu':
-                    h_map_updated = self.gate_hist_bnrelu(h_map_updated)
-
-            elif self.args.gate_history_conv_type == 'conv1x1_res':
-                h_map_updated = (self.gate_hist_conv(h_map) + h_map)
-
-            elif self.args.gate_history_conv_type in ['ghost', 'ghostbnrelu']:
-                h_map_updated = self.gate_hist_conv(h_map).detach()
-                if self.args.gate_history_conv_type == 'ghostbnrelu':
-                    h_map_updated = self.gate_hist_bnrelu(h_map_updated)
-        else:
-            h_map_updated = h_map_reshaped.view((-1,)+out_reshaped.shape[2:])
-        return h_map_updated
-
-    def handcraft_policy_for_masks(self, x, out):
-        factor = 3 if self.args.gate_history else 2
-
-        if self.args.gate_all_zero_policy:
-            mask = torch.zeros(x.shape[0], self.num_channels, factor, device=x.device)
-        elif self.args.gate_all_one_policy:
-            mask = torch.ones(x.shape[0], self.num_channels, factor, device=x.device)
-        elif self.args.gate_random_soft_policy:
-            mask = torch.rand(x.shape[0], self.num_channels, factor, device=x.device)
-        elif self.args.gate_random_hard_policy:
-            tmp_value = torch.rand(x.shape[0], self.num_channels, device=x.device)
-            mask = torch.zeros(x.shape[0], self.num_channels, factor, device=x.device)
-
-            if len(self.args.gate_stoc_ratio) > 0:
-                _ratio = self.args.gate_stoc_ratio
-            else:
-                _ratio = [0.333, 0.333, 0.334] if self.args.gate_history else [0.5, 0.5]
-            mask[:, :, 0][torch.where(tmp_value < _ratio[0])] = 1
-            if self.args.gate_history:
-                mask[:, :, 1][torch.where((tmp_value < _ratio[1] + _ratio[0]) & (tmp_value > _ratio[0]))] = 1
-                mask[:, :, 2][torch.where(tmp_value > _ratio[1] + _ratio[0])] = 1
-
-        elif self.args.gate_threshold:
-            stat = torch.norm(out, dim=[2, 3], p=1) / out.shape[2] / out.shape[3]
-            mask = torch.ones_like(stat).float()
-            if self.args.absolute_threshold is not None:
-                mask[torch.where(stat < self.args.absolute_threshold)] = 0
-            else:
-                if self.args.relative_max_threshold is not None:
-                    mask[torch.where(
-                        stat < torch.max(stat, dim=1)[0].unsqueeze(-1) * self.args.relative_max_threshold)] = 0
-                else:
-                    mask = torch.zeros_like(stat)
-                    c_ids = torch.topk(stat, k=int(mask.shape[1] * self.args.relative_keep_threshold), dim=1)[1]  # TODO B*K
-                    b_ids = torch.tensor([iii for iii in range(mask.shape[0])]).to(mask.device).unsqueeze(-1).expand(c_ids.shape)  # TODO B*K
-                    mask[b_ids.detach().flatten(), c_ids.detach().flatten()] = 1
-
-            mask = torch.stack([1 - mask, mask], dim=-1)
-
-        return mask
-
-    def fuse_out_with_mask(self, out, mask, h_map):
-        out = out * mask[:, :, -1].unsqueeze(-1).unsqueeze(-1)
-
-        if self.args.gate_history:
-            if self.args.fade:
-                # out_list=[out[:, 0]]
-                # for t in range(1, mask.shape[1]):
-                #     out_list.append( out[:, t] + out[:, t-1] * mask[:, t, -2].unsqueeze(-1).unsqueeze(-1) )
-                #     # out[:, t] = out[:, t] + h_map[:, t] * mask[:, t, -2].unsqueeze(-1).unsqueeze(-1)
-                #     # if t != mask.shape[1]-1:
-                #     #     h_map[:, t+1] = out[:, t]
-                # out = torch.stack(out_list, dim=1)
-                mask_chw = mask.unsqueeze(-1).unsqueeze(-1)
-                new_out = torch.zeros_like(out)
-                new_out[:, 0] = out[:, 0]
-                for t in range(1, mask.shape[1]):
-                    new_out[:, t] = out[:, t] + out[:, t-1] * mask_chw[:, t, -2]
-                return new_out
-            else:
-                out = out + h_map * mask[:, :, -2].unsqueeze(-1).unsqueeze(-1)
-                return out
-        else:
-            return out
 
 
 class Bottleneck(nn.Module):
@@ -473,28 +303,63 @@ class Bottleneck(nn.Module):
         self.stride = stride
 
         self.args = args
+        self.num_channels = width
+        self.adaptive_policy = not any([self.args.gate_all_zero_policy,
+                                        self.args.gate_all_one_policy,
+                                        self.args.gate_random_soft_policy,
+                                        self.args.gate_random_hard_policy,
+                                        self.args.gate_threshold])
+        if self.adaptive_policy:
+            self.policy_net = PolicyBlock(in_planes=inplanes, out_planes=width, norm_layer=norm_layer, args=args)
+            if self.args.dense_in_block:
+                self.policy_net2 = PolicyBlock(in_planes=width, out_planes=width, norm_layer=norm_layer, args=args)
+
+    def count_flops(self, input_data_shape, **kwargs):
+        conv1_flops, conv1_out_shape = count_conv2d_flops(input_data_shape, self.conv1)
+        conv2_flops, conv2_out_shape = count_conv2d_flops(conv1_out_shape, self.conv2)
+        conv3_flops, conv3_out_shape = count_conv2d_flops(conv2_out_shape, self.conv3)
+        if self.downsample0 is not None:
+            downsample0_flops, _ = count_conv2d_flops(input_data_shape, self.downsample0)
+        else:
+            downsample0_flops = 0
+
+        return [conv1_flops, conv2_flops, conv3_flops, downsample0_flops, 0], conv3_out_shape
 
     def forward(self, x, **kwargs):
         identity = x
 
+        # shift operations
+        if self.args.shift:
+            x = shift(x, self.args.num_segments, fold_div=self.args.shift_div, inplace=False)
+
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
-        x_mid = out
 
+        # gate functions
+        h_map_updated = get_hmap(out, self.args, **kwargs)
+        if self.adaptive_policy:
+            mask = self.policy_net(x, **kwargs)
+        else:
+            mask = handcraft_policy_for_masks(x, out, self.num_channels, self.args)
+        out = fuse_out_with_mask(out, mask, h_map_updated, self.args)
+
+        x2 = out
         out = self.conv2(out)
         out = self.bn2(out)
         out = self.relu(out)
 
-        # TODO generate channel mask using local policy
-        # TODO how to do history-fusion? Fused from history feature map? Or using LSTM here?
-        if self.args.gate_local_policy:
-            x_c = nn.AdaptiveAvgPool2d((1, 1))(x_mid)
-            x_c = torch.flatten(x_c, 1)
-            x_c = self.gate_fc0(x_c)
-            x_c = self.gate_fc1(x_c)
-            mask = gumbel_sigmoid(logits=x_c, tau=kwargs["tau"], hard=True)  # TODO: B*C
-            out = out * mask.unsqueeze(-1).unsqueeze(-1)
+        # gate functions
+        if self.args.dense_in_block:
+            h_map_updated2 = get_hmap(out, self.args, **kwargs)
+            if self.adaptive_policy:
+                mask2 = self.policy_net2(x2, **kwargs)
+            else:
+                mask2 = handcraft_policy_for_masks(x2, out, self.num_channels, self.args)
+            out = fuse_out_with_mask(out, mask2, h_map_updated2, self.args)
+            mask2 = mask2.view((-1, self.args.num_segments) + mask2.shape[1:])
+        else:
+            mask2 = None
 
         out = self.conv3(out)
         out = self.bn3(out)
@@ -506,7 +371,7 @@ class Bottleneck(nn.Module):
         out += identity
         out = self.relu(out)
 
-        return out
+        return out, mask.view((-1, self.args.num_segments) + mask.shape[1:]), mask2
 
 
 class BateNet(nn.Module):
@@ -608,7 +473,7 @@ class BateNet(nn.Module):
     def forward(self, input_data, **kwargs):
         # TODO x.shape (nt, c, h, w)
         if "tau" not in kwargs:
-            print("tau not in kwargs. use default=1 (inline_test)")
+            # print("tau not in kwargs. use default=1 (inline_test)")
             kwargs["tau"] = 1
             kwargs["inline_test"] = True
 
@@ -616,6 +481,8 @@ class BateNet(nn.Module):
         for _, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
             for _, block in enumerate(layers):
                 mask_stack_list.append(None)
+                if self.args.dense_in_block:
+                    mask_stack_list.append(None)
 
         x = self.conv1(input_data)
         x = self.bn1(x)
@@ -625,9 +492,12 @@ class BateNet(nn.Module):
         idx = 0
         for li, layers in enumerate([self.layer1, self.layer2, self.layer3, self.layer4]):
             for bi, block in enumerate(layers):
-                x, mask = block(x, **kwargs)
+                x, mask, mask2 = block(x, **kwargs)
                 mask_stack_list[idx] = mask
                 idx += 1
+                if self.args.dense_in_block:
+                    mask_stack_list[idx] = mask2
+                    idx += 1
 
         x = self.avgpool(x)
         x = torch.flatten(x, 1)

@@ -188,8 +188,6 @@ class TSN_Gate(nn.Module):
             if isinstance(m, torch.nn.Conv2d) or isinstance(m, torch.nn.Conv1d) or isinstance(m, CGConv2dNew):
                 ps = list(m.parameters())
                 if isinstance(m, CGConv2dNew):
-                    # print("len", len(ps))
-                    # print([x[0] for x in m.named_parameters()])
                     assert len(ps) == 3
                     custom_ops.append(ps[2])
 

@@ -70,22 +70,62 @@ class PolicyBlock(nn.Module):
                 out_factor = 3
         self.action_dim = out_factor
 
-        if self.args.relative_hidden_size > 0:
-            hidden_dim = int(self.args.relative_hidden_size * out_planes)
+        if self.args.single_linear:
+            self.gate_fc0 = nn.Linear(in_planes * in_factor, out_planes * out_factor)
+            if self.args.gate_bn_between_fcs:
+                self.gate_bn = nn.BatchNorm1d(out_planes * out_factor)
+            if self.args.gate_relu_between_fcs:
+                self.gate_relu = nn.ReLU(inplace=True)
+
+            normal_(self.gate_fc0.weight, 0, 0.001)
+            constant_(self.gate_fc0.bias, 0)
+        elif self.args.triple_linear:
+            if self.args.relative_hidden_size > 0:
+                hidden_dim = int(self.args.relative_hidden_size * out_planes)
+            else:
+                hidden_dim = self.args.gate_hidden_dim
+
+            self.gate_fc0 = nn.Linear(in_planes * in_factor, hidden_dim)
+            if self.args.gate_bn_between_fcs:
+                self.gate_bn = nn.BatchNorm1d(hidden_dim)
+            if self.args.gate_relu_between_fcs:
+                self.gate_relu = nn.ReLU(inplace=True)
+
+            self.gate_fc1 = nn.Linear(hidden_dim, hidden_dim)
+
+            if self.args.gate_bn_between_fcs:
+                self.gate_bn1 = nn.BatchNorm1d(hidden_dim)
+            if self.args.gate_relu_between_fcs:
+                self.gate_relu1 = nn.ReLU(inplace=True)
+            self.gate_fc2 = nn.Linear(hidden_dim, out_planes * out_factor)
+
+            normal_(self.gate_fc0.weight, 0, 0.001)
+            constant_(self.gate_fc0.bias, 0)
+            normal_(self.gate_fc1.weight, 0, 0.001)
+            constant_(self.gate_fc1.bias, 0)
+            normal_(self.gate_fc2.weight, 0, 0.001)
+            constant_(self.gate_fc2.bias, 0)
+
         else:
-            hidden_dim = self.args.gate_hidden_dim
-        self.gate_fc0 = nn.Linear(in_planes * in_factor, hidden_dim)
-        if self.args.gate_bn_between_fcs:
-            self.gate_bn = nn.BatchNorm1d(hidden_dim)
-        if self.args.gate_relu_between_fcs:
-            self.gate_relu = nn.ReLU(inplace=True)
-        self.gate_fc1 = nn.Linear(hidden_dim, out_planes * out_factor)
+            if self.args.relative_hidden_size > 0:
+                hidden_dim = int(self.args.relative_hidden_size * out_planes)
+            else:
+                hidden_dim = self.args.gate_hidden_dim
+            self.gate_fc0 = nn.Linear(in_planes * in_factor, hidden_dim)
+            if self.args.gate_bn_between_fcs:
+                self.gate_bn = nn.BatchNorm1d(hidden_dim)
+            if self.args.gate_relu_between_fcs:
+                self.gate_relu = nn.ReLU(inplace=True)
+            self.gate_fc1 = nn.Linear(hidden_dim, out_planes * out_factor)
+
+            normal_(self.gate_fc0.weight, 0, 0.001)
+            constant_(self.gate_fc0.bias, 0)
+            normal_(self.gate_fc1.weight, 0, 0.001)
+            constant_(self.gate_fc1.bias, 0)
+
         self.num_channels = out_planes
 
-        normal_(self.gate_fc0.weight, 0, 0.001)
-        constant_(self.gate_fc0.bias, 0)
-        normal_(self.gate_fc1.weight, 0, 0.001)
-        constant_(self.gate_fc1.bias, 0)
+
 
 
     def forward(self, x, **kwargs):
@@ -105,12 +145,42 @@ class PolicyBlock(nn.Module):
             x_c = torch.cat([h_vec, x_c], dim=-1)
 
         # fully-connected embedding
-        x_c = self.gate_fc0(x_c)
-        if self.args.gate_bn_between_fcs:
-            x_c = self.gate_bn(x_c)
-        if self.args.gate_relu_between_fcs:
-            x_c = self.gate_relu(x_c)
-        x_c = self.gate_fc1(x_c)
+        if self.args.single_linear:
+            x_c = self.gate_fc0(x_c)
+            if self.args.gate_bn_between_fcs:
+                x_c = x_c.unsqueeze(-1)
+                x_c = self.gate_bn(x_c)
+                x_c = x_c.squeeze(-1)
+            if self.args.gate_relu_between_fcs:
+                x_c = self.gate_relu(x_c)
+
+        elif self.args.triple_linear:
+            x_c = self.gate_fc0(x_c)
+            if self.args.gate_bn_between_fcs:
+                x_c = x_c.unsqueeze(-1)
+                x_c = self.gate_bn(x_c)
+                x_c = x_c.squeeze(-1)
+            if self.args.gate_relu_between_fcs:
+                x_c = self.gate_relu(x_c)
+            x_c = self.gate_fc1(x_c)
+
+            if self.args.gate_bn_between_fcs:
+                x_c = x_c.unsqueeze(-1)
+                x_c = self.gate_bn1(x_c)
+                x_c = x_c.squeeze(-1)
+            if self.args.gate_relu_between_fcs:
+                x_c = self.gate_relu1(x_c)
+            x_c = self.gate_fc2(x_c)
+
+        else:
+            x_c = self.gate_fc0(x_c)
+            if self.args.gate_bn_between_fcs:
+                x_c = x_c.unsqueeze(-1)
+                x_c = self.gate_bn(x_c)
+                x_c = x_c.squeeze(-1)
+            if self.args.gate_relu_between_fcs:
+                x_c = self.gate_relu(x_c)
+            x_c = self.gate_fc1(x_c)
 
         # gating operations
         x_c2d = x_c.view(x.shape[0], self.num_channels, self.action_dim)

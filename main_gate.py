@@ -15,6 +15,7 @@ from torch.nn.utils import clip_grad_norm_
 
 from ops.dataset import TSNDataSet
 from ops.models_gate import TSN_Gate
+from ops.models_ada import TSN_Ada
 from ops.transforms import *
 from ops import dataset_config
 from ops.utils import AverageMeter, accuracy, cal_map, Recorder
@@ -34,7 +35,7 @@ import torch.distributed as dist
 import numpy as np
 import common
 from os.path import join as ospj
-
+from shutil import copyfile
 
 def load_to_sd(model_path):
     if ".pth" in model_path:
@@ -68,18 +69,15 @@ def main():
 
     test_mode = (args.test_from != "")
 
-    logger = Logger()
-    sys.stdout = logger
-
     if args.multiprocessing_distributed:
         args.world_size = ngpus_per_node * args.world_size
-        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args, test_mode, logger))
+        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args, test_mode))
     else:
         # Simply call main_worker function
-        main_worker(args.gpus, ngpus_per_node, args, test_mode, logger)
+        main_worker(args.gpus, ngpus_per_node, args, test_mode)
 
 
-def main_worker(gpu_i, ngpus_per_node, args, test_mode, logger):
+def main_worker(gpu_i, ngpus_per_node, args, test_mode):
 
     args.gpus = gpu_i
     if args.multiprocessing_distributed:
@@ -102,7 +100,21 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode, logger):
         dist.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
                                 world_size=args.world_size, rank=args.rank)
 
-    model = TSN_Gate(args=args)
+    if args.rank == 0:
+        logger = Logger()
+        sys.stdout = logger
+
+    if args.ada_reso_skip:
+        model = TSN_Gate(args=args)
+    else:
+        model = TSN_Ada(args.num_class, args.num_segments,
+                        base_model=args.arch,
+                        consensus_type=args.consensus_type,
+                        dropout=args.dropout,
+                        partial_bn=not args.no_partialbn,
+                        pretrain=args.pretrain,
+                        is_shift=args.shift, shift_div=args.shift_div, shift_place=args.shift_place,
+                        args=args)
     base_model_gflops, gflops_list = init_gflops_table(model, args)
 
     if args.no_optim:
@@ -233,18 +245,16 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode, logger):
     cudnn.benchmark = True
 
     train_loader, val_loader = get_data_loaders(model, prefix, args)
-
     # define loss function (criterion) and optimizer
     if args.distributed:
         criterion = torch.nn.CrossEntropyLoss().cuda(args.gpus)
     else:
         criterion = torch.nn.CrossEntropyLoss().cuda()
 
-    exp_full_path = setup_log_directory(logger, args.exp_header, test_mode, args)
-
     # TODO do simple eval here?
 
     if args.rank==0:
+        exp_full_path = setup_log_directory(args.exp_header, test_mode, args, logger)
         if not test_mode:
             with open(os.path.join(exp_full_path, 'args.txt'), 'w') as f:
                 f.write(str(args))
@@ -257,13 +267,12 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode, logger):
         map_record, mmap_record, prec_record = get_recorders(3)
         best_train_usage_str = None
         best_val_usage_str = None
-        val_gflops = -1
 
     for epoch in range(args.start_epoch, args.epochs):
         # train for one epoch
         if not args.skip_training:
             set_random_seed(node_seed_offset + args.random_seed + epoch, args)
-            adjust_learning_rate(optimizer, epoch, args.lr_type, args.lr_steps, args)
+            adjust_learning_rate(optimizer, epoch, -1, -1, args.lr_type, args.lr_steps, args)
             train_usage_str = train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, gflops_list, args, tf_writer)
 
         torch.cuda.empty_cache()
@@ -273,7 +282,7 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode, logger):
         # evaluation
         if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
             set_random_seed(args.random_seed, args)
-            mAP, mmAP, prec1, val_usage_str, val_gflops = validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, args, tf_writer)
+            mAP, mmAP, prec1, val_usage_str = validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, args, tf_writer)
 
             if args.distributed:
                 dist.barrier()
@@ -309,9 +318,12 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode, logger):
                     'best_map': map_record.best_val,
                 }
 
-                save_checkpoint(saved_things, mmap_record.is_current_best(), exp_full_path, "ckpt.bestmmap")
-                save_checkpoint(saved_things, prec_record.is_current_best(), exp_full_path, "ckpt.best")
-                save_checkpoint(saved_things, True, exp_full_path, "ckpt.latest")
+                # save_checkpoint(saved_things, mmap_record.is_current_best(), False, exp_full_path, "ckpt.bestmmap")
+                save_checkpoint(saved_things, prec_record.is_current_best(), False, exp_full_path, "ckpt.best")
+                save_checkpoint(saved_things, True, False, exp_full_path, "ckpt.latest")
+
+                if epoch in args.backup_epoch_list:
+                    save_checkpoint(None, False, True, exp_full_path, str(epoch))
 
                 torch.cuda.empty_cache()
 
@@ -323,10 +335,10 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode, logger):
     if args.rank == 0:
         if test_mode:
             os.rename(logger._log_path, ospj(logger._log_dir_name, logger._log_file_name[:-4] +
-                                         "_mm_%.2f_a_%.2f_f_%.4f.txt" % (mmap_record.best_val, prec_record.best_val,
-                                                                             val_gflops)))
+                                         "_mm_%.2f_a_%.2f_f.txt" % (mmap_record.best_val, prec_record.best_val)))
         else:
-            print("Best train usage:%s\nBest val usage:%s" % (best_train_usage_str, best_val_usage_str))
+            if args.ada_reso_skip:
+                print("Best train usage:%s\nBest val usage:%s" % (best_train_usage_str, best_val_usage_str))
 
 
 def set_random_seed(the_seed, args):
@@ -341,52 +353,59 @@ def init_gflops_table(model, args):
         params = get_gflops_params(args.arch, args.reso_list[0], args.num_class, -1, args=args)[1]
     else:
         base_model_gflops, params = get_gflops_params(args.arch, args.reso_list[0], args.num_class, -1, args=args)
-    gflops_list = model.base_model_list[0].count_flops((1, 1, 3, args.reso_list[0], args.reso_list[0]))
 
-    if args.rank==0:
-        print("Network@%d (%.4f GFLOPS, %.4f M params) has %d blocks" % (args.reso_list[0], base_model_gflops, params, len(gflops_list)))
-        for i, block in enumerate(gflops_list):
-            print("block", i, ",".join(["%.4f GFLOPS" % (x / 1e9) for x in block]))
-    return base_model_gflops, gflops_list
-
+    if args.ada_reso_skip:
+        gflops_list = model.base_model_list[0].count_flops((1, 1, 3, args.reso_list[0], args.reso_list[0]))
+        if args.rank==0:
+            print("Network@%d (%.4f GFLOPS, %.4f M params) has %d blocks" % (args.reso_list[0], base_model_gflops, params, len(gflops_list)))
+            for i, block in enumerate(gflops_list):
+                print("block", i, ",".join(["%.4f GFLOPS" % (x / 1e9) for x in block]))
+        return base_model_gflops, gflops_list
+    else:
+        return base_model_gflops, None
 
 def compute_gflops_by_mask(mask_tensor_list, base_model_gflops, gflops_list, args):
     # TODO:   -> conv1 -> conv2 ->     // inside the block
     # TODO:    C0   -    C1   -    C2  // channels proc.
     # TODO:  C1 = s0 + s1 + s2         // 0-zero out / 1-history / 2-current     cheap <<< expensive
     # TODO: saving = s1/C1 * [FLOPS(conv1)] + s0/C1 * [FLOPS(conv1) + FLOPS(conv2)]
-    # mask_cpu_list = [mask.detach().cpu() for mask in mask_tensor_list]
-    # s0 = [torch.mean(mask_cpu[:, :, :, 0]).item() for mask_cpu in mask_cpu_list]
-    # if args.gate_history:
-    #     s1 = [torch.mean(mask_cpu[:, :, :, 1]).item() for mask_cpu in mask_cpu_list]
-    # else:
-    #     s1 = [0 for _ in mask_tensor_list]
-
-
+    upperbound_gflops = base_model_gflops
+    real_gflops = base_model_gflops
     if "gate" in args.arch or "bate" in args.arch:
-        if args.gate_no_skipping:
-            s1 = [torch.mean(mask[:, :, :, 0]) for mask in mask_tensor_list]
-            s1_savings = sum([s1[i] * (gflops_list[i][0] - gflops_list[i][-1]) for i in range(len(gflops_list))])
-            real_gflops = base_model_gflops - s1_savings * 0
-        else:
-            s0 = [torch.mean(mask[:, :, :, 0]) for mask in mask_tensor_list]
-            if args.gate_history:
-                s1 = [torch.mean(mask[:, :, :, 1]) for mask in mask_tensor_list]
-            else:
-                s1 = [0 for _ in mask_tensor_list]
+        for m_i, mask in enumerate(mask_tensor_list):
+            #compute precise GFLOPS
+            upsave = torch.zeros_like(mask[:, :, :, 0]) # B*T*C*K->B*T*C
+            for t in range(mask.shape[1]-1):
+                if args.gate_history:
+                    upsave[:, t] = (1 - mask[:, t, :, -1]) * (1 - mask[:, t + 1, :, -2])
+                else:
+                    upsave[:, t] = 1 - mask[:, t, :, -1] # since no reusing, as long as not keeping, save from upstream conv
+            upsave[:, -1] = 1-mask[:, t, :, -1]
+            upsave = torch.mean(upsave)
 
-            if args.dense_in_block:
-                if "net18" in args.arch or "net34" in args.arch:  # TODO BasicBlock
-                    s0_savings = sum([s0[i * 2] * gflops_list[i][1] for i in range(len(gflops_list))])
-                else:  # TODO BottleNeck
-                    s0_savings_conv2 = sum([s0[i * 2] * gflops_list[i][1] for i in range(len(gflops_list))])
-                    s0_savings_conv3 = sum([s0[i * 2 + 1] * gflops_list[i][2] for i in range(len(gflops_list))])
-                    s0_savings = s0_savings_conv2 + s0_savings_conv3
+            if args.gate_no_skipping: # downstream conv gflops' saving is from skippings
+                downsave = upsave * 0
             else:
-                s0_savings = sum([s0[i] * gflops_list[i][1] for i in range(len(gflops_list))])
-            s1_savings = 0
-            # real_gflops = base_model_gflops - s0_savings / 1e9
-            real_gflops = base_model_gflops - (s0_savings + s1_savings) / 1e9
+                downsave = torch.mean(mask[:, :, :, 0])
+
+            conv_offset = 0
+            real_count = 1.
+            if args.dense_in_block:
+                layer_i = m_i // 2  # because we have twice masks as the #(blocks)
+                if m_i % 2 == 1:  # means we come to the second mask in the block
+                    if "net50" in args.arch or "net101" in args.arch:  # because we have 3 convs in BottleNeck
+                        conv_offset = 1
+                    else:  # because we can't compute flops saving among blocks (due to residual op), so we skip this (as this is the case only in BasicBlock)
+                        real_count = 0
+            else:
+                layer_i = m_i
+            up_flops = gflops_list[layer_i][0 + conv_offset] / 1e9
+            down_flops = gflops_list[layer_i][1 + conv_offset] * real_count / 1e9
+            embed_conv_flops=gflops_list[layer_i][-1] * real_count / 1e9
+
+            upperbound_gflops = upperbound_gflops - downsave * (down_flops - embed_conv_flops) # in worst case, we only compute saving from downstream conv
+            real_gflops = real_gflops - upsave * up_flops - downsave * (down_flops - embed_conv_flops)
+
     else:
         # s0 for sparsity savings
         # s1 for history
@@ -401,10 +420,10 @@ def compute_gflops_by_mask(mask_tensor_list, base_model_gflops, gflops_list, arg
             savings = savings0 + savings1
         else:
             savings = sum([s0[i] * gflops_list[i][0] * (1 - 1.0 / args.partitions) for i in range(len(gflops_list))])
-
         real_gflops = base_model_gflops - savings / 1e9
+        upperbound_gflops = real_gflops
 
-    return real_gflops
+    return upperbound_gflops, real_gflops
 
 
 def print_mask_statistics(mask_tensor_list, args):
@@ -523,7 +542,12 @@ def reverse_onehot(a):
         return None
 
 
-def compute_losses(criterion, prediction, target, mask_stack_list, gflops_tensor, epoch_i, model, args):
+def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_tensor, real_gflops_tensor, epoch_i, model, args):
+    if args.gflops_loss_type == "real":
+        gflops_tensor = real_gflops_tensor
+    else:
+        gflops_tensor = upb_gflops_tensor
+
     # linear efficiency loss scheduling
     if args.gate_linear_phase > 0:
         factor = 1. / args.gate_linear_phase * min(args.gate_linear_phase, epoch_i)
@@ -598,8 +622,8 @@ def compute_exp_decay_tau(epoch, args):
     return args.init_tau * np.exp(args.exp_decay_factor * epoch)
 
 
-def get_policy_usage_str(gflops):
-    return "Equivalent GFLOPS: %.4f" % (gflops.item())
+def get_policy_usage_str(upb_gflops, real_gflops):
+    return "Equivalent GFLOPS: upb: %.4f   real: %.4f" % (upb_gflops.item(), real_gflops.item())
 
 
 def get_current_temperature(num_epoch, args):
@@ -621,7 +645,8 @@ def get_average_meters(number):
 def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, gflops_list, args, tf_writer):
     batch_time, data_time, top1, top5 = get_average_meters(4)
     losses_dict = {}
-    mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _ in gflops_list]
+    if args.ada_reso_skip:
+        mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _ in gflops_list]
     tau = get_current_temperature(epoch, args)
 
     # switch to train mode
@@ -630,13 +655,15 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
 
     end = time.time()
     if args.rank==0:
-        print("#%s# lr:%.4f\ttau:%.4f" % (args.exp_header, optimizer.param_groups[-1]['lr'] * 0.1, tau))
+        print("#%s# lr:%.6f\ttau:%.4f" % (args.exp_header, optimizer.param_groups[-1]['lr'] * 0.1, tau))
 
     if dist.is_initialized():
         train_loader.sampler.set_epoch(epoch)
 
     for i, input_tuple in enumerate(train_loader):
         data_time.update(time.time() - end)
+        if args.warmup_epochs > 0:
+            adjust_learning_rate(optimizer, epoch, len(train_loader), i, "linear", None, args)
 
         # input and target
         batchsize = input_tuple[0].size(0)
@@ -651,12 +678,14 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
         target_var = torch.autograd.Variable(target)
 
         # model forward function & measure losses and accuracy
-        output, mask_stack_list, feat_out, base_outs = \
+        output, mask_stack_list, _, _ = \
             model(input=input_var_list, tau=tau, is_training=True, curr_step=epoch * len(train_loader) + i)
 
-        gflops_tensor = compute_gflops_by_mask(mask_stack_list, base_model_gflops, gflops_list, args)
-
-        loss_dict = compute_losses(criterion, output, target_var[:, 0], mask_stack_list, gflops_tensor, epoch, model, args)
+        if args.ada_reso_skip:
+            upb_gflops_tensor, real_gflops_tensor = compute_gflops_by_mask(mask_stack_list, base_model_gflops, gflops_list, args)
+            loss_dict = compute_losses(criterion, output, target_var[:, 0], mask_stack_list, upb_gflops_tensor, real_gflops_tensor, epoch, model, args)
+        else:
+            loss_dict = {"loss": criterion(output, target_var[:, 0])}
         prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
         if dist.is_initialized():
             world_size = dist.get_world_size()
@@ -681,9 +710,11 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
         optimizer.step()
         optimizer.zero_grad()
 
+
         # gather masks
-        for layer_i, mask_stack in enumerate(mask_stack_list):
-            mask_stack_list_list[layer_i].append(mask_stack.detach().cpu())
+        if args.ada_reso_skip:
+            for layer_i, mask_stack in enumerate(mask_stack_list):
+                mask_stack_list_list[layer_i].append(mask_stack.detach()) #TODO removed cpu()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -691,37 +722,40 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
 
         # logging
         if args.rank==0 and i % args.print_freq == 0:
-            print_output = ('Epoch:[{0:02d}][{1:03d}/{2:03d}] '
+            print_output = ('Epoch:[{0:02d}][{1:03d}/{2:03d}] lr {3:.6f} '
                             'Time {batch_time.val:.3f}({batch_time.avg:.3f}) '
                             '{data_time.val:.3f} ({data_time.avg:.3f})\t'
                             'Loss{loss.val:.4f}({loss.avg:.4f}) '
                             'Prec@1 {top1.val:.3f}({top1.avg:.3f}) '
                             'Prec@5 {top5.val:.3f}({top5.avg:.3f})\t'.format(
-                epoch, i, len(train_loader), batch_time=batch_time,
+                epoch, i, len(train_loader), optimizer.param_groups[-1]['lr'] * 0.1, batch_time=batch_time,
                 data_time=data_time, loss=losses_dict["loss"], top1=top1, top5=top5))  # TODO
 
             for loss_name in losses_dict:
-                if loss_name == "loss":
+                if loss_name == "loss" or "mask" in loss_name:
                     continue
                 print_output += ' {header:s} {loss.val:.3f}({loss.avg:.3f})'.\
                     format(header=loss_name[0], loss=losses_dict[loss_name])
             print(print_output)
+    if args.ada_reso_skip:
+        for layer_i in range(len(mask_stack_list_list)):
+            mask_stack_list_list[layer_i] = torch.cat(mask_stack_list_list[layer_i], dim=0)
+        upb_batch_gflops, real_batch_gflops = compute_gflops_by_mask(mask_stack_list_list, base_model_gflops, gflops_list, args)
+        if dist.is_initialized():
+            world_size = dist.get_world_size()
+            dist.all_reduce(upb_batch_gflops)
+            dist.all_reduce(real_batch_gflops)
+            upb_batch_gflops /= world_size
+            real_batch_gflops /= world_size
 
-    for layer_i in range(len(mask_stack_list_list)):
-        mask_stack_list_list[layer_i] = torch.cat(mask_stack_list_list[layer_i], dim=0)
-    batch_gflops = compute_gflops_by_mask(mask_stack_list_list, base_model_gflops, gflops_list, args)
-
-    if dist.is_initialized():
-        world_size = dist.get_world_size()
-        dist.all_reduce(batch_gflops)
-        batch_gflops /= world_size
-
-    if args.rank==0:
-        usage_str = get_policy_usage_str(batch_gflops)
-        print(usage_str)
-        if args.print_statistics:
-            print_mask_statistics(mask_stack_list_list, args)
-
+    if args.rank == 0:
+        if args.ada_reso_skip:
+            usage_str = get_policy_usage_str(upb_batch_gflops, real_batch_gflops)
+            print(usage_str)
+            if args.print_statistics:
+                print_mask_statistics(mask_stack_list_list, args)
+        else:
+            usage_str = "Base Model"
         if tf_writer is not None:
             tf_writer.add_scalar('loss/train', losses_dict["loss"].avg, epoch)
             tf_writer.add_scalar('acc/train_top1', top1.avg, epoch)
@@ -740,8 +774,8 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
 
     tau = get_current_temperature(epoch, args)
 
-    # mask_stack_list_list = [[] for _ in gflops_list]
-    mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _
+    if args.ada_reso_skip:
+        mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _
                                                                                                                in
                                                                                                                gflops_list]
 
@@ -763,23 +797,23 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
             # target = input_tuple[-1].cuda(args.gpus, non_blocking=True)
 
             # model forward function
-            output, mask_stack_list, feat_out, base_outs = \
+            output, mask_stack_list, _, _ = \
                 model(input=input_tuple[:-1], tau=tau, is_training=False, curr_step=0)
 
-            gflops_tensor = compute_gflops_by_mask(mask_stack_list, base_model_gflops, gflops_list, args)
-
             # measure losses, accuracy and predictions
-            loss_dict = compute_losses(criterion, output, target[:, 0], mask_stack_list, gflops_tensor, epoch, model, args)
+            if args.ada_reso_skip:
+                upb_gflops_tensor, real_gflops_tensor = compute_gflops_by_mask(mask_stack_list, base_model_gflops, gflops_list, args)
+                loss_dict = compute_losses(criterion, output, target[:, 0], mask_stack_list, upb_gflops_tensor, real_gflops_tensor, epoch, model, args)
+            else:
+                loss_dict = {"loss": criterion(output, target[:, 0])}
 
             prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
-
             if dist.is_initialized():
                 world_size = dist.get_world_size()
                 dist.all_reduce(prec1)
                 dist.all_reduce(prec5)
                 prec1 /= world_size
                 prec5 /= world_size
-
 
             all_results.append(output)
             all_targets.append(target)
@@ -792,15 +826,16 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
             top1.update(prec1.item(), batchsize)
             top5.update(prec5.item(), batchsize)
 
-            # gather masks
-            for layer_i, mask_stack in enumerate(mask_stack_list):
-                mask_stack_list_list[layer_i].append(mask_stack.detach().cpu())
+            if args.ada_reso_skip:
+                # gather masks
+                for layer_i, mask_stack in enumerate(mask_stack_list):
+                    mask_stack_list_list[layer_i].append(mask_stack.detach()) #TODO remvoed .cpu()
 
             # measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
 
-            if args.rank==0 and i % args.print_freq == 0:
+            if args.rank == 0 and i % args.print_freq == 0:
                 print_output = ('Test: [{0:03d}/{1:03d}] '
                                 'Time {batch_time.val:.3f}({batch_time.avg:.3f})\t'
                                 'Loss{loss.val:.4f}({loss.avg:.4f})'
@@ -810,15 +845,15 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
                                        loss=losses_dict["loss"], top1=top1, top5=top5))
 
                 for loss_name in losses_dict:
-                    if loss_name == "loss":
+                    if loss_name == "loss" or "mask" in loss_name:
                         continue
                     print_output += ' {header:s} {loss.val:.3f}({loss.avg:.3f})'. \
                         format(header=loss_name[0], loss=losses_dict[loss_name])
                 print(print_output)
-
-    for layer_i in range(len(mask_stack_list_list)):
-        mask_stack_list_list[layer_i] = torch.cat(mask_stack_list_list[layer_i], dim=0)
-    batch_gflops = compute_gflops_by_mask(mask_stack_list_list, base_model_gflops, gflops_list, args)
+    if args.ada_reso_skip:
+        for layer_i in range(len(mask_stack_list_list)):
+            mask_stack_list_list[layer_i] = torch.cat(mask_stack_list_list[layer_i], dim=0)
+        upb_batch_gflops, real_batch_gflops = compute_gflops_by_mask(mask_stack_list_list, base_model_gflops, gflops_list, args)
 
     mAP, _ = cal_map(torch.cat(all_results, 0).cpu(),
                      torch.cat(all_targets, 0)[:, 0:1].cpu())  # TODO(yue) single-label mAP
@@ -827,14 +862,18 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
 
 
     if dist.is_initialized():
-        mAP_tensor = torch.tensor(mAP)
-        mmAP_tensor = torch.tensor(mmAP)
+        mAP_tensor = torch.tensor(mAP).to(upb_batch_gflops.device)
+        mmAP_tensor = torch.tensor(mmAP).to(upb_batch_gflops.device)
 
         world_size = dist.get_world_size()
-        dist.all_reduce(batch_gflops)
+        if args.ada_reso_skip:
+            dist.all_reduce(upb_batch_gflops)
+            dist.all_reduce(real_batch_gflops)
         dist.all_reduce(mAP_tensor)
         dist.all_reduce(mmAP_tensor)
-        batch_gflops /= world_size
+        if args.ada_reso_skip:
+            upb_batch_gflops /= world_size
+            real_batch_gflops /= world_size
         mAP_tensor /= world_size
         mmAP_tensor /= world_size
         mAP = mAP_tensor.item()
@@ -843,10 +882,13 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
     if args.rank==0:
         print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
               .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses_dict["loss"]))
-        usage_str = get_policy_usage_str(batch_gflops)
-        print(usage_str)
-        if args.print_statistics:
-            print_mask_statistics(mask_stack_list_list, args)
+        if args.ada_reso_skip:
+            usage_str = get_policy_usage_str(upb_batch_gflops, real_batch_gflops)
+            print(usage_str)
+            if args.print_statistics:
+                print_mask_statistics(mask_stack_list_list, args)
+        else:
+            usage_str = "Base Model"
 
         if tf_writer is not None:
             tf_writer.add_scalar('loss/test', losses_dict["loss"].avg, epoch)
@@ -854,16 +896,18 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
             tf_writer.add_scalar('acc/test_top5', top5.avg, epoch)
     else:
         usage_str = "Empty: non-master node"
-    return mAP, mmAP, top1.avg, usage_str, batch_gflops
+    return mAP, mmAP, top1.avg, usage_str
 
 
-def save_checkpoint(state, is_best, exp_full_path, decorator):
+def save_checkpoint(state, is_best, shall_backup, exp_full_path, decorator):
     if is_best:
         torch.save(state, '%s/models/%s.pth.tar' % (exp_full_path, decorator))
+    if shall_backup:
+        copyfile("%s/models/ckpt.best.pth.tar"%exp_full_path,
+                 "%s/models/oldbest.%s.pth.tar"%(exp_full_path, decorator))
 
 
-def adjust_learning_rate(optimizer, epoch, lr_type, lr_steps, args):
-    """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
+def adjust_learning_rate(optimizer, epoch, length, iteration, lr_type, lr_steps, args):
     if lr_type == 'step':
         decay = 0.1 ** (sum(epoch >= np.array(lr_steps)))
         lr = args.lr * decay
@@ -872,14 +916,18 @@ def adjust_learning_rate(optimizer, epoch, lr_type, lr_steps, args):
         import math
         lr = 0.5 * args.lr * (1 + math.cos(math.pi * epoch / args.epochs))
         decay = args.weight_decay
+    elif lr_type == 'linear':
+        factor = min(1.0, (epoch * length + iteration + 1)/(args.warmup_epochs * length))
+        lr = args.lr * factor
     else:
         raise NotImplementedError
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr * param_group['lr_mult']
-        param_group['weight_decay'] = decay * param_group['decay_mult']
+        if lr_type != 'linear':
+            param_group['weight_decay'] = decay * param_group['decay_mult']
 
 
-def setup_log_directory(logger, exp_header, test_mode, args):
+def setup_log_directory(exp_header, test_mode, args, logger):
     exp_full_name = "g%s_%s" % (logger._timestr, exp_header)
     if test_mode:
         exp_full_path = ospj(common.EXPS_PATH, args.test_from)
@@ -914,8 +962,15 @@ def get_data_loaders(model, prefix, args):
     input_mean = model.module.input_mean
     input_std = model.module.input_std
 
-    train_augmentation = model.module.get_augmentation(
-        flip=False if 'something' in args.dataset or 'jester' in args.dataset else True)
+    if args.sth_no_flip:
+        train_augmentation = model.module.get_augmentation(
+            flip=False if 'something' in args.dataset or 'jester' in args.dataset
+            or 'sth' in args.dataset
+            else True)
+    else:
+        train_augmentation = model.module.get_augmentation(
+            flip=False if 'something' in args.dataset or 'jester' in args.dataset else True)
+
 
     normalize = GroupNormalize(input_mean, input_std)
 

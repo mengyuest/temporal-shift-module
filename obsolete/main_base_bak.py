@@ -1040,7 +1040,7 @@ def train(train_loader, model, criterion, optimizer, epoch, logger, exp_full_pat
                 loss = acc_loss
         else:
             input_var = torch.autograd.Variable(input)
-            output = model(input=[input_var])
+            output, _, _, _ = model(input=[input_var])
             loss = get_criterion_loss(criterion, output, target_var)
 
         # measure accuracy and record loss
@@ -1210,7 +1210,7 @@ def validate(val_loader, model, criterion, epoch, logger, exp_full_path, tf_writ
                 else:
                     loss = acc_loss
             else:
-                output = model(input=[input])
+                output, _, _, _ = model(input=[input])
                 loss = get_criterion_loss(criterion, output, target)
 
             # TODO(yue)

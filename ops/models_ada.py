@@ -665,7 +665,7 @@ class TSN_Ada(nn.Module):
             if self.is_shift and self.temporal_pool:
                 base_out = base_out.view((-1, self.num_segments // 2) + base_out.size()[1:])
             output = self.consensus(base_out)
-            return output.squeeze(1)
+            return output.squeeze(1), None, None, None
 
         input_list = kwargs["input"]
         batch_size = input_list[0].shape[0]  # TODO(yue) input[0] B*(TC)*H*W

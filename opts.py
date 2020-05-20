@@ -377,22 +377,29 @@ parser.add_argument('--choose_best_by', type=str, choices=['map', 'mmap', 'acc']
 
 
 # for distributed learning
-parser.add_argument('--sync-bn', action='store_true', help='sync BN across GPUs')
+parser.add_argument('--multiprocessing-distributed', '--mpd', action='store_true',
+                    help='Use multi-processing distributed training to launch '
+                         'N processes per node, which has N GPUs. This is the '
+                         'fastest way to use PyTorch for either single node or '
+                         'multi node data parallel training')
+parser.add_argument('--sync-bn', '--sb', action='store_true', help='sync BN across GPUs')
 # parser.add_argument('--expand_hidden_dim', action='store_true',  help=' ')
 parser.add_argument('--world-size', default=1, type=int, help='number of nodes for distributed training')
 parser.add_argument('--rank', default=0, type=int, help='node rank for distributed training')
 parser.add_argument('--dist-url', default='tcp://127.0.0.1:23456', type=str, help='url used to set up distributed training')
 parser.add_argument('--dist-backend', default='nccl', type=str, help='distributed backend')
 parser.add_argument('--hostfile', default='', type=str, help='hostfile distributed learning')
-parser.add_argument('--multiprocessing-distributed', action='store_true',
-                    help='Use multi-processing distributed training to launch '
-                         'N processes per node, which has N GPUs. This is the '
-                         'fastest way to use PyTorch for either single node or '
-                         'multi node data parallel training')
+
 
 # parser.add_argument('--annealing_factor', default=-0.2, type=float)
 parser.add_argument('--auto_resume', action='store_true', help='auto resume for aimos')
 
 parser.add_argument('--not_pin_memory', action='store_true', help='not pin memory')
 parser.add_argument('--relative_hidden_size', type=float, default=-1.0)
-parser.add_argument('--precise', action='store_true', help='compute precised flops savings')
+parser.add_argument('--gflops_loss_type', type=str, choices=['real', 'upb'], default='real')
+parser.add_argument('--backup_epoch_list', default=[9, 39], type=int, nargs="+") # keep old best models (for pretraining)
+parser.add_argument('--warmup_epochs', default=-1, type=int, help='number of epochs for warmup')
+parser.add_argument('--sth_no_flip', action='store_true')
+
+parser.add_argument('--single_linear', action='store_true')
+parser.add_argument('--triple_linear', action='store_true')

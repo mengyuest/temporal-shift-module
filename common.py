@@ -105,6 +105,13 @@ if "dcc" in host_name:
 CHARADES_META_PATH = CHARADES_PATH
 CHARADES_FRAMES=ospj(CHARADES_PATH, 'Charades_v1_rgb')
 
+#TODO(yue) epic
+EPIC_PATH = ospj(DATA_PATH, "EPIC_KITCHENS_2018")
+if "dcc" in host_name:
+    EPIC_PATH = EPIC_PATH.replace("longxun/datasets", "multimodalvideo")
+EPIC_META_PATH = EPIC_PATH
+EPIC_FRAMES=ospj(EPIC_PATH, 'frames')
+
 #TODO(yue) mini-kinetics
 MINIK_PATH=ospj(DATA_PATH, "kinetics-qf")
 if "dcc" in host_name:

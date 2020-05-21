@@ -114,7 +114,7 @@ class TSNDataSet(data.Dataset):
         if self.dataset == "kinetics":
             tmp = [[x[0], x[-2], x[-1]] for x in tmp]
 
-        if self.dataset == "charades":
+        if self.dataset == "charades" or "epic" in self.dataset:
             tmp = [[x[0], int(x[2])-int(x[1]), x[1], x[-1]] for x in tmp]
 
         if not self.test_mode or self.remove_missing:
@@ -123,7 +123,7 @@ class TSNDataSet(data.Dataset):
         if self.partial_fcvid_eval and self.dataset=="fcvid":
             tmp = tmp[:int(len(tmp)*self.partial_ratio)]
 
-        self.video_list = [VideoRecord(item, set_offset=(self.dataset=="charades")) for item in tmp]
+        self.video_list = [VideoRecord(item, set_offset=(self.dataset=="charades" or "epic" in self.dataset)) for item in tmp]
 
         if self.image_tmpl == '{:06d}-{}_{:05d}.jpg':
             for v in self.video_list:

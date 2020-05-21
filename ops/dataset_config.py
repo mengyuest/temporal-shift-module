@@ -76,6 +76,42 @@ def return_charades(modality):
     return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
 
 
+def return_epic(modality):
+    filename_categories = ospj(common.EPIC_META_PATH, 'classIndActions.txt')
+    if modality == 'RGB':
+        root_data = common.EPIC_FRAMES
+        filename_imglist_train = ospj(common.EPIC_META_PATH, 'training_actions.txt')
+        filename_imglist_val = ospj(common.EPIC_META_PATH, 'validation_actions.txt')
+        prefix = 'frame_{:010d}.jpg'
+    else:
+        raise NotImplementedError('no such modality:' + modality)
+    return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
+
+
+def return_epic_verb(modality):
+    filename_categories = ospj(common.EPIC_META_PATH, 'classIndVerbs.txt')
+    if modality == 'RGB':
+        root_data = common.EPIC_FRAMES
+        filename_imglist_train = ospj(common.EPIC_META_PATH, 'training_verbs.txt')
+        filename_imglist_val = ospj(common.EPIC_META_PATH, 'validation_verbs.txt')
+        prefix = 'frame_{:010d}.jpg'
+    else:
+        raise NotImplementedError('no such modality:' + modality)
+    return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
+
+
+def return_epic_noun(modality):
+    filename_categories = ospj(common.EPIC_META_PATH, 'classIndNouns.txt')
+    if modality == 'RGB':
+        root_data = common.EPIC_FRAMES
+        filename_imglist_train = ospj(common.EPIC_META_PATH, 'training_nouns.txt')
+        filename_imglist_val = ospj(common.EPIC_META_PATH, 'validation_nouns.txt')
+        prefix = 'frame_{:010d}.jpg'
+    else:
+        raise NotImplementedError('no such modality:' + modality)
+    return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
+
+
 def return_something(modality):
     filename_categories = 'something/v1/category.txt'
     if modality == 'RGB':
@@ -213,11 +249,13 @@ def return_dataset(dataset):
                    'kinetics': return_kinetics,
                    'actnet': return_actnet, 'fcvid':return_fcvid,
                    'charades': return_charades,
+                   'epic': return_epic, 'epic_verb': return_epic_verb, 'epic_noun': return_epic_noun,
                    'ministh': return_ministh, 'minik': return_minik,
                    'tinysth': return_tinysth,
                    'teenysth': return_teenysth,
                    'low20sth': return_low20sth,
-                   'low42sth': return_low42sth} # TODO(yue)
+                   'low42sth': return_low42sth,
+                   } # TODO(yue)
     if dataset in dict_single:
         file_categories, file_imglist_train, file_imglist_val, root_data, prefix = dict_single[dataset]('RGB')
     else:

@@ -65,7 +65,7 @@ def main():
         args.world_size = len(nodes)
         args.dist_url = "tcp://{}:10598".format(master_node)
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
-    ngpus_per_node = len(args.gpus)
+    ngpus_per_node = torch.cuda.device_count() #len(args.gpus)
 
     test_mode = (args.test_from != "")
 
@@ -74,13 +74,13 @@ def main():
         mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args, test_mode))
     else:
         # Simply call main_worker function
+
         main_worker(args.gpus, ngpus_per_node, args, test_mode)
 
 
 def main_worker(gpu_i, ngpus_per_node, args, test_mode):
-
     args.gpus = gpu_i
-    if args.multiprocessing_distributed:
+    if args.multiprocessing_distributed or args.distributed:
         node_seed_offset = 10086 * args.rank
     else:
         node_seed_offset = 0
@@ -89,7 +89,7 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
     args.num_class, args.train_list, args.val_list, args.root_path, prefix = dataset_config.return_dataset(args.dataset)
 
     # TODO(distributed)
-    if args.multiprocessing_distributed:
+    if args.gpus is not None:
         print("Use GPU: {} for training".format(args.gpus))
     if args.distributed:
         if args.dist_url == "env://" and args.rank == -1:
@@ -129,7 +129,7 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
         # DistributedDataParallel will use all available devices.
-        if args.multiprocessing_distributed:
+        if args.gpus is not None:
             torch.cuda.set_device(args.gpus)
             model.cuda(args.gpus)
             # When using a single GPU per process and per
@@ -145,12 +145,19 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
 
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpus], find_unused_parameters=True)
         else:
-            exit("We don't do world_size>1 and distributed. We also don't do gpus=None")
-            # model.cuda()
-            # # DistributedDataParallel will divide and allocate batch_size to all
-            # # available GPUs if device_ids are not set
-            # model = torch.nn.parallel.DistributedDataParallel(model, device_ids=args.gpus, find_unused_parameters=True)
-    # elif args.multiprocessing_distributed:
+            # exit("We don't do world_size>1 and distributed. We also don't do gpus=None")
+            model.cuda()
+
+
+            # if args.sync_bn:
+            #     process_group = torch.distributed.new_group(list(range(args.world_size)))
+            #     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model, process_group)
+
+
+            # DistributedDataParallel will divide and allocate batch_size to all
+            # available GPUs if device_ids are not set
+            model = torch.nn.parallel.DistributedDataParallel(model, find_unused_parameters=True)
+    # elif args.gpus is not None:
     #     torch.cuda.set_device(args.gpus)
     #     model = model.cuda(args.gpus)
     else:
@@ -246,10 +253,10 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
 
     train_loader, val_loader = get_data_loaders(model, prefix, args)
     # define loss function (criterion) and optimizer
-    if args.distributed:
-        criterion = torch.nn.CrossEntropyLoss().cuda(args.gpus)
-    else:
-        criterion = torch.nn.CrossEntropyLoss().cuda()
+    # if args.gpus is not None: #args.distributed
+    #     criterion = torch.nn.CrossEntropyLoss().cuda(args.gpus)
+    # else:
+    criterion = torch.nn.CrossEntropyLoss().cuda()
 
     # TODO do simple eval here?
 
@@ -667,13 +674,13 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
 
         # input and target
         batchsize = input_tuple[0].size(0)
-        if args.distributed:
-            input_var_list = [torch.autograd.Variable(input_item).cuda(args.gpus, non_blocking=True) for input_item in input_tuple[:-1]]
-            target = input_tuple[-1].cuda(args.gpus, non_blocking=True)
-        else:
-            input_var_list = [torch.autograd.Variable(input_item).cuda(non_blocking=True) for input_item in
-                              input_tuple[:-1]]
-            target = input_tuple[-1].cuda(non_blocking=True)
+        # if args.gpus is not None:
+        #     input_var_list = [torch.autograd.Variable(input_item).cuda(args.gpus, non_blocking=True) for input_item in input_tuple[:-1]]
+        #     target = input_tuple[-1].cuda(args.gpus, non_blocking=True)
+        # else:
+        input_var_list = [torch.autograd.Variable(input_item).cuda(non_blocking=True) for input_item in
+                          input_tuple[:-1]]
+        target = input_tuple[-1].cuda(non_blocking=True)
 
         target_var = torch.autograd.Variable(target)
 
@@ -789,10 +796,10 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
         for i, input_tuple in enumerate(val_loader):
             # input and target
             batchsize = input_tuple[0].size(0)
-            if args.distributed:
-                input_tuple = [x.cuda(args.gpus, non_blocking=True) for x in input_tuple]
-            else:
-                input_tuple = [x.cuda(non_blocking=True) for x in input_tuple]
+            # if args.gpus is not None:
+            #     input_tuple = [x.cuda(args.gpus, non_blocking=True) for x in input_tuple]
+            # else:
+            input_tuple = [x.cuda(non_blocking=True) for x in input_tuple]
             target = input_tuple[-1]
             # target = input_tuple[-1].cuda(args.gpus, non_blocking=True)
 
@@ -862,8 +869,8 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
 
 
     if dist.is_initialized():
-        mAP_tensor = torch.tensor(mAP).to(upb_batch_gflops.device)
-        mmAP_tensor = torch.tensor(mmAP).to(upb_batch_gflops.device)
+        mAP_tensor = torch.tensor(mAP).to(all_results[0].device)
+        mmAP_tensor = torch.tensor(mmAP).to(all_results[0].device)
 
         world_size = dist.get_world_size()
         if args.ada_reso_skip:

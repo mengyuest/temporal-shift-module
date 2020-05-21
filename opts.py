@@ -403,3 +403,5 @@ parser.add_argument('--sth_no_flip', action='store_true')
 
 parser.add_argument('--single_linear', action='store_true')
 parser.add_argument('--triple_linear', action='store_true')
+
+parser.add_argument('--verb_noun_acc', action='store_true')

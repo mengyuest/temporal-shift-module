@@ -294,14 +294,14 @@ parser.add_argument('--gate_sigmoid', action='store_true')
 parser.add_argument('--winner_take_all', action='store_true')  # TODO
 parser.add_argument('--wta_ratio', type=float, default=0)  # TODO
 
-parser.add_argument('--gate_bn_between_fcs', action='store_true')
-parser.add_argument('--gate_relu_between_fcs', action='store_true')
+parser.add_argument('--gate_bn_between_fcs', '--gbn', action='store_true')
+parser.add_argument('--gate_relu_between_fcs', '--grelu', action='store_true')
 parser.add_argument('--gate_tanh_between_fcs', action='store_true')
 
 
 # History branch
 parser.add_argument('--gate_history', action='store_true')
-parser.add_argument('--fusion_type', type=str, choices=['cat', 'add', 'rnn'], default='add')
+parser.add_argument('--fusion_type', type=str, choices=['cat', 'add', 'rnn'], default='cat') #TODO changed to cat!
 
 parser.add_argument('--gate_print_policy', action='store_true')
 parser.add_argument('--print_statistics', '--ps', action='store_true')

@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.utils.model_zoo as model_zoo
 import torch.nn.functional as F
 
-from ops.cnn3d.inflate_from_2d_model import inflate_from_2d_model
+from obsolete.ops.cnn3d.inflate_from_2d_model import inflate_from_2d_model
 # import inflate_from_2d_model
 __all__ = ['i3d_resnet']
 

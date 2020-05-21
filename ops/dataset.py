@@ -47,9 +47,7 @@ class TSNDataSet(data.Dataset):
                  num_segments=3, image_tmpl='img_{:05d}.jpg', transform=None,
                  random_shift=True, test_mode=False,
                  remove_missing=False, dense_sample=False, twice_sample=False,
-                 dataset=None, filelist_suffix="", folder_suffix=None, partial_fcvid_eval=False, partial_ratio=None,
-                 ada_reso_skip=False, reso_list=None, random_crop=False, center_crop=False, ada_crop_list=None,
-                 rescale_to=224, policy_input_offset=None, save_meta=False, rank=0):
+                 dataset=None, filelist_suffix="", folder_suffix=None, save_meta=False, rank=0):
 
         self.root_path = root_path
         # self.list_file = list_file
@@ -64,19 +62,9 @@ class TSNDataSet(data.Dataset):
         self.dense_sample = dense_sample  # using dense sample as I3D
         self.twice_sample = twice_sample  # twice sample for more validation
 
-
         # TODO(yue)
         self.dataset = dataset
         self.root_path += folder_suffix
-        self.partial_fcvid_eval = partial_fcvid_eval
-        self.partial_ratio = partial_ratio
-        self.ada_reso_skip=ada_reso_skip
-        self.reso_list = reso_list
-        self.random_crop = random_crop
-        self.center_crop = center_crop
-        self.ada_crop_list = ada_crop_list
-        self.rescale_to = rescale_to
-        self.policy_input_offset = policy_input_offset
         self.save_meta = save_meta
         self.rank = rank
 
@@ -119,9 +107,6 @@ class TSNDataSet(data.Dataset):
 
         if not self.test_mode or self.remove_missing:
             tmp = [item for item in tmp if int(item[1]) >= 3]
-
-        if self.partial_fcvid_eval and self.dataset=="fcvid":
-            tmp = tmp[:int(len(tmp)*self.partial_ratio)]
 
         self.video_list = [VideoRecord(item, set_offset=(self.dataset=="charades" or "epic" in self.dataset)) for item in tmp]
 
@@ -237,70 +222,17 @@ class TSNDataSet(data.Dataset):
 
 
     def get(self, record, indices):
-
         images = list()
         for seg_ind in indices:
             images.extend(self._load_image(record.path, record.offset+int(seg_ind)))
-        # for seg_ind in indices:
-        #     p = int(seg_ind)
-        #     for i in range(1):
-        #         seg_imgs = self._load_image(record.path, p)
-        #         images.extend(seg_imgs)
-        #         if p < record.num_frames:
-        #             p += 1
 
         process_data = self.transform(images)
-        if self.ada_reso_skip:
-            return_items = [process_data]
-            if self.random_crop:
-                rescaled = [self.random_crop_proc(process_data, (x,x)) for x in self.reso_list[1:]]
-            elif self.center_crop:
-                rescaled = [self.center_crop_proc(process_data, (x, x)) for x in self.reso_list[1:]]
-            else:
-                rescaled = [self.rescale_proc(process_data, (x, x)) for x in self.reso_list[1:]]
-                # rescaled = [self.rescale_proc(process_data, (x, x)) for xi, x in enumerate(self.reso_list[1:])
-                #             if (self.ada_crop_list[xi+1]==1 or xi+1 == self.policy_input_offset)]
-            return_items = return_items + rescaled
-            if self.save_meta:
-                return_items = return_items + [record.path] + [indices] #[torch.tensor(indices)]
-            return_items = return_items + [record.label]
 
-            return tuple(return_items)
+        if self.save_meta:
+            return process_data, record.path, indices, record.label
         else:
-            if self.rescale_to == 224:
-                rescaled = process_data
-            else:
-                x = self.rescale_to
-                if self.random_crop:
-                    rescaled = self.random_crop_proc(process_data, (x, x))
-                elif self.center_crop:
-                    rescaled = self.center_crop_proc(process_data, (x, x))
-                else:
-                    rescaled = self.rescale_proc(process_data, (x, x))
+            return process_data, record.label
 
-            return rescaled, record.label
-
-    # TODO(yue)
-    # (NC, H, W)->(NC, H', W')
-    def rescale_proc(self, input_data, size):
-        return torch.nn.functional.interpolate(input_data.unsqueeze(1), size=size, mode='nearest').squeeze(1)
-
-    def center_crop_proc(self, input_data, size):
-        h = input_data.shape[1] // 2
-        w = input_data.shape[2] // 2
-        return input_data[:, h - size[0] // 2:h + size[0] // 2, w - size[1] // 2:w + size[1] // 2]
-
-    def random_crop_proc(self, input_data, size):
-        H = input_data.shape[1]
-        W = input_data.shape[2]
-        input_data_nchw=input_data.view(-1, 3, H, W)
-        batchsize=input_data_nchw.shape[0]
-        return_list=[]
-        hs0 = np.random.randint(0, H-size[0], batchsize)
-        ws0 = np.random.randint(0, W-size[1], batchsize)
-        for i in range(batchsize):
-            return_list.append(input_data_nchw[i,:,hs0[i]:hs0[i]+size[0], ws0[i]:ws0[i]+size[1]])
-        return torch.stack(return_list).view(batchsize*3, size[0], size[1])
 
     def __len__(self):
         return len(self.video_list)

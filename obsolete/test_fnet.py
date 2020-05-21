@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
-from ops.dmynet import Conv2dMY
-import ops.dmynet
+from obsolete.ops.dmynet import Conv2dMY
+import obsolete.ops.dmynet
 from thop import profile
 import time
 
@@ -90,7 +90,8 @@ resolution=224
 dummy_data = torch.randn(1, 3, resolution, resolution)
 
 def timing(model, s):
-    flops, params = profile(model, inputs=(dummy_data,), custom_ops={ops.dmynet.Conv2dMY: ops.dmynet.count_conv_my})
+    flops, params = profile(model, inputs=(dummy_data,), custom_ops={
+        obsolete.ops.dmynet.Conv2dMY: obsolete.ops.dmynet.count_conv_my})
     print(flops / 1e9, params / 1e6)
 
     criterion = torch.nn.CrossEntropyLoss().cuda()
@@ -118,26 +119,26 @@ def timing(model, s):
 # model = ops.fnet.FNet("fresnet50", [64, 64, 16, 8], True, None)
 # model = DoubleFNet()
 # model = SingleNet()
-model = ops.dmynet.dmynet50(num_filters_list=[64, 32, 16, 8], default_signal=0)
+model = obsolete.ops.dmynet.dmynet50(num_filters_list=[64, 32, 16, 8], default_signal=0)
 # flops, params = profile(model, inputs=(dummy_data,))
 # print(flops / 1e9, params / 1e6)
 #
 # model = getattr(torchvision.models, "resnet50")(False)
 
 timing(
-    ops.dmynet.dmynet50(num_filters_list=[64, 32, 16, 8], default_signal=0),
+    obsolete.ops.dmynet.dmynet50(num_filters_list=[64, 32, 16, 8], default_signal=0),
     "dmynet50, signal=0")
 
 timing(
-    ops.dmynet.dmynet50(num_filters_list=[64, 32, 16, 8], default_signal=1),
+    obsolete.ops.dmynet.dmynet50(num_filters_list=[64, 32, 16, 8], default_signal=1),
     "dmynet50, signal=1")
 
 timing(
-    ops.dmynet.dmynet50(num_filters_list=[64, 32, 16, 8], default_signal=2),
+    obsolete.ops.dmynet.dmynet50(num_filters_list=[64, 32, 16, 8], default_signal=2),
     "dmynet50, signal=2")
 
 timing(
-    ops.dmynet.dmynet50(num_filters_list=[64, 32, 16, 8], default_signal=3),
+    obsolete.ops.dmynet.dmynet50(num_filters_list=[64, 32, 16, 8], default_signal=3),
     "dmynet50, signal=3")
 
 timing(

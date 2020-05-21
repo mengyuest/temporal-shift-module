@@ -5,18 +5,10 @@ import torch
 import torchvision
 from torch import nn
 from thop import profile
-from efficientnet_pytorch import EfficientNet
-from ops.cnn3d.i3d_resnet import i3d_resnet
-from ops.cnn3d.mobilenet3dv2 import mobilenet3d_v2
-from ops.cnn3d.shufflenet3d import ShuffleNet3D
-import ops.dmynet
-import ops.dhsnet
+from obsolete.ops.cnn3d.i3d_resnet import i3d_resnet
 import ops.batenet
-import ops.gatenet
 import ops.cgnet
 import ops.cg_utils
-import ops.msdnet
-import ops.mernet
 
 
 feat_dim_dict = {
@@ -24,34 +16,6 @@ feat_dim_dict = {
     "resnet34": 512,
     "resnet50": 2048,
     "resnet101": 2048,
-    "mobilenet_v2": 1280,
-    "efficientnet-b0": 1280,
-    "efficientnet-b1": 1280,
-    "efficientnet-b2": 1408,
-    "efficientnet-b3": 1536,
-    "efficientnet-b4": 1792,
-    "efficientnet-b5": 2048,
-    "shufflenet3d_0.5": 480,
-    "shufflenet3d_1.0": 960,
-    "shufflenet3d_1.5": 1440,
-    "shufflenet3d_2.0": 1920,
-    "mobilenet3dv2": 1280,
-    "res3d18": 512,
-    "res3d34": 512,
-    "res3d50": 2048,
-    "res3d101": 2048,
-    "dmynet18": 512,
-    "dmynet34": 512,
-    "dmynet50": 2048,
-    "dmynet101": 2048,
-    'dhsnet18': 512,
-    'dhsnet34': 512,
-    'dhsnet50': 2048,
-    'dhsnet101': 2048,
-    'gatenet18': 512,
-    'gatenet34': 512,
-    'gatenet50': 2048,
-    'gatenet101': 2048,
     'batenet18': 512,
     'batenet34': 512,
     'batenet50': 2048,
@@ -60,127 +24,39 @@ feat_dim_dict = {
     'cgnet34': 512,
     'cgnet50': 2048,
     'cgnet101': 2048,
-    "msdnet": 0,
-    "mernet50": 0,
-    "ir_csn_50": 2048,
-    "ir_csn_152": 2048,
+    "res3d18": 512,
+    "res3d34": 512,
+    "res3d50": 2048,
+    "res3d101": 2048,
     }
 
-prior_dict={
-"efficientnet-b0": (0.39, 5.3),
-"efficientnet-b1": (0.70, 7.8),
-"efficientnet-b2": (1.00, 9.2),
-"efficientnet-b3": (1.80, 12),
-"efficientnet-b4": (4.20, 19),
-"efficientnet-b5": (9.90, 30),
-}
-
-def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretrained=True,
-                      num_filters_list=[], default_signal=-1, last_conv_same=False,
-                      msd_indices_list=[], mer_indices_list=[], args=None):
-    if model_name in prior_dict:
-        gflops, params = prior_dict[model_name]
-        gflops = gflops / 224 / 224 * resolution * resolution
-        return gflops, params
-
+def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretrained=True,args=None):
+    last_layer = "fc"
     if "resnet" in model_name:
         model = getattr(torchvision.models, model_name)(pretrained)
-        last_layer = "fc"
-    elif model_name == "mobilenet_v2":
-        model= getattr(torchvision.models, model_name)(pretrained)
-        last_layer = "classifier"
-    # elif "efficientnet-" in model_name:
-    #     if pretrained:
-    #         model= EfficientNet.from_pretrained(model_name)
-    #     else:
-    #         model = EfficientNet.from_named(model_name)
-    #     last_layer = "_fc"
-    elif "shufflenet3d" in model_name:
-        model = ShuffleNet3D(3, width_mult=float(model_name.split("_")[1]))
-        last_layer = "classifier"
     elif "res3d" in model_name:
         model = i3d_resnet(int(model_name.split("res3d")[1]), pretrained=pretrained)
-        last_layer = "fc"
-    elif "mobilenet3d" in model_name:
-        model = mobilenet3d_v2(pretrained=pretrained)
-        last_layer = "classifier"
-    elif "dmynet" in model_name:
-        model = getattr(ops.dmynet, model_name)(pretrained=False,
-                                                num_filters_list=num_filters_list,
-                                                default_signal=default_signal)
-        last_layer = "fcs"
-    elif "dhsnet" in model_name:
-        model = getattr(ops.dhsnet, model_name)(pretrained=False,
-                                                num_filters_list=num_filters_list,
-                                                default_signal=default_signal,
-                                                args=args)
-        last_layer="fc"
-    elif "gatenet" in model_name:
-        model = getattr(ops.gatenet, model_name)(pretrained=False, args=args)
-        last_layer = "fc"
-        # print(model.count_flops((1, 1, 3, 224, 224)))
     elif "batenet" in model_name:
         model = getattr(ops.batenet, model_name)(pretrained=False, args=args)
-        last_layer = "fc"
     elif "cgnet" in model_name:
         model = getattr(ops.cgnet, model_name)(pretrained=False, args=args)
-        last_layer = "fc"
-    elif "msdnet" in model_name:
-        model = getattr(ops.msdnet, "MSDNet")(default_signal = default_signal)
-    elif "mernet" in model_name:
-        model = getattr(ops.mernet, model_name)(default_signal = default_signal)
     else:
         exit("I don't know what is %s" % model_name)
-    feat_dim = feat_dim_dict[model_name]
-    if "dmynet" in model_name:
-        if last_conv_same:
-            setattr(model, last_layer, torch.nn.ModuleList(
-                [nn.Linear(feat_dim, num_classes) for _ in num_filters_list]))
-        else:
-            setattr(model, last_layer, torch.nn.ModuleList([nn.Linear(feat_dim * num_filters // 64, num_classes) for num_filters in num_filters_list]))
-    elif "msdnet" in model_name:
-        for msd_i in msd_indices_list:
-            msd_feat_dim = model.classifier[msd_i].linear.in_features
-            model.classifier[msd_i].linear = nn.Linear(msd_feat_dim, num_classes)
-    elif "mernet" in model_name:
-        for mer_i in mer_indices_list:
-            mer_feat_dim = getattr(model, "fc%d.in_features"%(mer_i))
-            setattr(model, "fc%d"%mer_i, nn.Linear(mer_feat_dim, num_classes))
-    else:  # TODO: normal, dhs, gate
-        setattr(model, last_layer, nn.Linear(feat_dim, num_classes))
+
+    setattr(model, last_layer, nn.Linear(feat_dim_dict[model_name], num_classes))
 
     if seg_len == -1:
         dummy_data = torch.randn(1, 3, resolution, resolution)
+        if "batenet" in model_name:
+            dummy_data = torch.randn(1 * args.num_segments, 3, resolution, resolution)
     else:
         dummy_data = torch.randn(1, 3, seg_len, resolution, resolution)
 
+    flops, params = profile(model, inputs=(dummy_data,))
 
+    flops = flops / dummy_data.shape[0]
 
-    hooks={}
-    if "dmynet" in model_name:
-        hooks = {ops.dmynet.Conv2dMY: ops.dmynet.count_conv_my}
-    if "dhsnet" in model_name or "gatenet" in model_name or "cgnet" in model_name:  # TODO: step-by-step solution
-        dummy_data = torch.randn(1, args.num_segments, 3, resolution, resolution)
-        if "dhsnet" in model_name:
-            hooks = {ops.dhsnet.Conv2dHS: ops.dhsnet.count_conv_hs}
-        if "cgnet" in model_name:
-            hooks = {ops.cg_utils.CGConv2dNew: ops.cg_utils.count_cg_conv2d}
-    if "batenet" in model_name:
-        dummy_data = torch.randn(1 * args.num_segments, 3, resolution, resolution)
-
-            # print(model)
-    # print(model.layer1[0].conv1)
-    # print(type(model.layer1[0].conv1))
-    flops, params = profile(model, inputs=(dummy_data,), custom_ops=hooks)
-    # for k,m in model.named_modules():
-    #     if isinstance(m, torch.nn.Conv2d):
-    #         print(k, m.total_ops)
-    if "dhsnet" in model_name or "gatenet" in model_name or "cgnet" in model_name or "batenet" in model_name:
-        flops = flops / args.num_segments
-    gflops = flops / 1e9
-    params = params / 1e6
-
-    return gflops, params
+    return flops / 1e9, params / 1e6
 
 class DebugClass(object):
     pass

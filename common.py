@@ -13,14 +13,12 @@ if "c699" in host_name and user_name in ["sunxm"]:
     CODE_PREFIX = "snippets/"
     DATA_PREFIX="data"
     LOG_PREFIX="snippets"
-    PRETRAIN_PATH =ospj(ROOT_DIR, LOG_PREFIX,"logs_tsm")
 # TODO WSC (power machines)
 elif "c699" in host_name and user_name in ["cvpr"]:
     ROOT_DIR="/gpfs/wscgpfs02/cvpr"
     CODE_PREFIX = "code/"
     DATA_PREFIX="datasets"
     LOG_PREFIX=""
-    PRETRAIN_PATH =ospj(ROOT_DIR, LOG_PREFIX,"logs_tsm")
 
 # TODO DIVA [01-05]
 elif "diva0" in host_name and user_name in ["meng", "cclin", "rameswar"]:
@@ -28,7 +26,6 @@ elif "diva0" in host_name and user_name in ["meng", "cclin", "rameswar"]:
     CODE_PREFIX = "workspaces/%s"%user_name
     DATA_PREFIX="datasets"
     LOG_PREFIX = "workspaces/%s"%user_name
-    PRETRAIN_PATH = ospj(ROOT_DIR, LOG_PREFIX, "logs_tsm")
 
 # TODO CCC (power machines)
 elif "dcc" in host_name and user_name in ["cvpr", "ieee", "sc071139"]:
@@ -37,7 +34,6 @@ elif "dcc" in host_name and user_name in ["cvpr", "ieee", "sc071139"]:
     DATA_PREFIX = "datasets"
     #DATA_PREFIX = "../multimodalvideo"
     LOG_PREFIX = "../multimodalvideo/yue"
-    PRETRAIN_PATH =ospj(ROOT_DIR,"logs_tsm")
 
 #TODO satori (power machines)
 elif ("node" in host_name or "service" in host_name )and user_name == "mengyue":
@@ -46,7 +42,6 @@ elif ("node" in host_name or "service" in host_name )and user_name == "mengyue":
     DATA_PREFIX = "datasets"
     # DATA_PREFIX = "../multimodalvideo"
     LOG_PREFIX = ""
-    PRETRAIN_PATH = ospj(ROOT_DIR, "logs_tsm")
 
 #TODO AIMOS (power machines)
 elif user_name == "DPLDymng":
@@ -54,7 +49,6 @@ elif user_name == "DPLDymng":
     CODE_PREFIX = "code"
     DATA_PREFIX = "datasets"
     LOG_PREFIX = ""
-    PRETRAIN_PATH = ospj(ROOT_DIR, "logs_tsm")
 
 else:
     exit("unauthorized user@host '%s@%s'" % (user_name, host_name))

@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
-import torchvision
-import ops.fresnet
+import obsolete.ops.fresnet
 
 
 class FNet(nn.Module):
@@ -15,7 +14,7 @@ class FNet(nn.Module):
 
         # TODO depth specific loading
         for i in range(len(depth_list)):
-            self.base_model_list.append(getattr(ops.fresnet, arch)(
+            self.base_model_list.append(getattr(obsolete.ops.fresnet, arch)(
                 pretrained=(shall_pretrain and i==0), num_filters=depth_list[i]))
             for k,v in self.base_model_list[-1].named_modules():
                 gds[i][k]=v

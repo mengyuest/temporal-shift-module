@@ -22,10 +22,10 @@ from ops.temporal_shift import make_temporal_pool
 from tensorboardX import SummaryWriter
 from ops.my_logger import Logger
 
-from ops.sal_rank_loss import cal_sal_rank_loss
+from obsolete.ops.sal_rank_loss import cal_sal_rank_loss
 
 from tools.net_flops_table import get_gflops_params, feat_dim_dict
-from ops.cnn3d.inflate_from_2d_model import get_mobv2_new_sd
+from obsolete.ops.cnn3d.inflate_from_2d_model import get_mobv2_new_sd
 
 # TODO(yue)
 import common

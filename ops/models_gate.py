@@ -1,14 +1,9 @@
 from torch import nn
 from ops.transforms import *
 from torch.nn.init import normal_, constant_
-import torch.nn.functional as F
-from efficientnet_pytorch import EfficientNet
-import ops.gatenet as gatenet
 import ops.batenet as batenet
 import ops.cgnet as cgnet
 from ops.cg_utils import CGConv2dNew
-
-from tools.net_flops_table import feat_dim_dict
 
 
 def init_hidden(batch_size, cell_size):
@@ -17,56 +12,28 @@ def init_hidden(batch_size, cell_size):
         init_cell = init_cell.cuda()
     return init_cell
 
+
 class TSN_Gate(nn.Module):
     def __init__(self, args):
         super(TSN_Gate, self).__init__()
-        self.num_segments = args.num_segments
-
         self.args = args
-        self.base_model_name = self.args.arch
+        self.num_segments = args.num_segments
         self.num_class = args.num_class
 
-        self.reso_dim = 1
-        self.skip_dim = 0
-        self.action_dim = 1  # TODO(yue)
-
-        self.i_do_need_a_policy_network = self.args.gate == False and "cgnet" not in self.args.arch
-
-        if self.i_do_need_a_policy_network:
-            self._prepare_policy_net()
-        self.base_model_list = nn.ModuleList()
-        self.new_fc_list = nn.ModuleList()
-
-        self._prepare_base_model()
-        self._prepare_fc(args.num_class)
-
+        self.base_model = self._prepare_base_model()
+        self.new_fc = self._prepare_fc(args.num_class)
         self._enable_pbn = False
 
     def _prep_a_net(self, model_name, shall_pretrain):
-        if "gatenet" in model_name:
-            model = getattr(gatenet, model_name)(shall_pretrain, args=self.args)
-            model.last_layer_name = 'fc'
-        elif "batenet" in model_name:
+        if "batenet" in model_name:
             model = getattr(batenet, model_name)(shall_pretrain, args=self.args)
             model.last_layer_name = 'fc'
         elif "cgnet" in model_name:
             model = getattr(cgnet, model_name)(shall_pretrain, args=self.args)
             model.last_layer_name = 'fc'
-        elif "efficientnet" in model_name:
-            if shall_pretrain:
-                model = EfficientNet.from_pretrained(model_name)
-            else:
-                model = EfficientNet.from_named(model_name)
-            model.last_layer_name = "_fc"
         else:
             exit("I don't how to prep this net:%s; see models_gate.py:: _prep_a_net"%model_name)
         return model
-
-    def _prepare_policy_net(self):
-        shall_pretrain = not self.args.policy_from_scratch
-        self.lite_backbone = self._prep_a_net(self.args.policy_backbone, shall_pretrain)
-        self.policy_feat_dim = feat_dim_dict[self.args.policy_backbone]
-        self.rnn = nn.LSTMCell(input_size=self.policy_feat_dim, hidden_size=self.args.hidden_dim, bias=True)
 
     def _prepare_base_model(self):
         self.input_size = 224
@@ -74,7 +41,7 @@ class TSN_Gate(nn.Module):
         self.input_std = [0.229, 0.224, 0.225]
         shall_pretrain = len(self.args.model_paths) == 0 or self.args.model_paths[0].lower() != 'none'
         model = self._prep_a_net(self.args.arch, shall_pretrain)
-        self.base_model_list.append(model)
+        return model
 
     def _prepare_fc(self, num_class):
         def make_a_linear(input_dim, output_dim):
@@ -83,17 +50,10 @@ class TSN_Gate(nn.Module):
             constant_(linear_model.bias, 0)
             return linear_model
 
-        if self.i_do_need_a_policy_network:
-            setattr(self.lite_backbone, self.lite_backbone.last_layer_name, nn.Dropout(p=self.args.dropout))
-            feed_dim = self.args.hidden_dim if not self.args.frame_independent else self.policy_feat_dim
-            self.linear = make_a_linear(feed_dim, self.action_dim)
-            self.lite_fc = make_a_linear(feed_dim, num_class)
-
-        feature_dim = getattr(self.base_model_list[0], self.base_model_list[0].last_layer_name).in_features
+        feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
         new_fc = make_a_linear(feature_dim, num_class)
-        self.new_fc_list.append(new_fc)
-        setattr(self.base_model_list[0], self.base_model_list[0].last_layer_name, nn.Dropout(p=self.args.dropout))
-
+        setattr(self.base_model, self.base_model.last_layer_name, nn.Dropout(p=self.args.dropout))
+        return new_fc
 
     def forward(self, *argv, **kwargs):
         input_data = kwargs["input"][0]  # TODO(yue) B * (TC) * H * W
@@ -101,31 +61,21 @@ class TSN_Gate(nn.Module):
         curr_step =  kwargs["curr_step"]
         _b, _tc, _h, _w = input_data.shape
         _t, _c = _tc // 3, 3
-
-        if self.args.all_same_frames:
-            input_data = input_data.view(_b,_t,_c,_h,_w)
-            input_data = input_data[:, _t//2:_t//2+1].expand(input_data.shape)
-
         if "tau" not in kwargs:
             kwargs["tau"] = None
 
         if "cgnet" in self.args.arch:
-            feat, mask_stack_list = self.base_model_list[0](input_data.view(_b, _t, _c, _h, _w))
+            feat, mask_stack_list = self.base_model(input_data.view(_b, _t, _c, _h, _w))
         elif "batenet" in self.args.arch:
-            feat, mask_stack_list = self.base_model_list[0](input_data.view(_b * _t, _c, _h, _w),
+            feat, mask_stack_list = self.base_model(input_data.view(_b * _t, _c, _h, _w),
                                                     tau=kwargs["tau"], is_training=is_training, curr_step=curr_step)
-        else:
-            feat, mask_stack_list = self.base_model_list[0](input_data.view(_b, _t, _c, _h, _w),
-                                                    tau=kwargs["tau"], is_training=is_training, curr_step=curr_step)
-        base_out = self.new_fc_list[0](feat.view(_b * _t, -1)).view(_b, _t, -1)
-
+        base_out = self.new_fc(feat.view(_b * _t, -1)).view(_b, _t, -1)
         output = base_out.mean(dim=1).squeeze(1)
 
-        if "batenet" not in self.args.arch:
+        if "cgnet" in self.args.arch:
             for i in range(len(mask_stack_list)):
                 mask_stack_list[i] = torch.stack(mask_stack_list[i], dim=1)  # TODO: B*T*K
         return output, mask_stack_list, None, torch.stack([base_out], dim=1)
-
 
     @property
     def crop_size(self):
@@ -150,24 +100,21 @@ class TSN_Gate(nn.Module):
         """
         super(TSN_Gate, self).train(mode)
         if mode and len(self.args.frozen_layers) > 0 and self.args.freeze_corr_bn:
-            models = list(self.base_model_list)
-
-            for the_model in models:
-                for layer_idx in self.args.frozen_layers:
-                    for km in the_model.named_modules():
-                        k, m = km
-                        if layer_idx == 0:
-                            if "bn1" in k and "layer" not in k and (
-                                    isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm3d)):  # TODO(yue)
-                                m.eval()
-                                m.weight.requires_grad = False
-                                m.bias.requires_grad = False
-                        else:
-                            if "layer%d" % (layer_idx) in k and (
-                                    isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm3d)):  # TODO(yue)
-                                m.eval()
-                                m.weight.requires_grad = False
-                                m.bias.requires_grad = False
+            for layer_idx in self.args.frozen_layers:
+                for km in self.base_model.named_modules():
+                    k, m = km
+                    if layer_idx == 0:
+                        if "bn1" in k and "layer" not in k and (
+                                isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm3d)):  # TODO(yue)
+                            m.eval()
+                            m.weight.requires_grad = False
+                            m.bias.requires_grad = False
+                    else:
+                        if "layer%d" % (layer_idx) in k and (
+                                isinstance(m, nn.BatchNorm2d) or isinstance(m, nn.BatchNorm3d)):  # TODO(yue)
+                            m.eval()
+                            m.weight.requires_grad = False
+                            m.bias.requires_grad = False
 
     def partialBN(self, enable):
         self._enable_pbn = enable

@@ -6,11 +6,10 @@ import torch
 import math
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
 
 #TODO(yue)
 import torch.utils.model_zoo as model_zoo
-from ops.cnn3d.inflate_from_2d_model import inflate_from_2d_model
+from obsolete.ops.cnn3d.inflate_from_2d_model import inflate_from_2d_model
 # import inflate_from_2d_model
 __all__ = ['mobilenet3dv2']
 model_url = 'https://download.pytorch.org/models/mobilenet_v2-b0353104.pth'

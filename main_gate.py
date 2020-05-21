@@ -37,17 +37,6 @@ import common
 from os.path import join as ospj
 from shutil import copyfile
 
-def load_to_sd(model_path):
-    if ".pth" in model_path:
-        if os.path.exists(common.PRETRAIN_PATH + "/" + model_path):
-            return torch.load(common.PRETRAIN_PATH + "/" + model_path)['state_dict']
-        elif os.path.exists(common.EXPS_PATH + "/" + model_path):
-            return torch.load(common.EXPS_PATH + "/" + model_path)['state_dict']
-        else:
-            exit("Cannot find model, exit")
-    else:
-        return {}
-
 
 def main():
     args = parser.parse_args()
@@ -68,13 +57,10 @@ def main():
     ngpus_per_node = torch.cuda.device_count() #len(args.gpus)
 
     test_mode = (args.test_from != "")
-
     if args.multiprocessing_distributed:
         args.world_size = ngpus_per_node * args.world_size
         mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args, test_mode))
     else:
-        # Simply call main_worker function
-
         main_worker(args.gpus, ngpus_per_node, args, test_mode)
 
 
@@ -107,14 +93,7 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
     if args.ada_reso_skip:
         model = TSN_Gate(args=args)
     else:
-        model = TSN_Ada(args.num_class, args.num_segments,
-                        base_model=args.arch,
-                        consensus_type=args.consensus_type,
-                        dropout=args.dropout,
-                        partial_bn=not args.no_partialbn,
-                        pretrain=args.pretrain,
-                        is_shift=args.shift, shift_div=args.shift_div, shift_place=args.shift_place,
-                        args=args)
+        model = TSN_Ada(args=args)
     base_model_gflops, gflops_list = init_gflops_table(model, args)
 
     if args.no_optim:
@@ -145,15 +124,7 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
 
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpus], find_unused_parameters=True)
         else:
-            # exit("We don't do world_size>1 and distributed. We also don't do gpus=None")
             model.cuda()
-
-
-            # if args.sync_bn:
-            #     process_group = torch.distributed.new_group(list(range(args.world_size)))
-            #     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model, process_group)
-
-
             # DistributedDataParallel will divide and allocate batch_size to all
             # available GPUs if device_ids are not set
             model = torch.nn.parallel.DistributedDataParallel(model, find_unused_parameters=True)
@@ -165,8 +136,6 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
         # assign rank to 0
         model = torch.nn.DataParallel(model, device_ids=args.gpus).cuda()
         args.rank = 0
-
-    # model = torch.nn.DataParallel(model, device_ids=args.gpus).cuda()
 
     handle_frozen_things_in(model, args)
 
@@ -188,64 +157,14 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
 
     # TODO(yue) loading pretrained weights
     elif test_mode or args.base_pretrained_from != "":
+        the_model_path = args.base_pretrained_from
         if test_mode:
             the_model_path = ospj(args.test_from, "models", "ckpt.best.pth.tar")
-        else:
-            the_model_path = args.base_pretrained_from
+
+        sd = torch.load(common.EXPS_PATH + "/" + the_model_path)['state_dict']
+        sd = take_care_of_pretraining(sd, args)
+
         model_dict = model.state_dict()
-        sd = load_to_sd(the_model_path)
-
-        old_to_new_pairs = []
-        if args.downsample0_renaming:
-            # TODO batchnorm
-            for k in sd:
-                # TODO downsample
-                if "downsample0" in k:
-                    # TODO layer1.0.downsample.0.weight-> layer1.0.downsample0.weight
-                    old_to_new_pairs.append((k, k.replace("downsample0", "downsample.0")))
-                elif "downsample1" in k:
-                    # TODO layer1.0.downsample.0.weight-> layer1.0.downsample0.weight
-                    old_to_new_pairs.append((k, k.replace("downsample1", "downsample.1")))
-
-        if args.downsample_0_renaming:
-            # TODO batchnorm
-            for k in sd:
-                # TODO downsample
-                if "downsample.0" in k:
-                    # TODO layer1.0.downsample.0.weight-> layer1.0.downsample0.weight
-                    old_to_new_pairs.append((k, k.replace("downsample.0", "downsample0")))
-                elif "downsample.1" in k:
-                    # TODO layer1.0.downsample.0.weight-> layer1.0.downsample0.weight
-                    old_to_new_pairs.append((k, k.replace("downsample.1", "downsample1")))
-
-        for old_key, new_key in old_to_new_pairs:
-            sd[new_key] = sd.pop(old_key)
-        old_to_new_pairs = []
-
-        if args.load_base_to_adaptive:
-            for k in sd:
-                if "base_model." in k:
-                    old_to_new_pairs.append((k, k.replace("base_model.", "base_model_list.0.")))
-                if "new_fc." in k:
-                    old_to_new_pairs.append((k, k.replace("new_fc.", "new_fc_list.0.")))
-
-        for old_key, new_key in old_to_new_pairs:
-            sd[new_key] = sd.pop(old_key)
-
-        old_to_new_pairs = []
-        if args.shift and args.load_base_to_adaptive:
-            for k in sd:
-                if "conv1.net." in k:
-                    old_to_new_pairs.append((k, k.replace("conv1.net.", "conv1.")))
-        for old_key, new_key in old_to_new_pairs:
-            sd[new_key] = sd.pop(old_key)
-
-        del_keys = []
-        if args.ignore_loading_gate_fc:
-            del_keys += [k for k in sd if "gate_fc" in k]
-        for k in del_keys:
-            del sd[k]
-
         model_dict.update(sd)
         model.load_state_dict(model_dict)
 
@@ -325,7 +244,6 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
                     'best_map': map_record.best_val,
                 }
 
-                # save_checkpoint(saved_things, mmap_record.is_current_best(), False, exp_full_path, "ckpt.bestmmap")
                 save_checkpoint(saved_things, prec_record.is_current_best(), False, exp_full_path, "ckpt.best")
                 save_checkpoint(saved_things, True, False, exp_full_path, "ckpt.latest")
 
@@ -336,7 +254,6 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
 
             if args.distributed:
                 dist.barrier()
-
 
     # after fininshing all the epochs
     if args.rank == 0:
@@ -362,7 +279,7 @@ def init_gflops_table(model, args):
         base_model_gflops, params = get_gflops_params(args.arch, args.reso_list[0], args.num_class, -1, args=args)
 
     if args.ada_reso_skip:
-        gflops_list = model.base_model_list[0].count_flops((1, 1, 3, args.reso_list[0], args.reso_list[0]))
+        gflops_list = model.base_model.count_flops((1, 1, 3, args.reso_list[0], args.reso_list[0]))
         if args.rank==0:
             print("Network@%d (%.4f GFLOPS, %.4f M params) has %d blocks" % (args.reso_list[0], base_model_gflops, params, len(gflops_list)))
             for i, block in enumerate(gflops_list):
@@ -378,7 +295,7 @@ def compute_gflops_by_mask(mask_tensor_list, base_model_gflops, gflops_list, arg
     # TODO: saving = s1/C1 * [FLOPS(conv1)] + s0/C1 * [FLOPS(conv1) + FLOPS(conv2)]
     upperbound_gflops = base_model_gflops
     real_gflops = base_model_gflops
-    if "gate" in args.arch or "bate" in args.arch:
+    if "bate" in args.arch:
         for m_i, mask in enumerate(mask_tensor_list):
             #compute precise GFLOPS
             upsave = torch.zeros_like(mask[:, :, :, 0]) # B*T*C*K->B*T*C
@@ -565,33 +482,9 @@ def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_te
     acc_loss = criterion(prediction, target)
 
     # gflops loss
+    gflops_loss = acc_loss * 0
     if args.gate_gflops_loss_weight > 0:
         gflops_loss = torch.abs(gflops_tensor - args.gate_gflops_bias) * args.gate_gflops_loss_weight * factor
-    else:
-        gflops_loss = 0 * acc_loss
-
-    # sparsity loss
-    if args.gate_norm_loss_weight > 0:
-        choice_dim = 3 if (args.gate_history and not args.gate_no_skipping) else 2
-        mask_norm = torch.stack(
-            [torch.norm(mask, dim=[0, 1, 2], p=args.gate_norm) / (mask.numel() / choice_dim) ** (1 / args.gate_norm)
-             for mask in mask_stack_list], dim=0).mean(dim=0)
-        if args.gate_history and args.gate_no_skipping:
-            skip_mask_loss = acc_loss * 0
-        else:
-            skip_mask_loss = (1 - mask_norm[0]) * args.gate_norm_loss_factors[0] * args.gate_norm_loss_weight * factor
-        if args.gate_history:
-            if args.gate_no_skipping:
-                hist_mask_loss = (1 - mask_norm[0]) * args.gate_norm_loss_factors[0] * args.gate_norm_loss_weight * factor
-            else:
-                hist_mask_loss = (1 - mask_norm[1]) * args.gate_norm_loss_factors[1] * args.gate_norm_loss_weight * factor
-        else:
-            hist_mask_loss = acc_loss * 0
-        curr_mask_loss = mask_norm[-1] * args.gate_norm_loss_factors[-1] * args.gate_norm_loss_weight * factor
-    else:
-        skip_mask_loss = acc_loss * 0
-        hist_mask_loss = acc_loss * 0
-        curr_mask_loss = acc_loss * 0
 
     # threshold loss for cgnet
     thres_loss = acc_loss * 0
@@ -601,15 +494,12 @@ def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_te
                 # print(param)
                 thres_loss += args.threshold_loss_weight * torch.sum((param-args.gtarget) ** 2)
 
-    loss = acc_loss + gflops_loss + skip_mask_loss + hist_mask_loss + curr_mask_loss + thres_loss
+    loss = acc_loss + gflops_loss + thres_loss
     return {
         "loss": loss,
         "acc_loss": acc_loss,
         "eff_loss": loss - acc_loss,
         "gflops_loss": gflops_loss,
-        "skip_mask_loss": skip_mask_loss,
-        "hist_mask_loss": hist_mask_loss,
-        "curr_mask_loss": curr_mask_loss,
         "thres_loss": thres_loss,
     }
 
@@ -759,8 +649,8 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
         if args.ada_reso_skip:
             usage_str = get_policy_usage_str(upb_batch_gflops, real_batch_gflops)
             print(usage_str)
-            if args.print_statistics:
-                print_mask_statistics(mask_stack_list_list, args)
+            # if args.print_statistics:
+            print_mask_statistics(mask_stack_list_list, args)
         else:
             usage_str = "Base Model"
         if tf_writer is not None:
@@ -892,8 +782,8 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
         if args.ada_reso_skip:
             usage_str = get_policy_usage_str(upb_batch_gflops, real_batch_gflops)
             print(usage_str)
-            if args.print_statistics:
-                print_mask_statistics(mask_stack_list_list, args)
+            # if args.print_statistics:
+            print_mask_statistics(mask_stack_list_list, args)
         else:
             usage_str = "Base Model"
 
@@ -964,82 +854,89 @@ def get_data_loaders(model, prefix, args):
     if args.rank == 0:
         print("%s: %d classes" % (args.dataset, args.num_class))
 
-    crop_size = model.module.crop_size
-    scale_size = model.module.scale_size
-    input_mean = model.module.input_mean
-    input_std = model.module.input_std
+    train_augmentation = model.module.get_augmentation(
+        flip=False if 'something' in args.dataset or 'jester' in args.dataset else True)
 
-    if args.sth_no_flip:
-        train_augmentation = model.module.get_augmentation(
-            flip=False if 'something' in args.dataset or 'jester' in args.dataset
-            or 'sth' in args.dataset
-            else True)
-    else:
-        train_augmentation = model.module.get_augmentation(
-            flip=False if 'something' in args.dataset or 'jester' in args.dataset else True)
-
-
-    normalize = GroupNormalize(input_mean, input_std)
-
-
-    train_dataset = TSNDataSet(args.root_path, args.train_list, num_segments=args.num_segments,
-                   image_tmpl=prefix,
-                   transform=torchvision.transforms.Compose([
+    train_transform = torchvision.transforms.Compose([
                        train_augmentation,
                        Stack(roll=False),
                        ToTorchFormatTensor(div=True),
-                       normalize,
-                   ]), dense_sample=args.dense_sample,
-                   dataset=args.dataset,
-                   filelist_suffix=args.filelist_suffix,
-                   folder_suffix=args.folder_suffix,
-                   partial_fcvid_eval=args.partial_fcvid_eval,
-                   partial_ratio=args.partial_ratio,
-                   ada_reso_skip=args.ada_reso_skip,
-                   reso_list=args.reso_list,
-                   rescale_to=args.rescale_to,
-                   policy_input_offset=args.policy_input_offset,
-                   save_meta=args.save_meta,
-                   rank=args.rank)
+                       GroupNormalize(model.module.input_mean, model.module.input_std),
+                   ])
 
-    val_dataset = TSNDataSet(args.root_path, args.val_list, num_segments=args.num_segments,
-                   image_tmpl=prefix,
-                   random_shift=False,
-                   transform=torchvision.transforms.Compose([
-                       GroupScale(int(scale_size)),
-                       GroupCenterCrop(crop_size),
+    val_transform = torchvision.transforms.Compose([
+                       GroupScale(int(model.module.scale_size)),
+                       GroupCenterCrop(model.module.crop_size),
                        Stack(roll=False),
                        ToTorchFormatTensor(div=True),
-                       normalize,
-                   ]), dense_sample=args.dense_sample,
-                   dataset=args.dataset,
-                   filelist_suffix=args.filelist_suffix,
-                   folder_suffix=args.folder_suffix,
-                   partial_fcvid_eval=args.partial_fcvid_eval,
-                   partial_ratio=args.partial_ratio,
-                   ada_reso_skip=args.ada_reso_skip,
-                   reso_list=args.reso_list,
-                   rescale_to=args.rescale_to,
-                   policy_input_offset=args.policy_input_offset,
-                   save_meta=args.save_meta,
-                   rank=args.rank)
+                       GroupNormalize(model.module.input_mean, model.module.input_std),
+                   ])
 
-    # train_loader = torch.utils.data.DataLoader(
-    #     ,
-    #     batch_size=args.batch_size, shuffle=True,
-    #     num_workers=workers, pin_memory=not args.not_pin_memory,
-    #     drop_last=True)  # prevent something not % n_GPU
-    #
-    # val_loader = torch.utils.data.DataLoader(
-    #     ,
-    #     batch_size=args.batch_size, shuffle=False,
-    #     num_workers=workers, pin_memory=not args.not_pin_memory)
+    train_dataset = TSNDataSet(args.root_path, args.train_list,
+                               num_segments=args.num_segments,
+                               image_tmpl=prefix,
+                               transform=train_transform,
+                               dense_sample=args.dense_sample,
+                               dataset=args.dataset,
+                               filelist_suffix=args.filelist_suffix,
+                               folder_suffix=args.folder_suffix,
+                               save_meta=args.save_meta,
+                               rank=args.rank)
+
+    val_dataset = TSNDataSet(args.root_path, args.val_list,
+                             num_segments=args.num_segments,
+                             image_tmpl=prefix,
+                             random_shift=False,
+                             transform=val_transform,
+                             dense_sample=args.dense_sample,
+                             dataset=args.dataset,
+                             filelist_suffix=args.filelist_suffix,
+                             folder_suffix=args.folder_suffix,
+                             save_meta=args.save_meta,
+                             rank=args.rank)
 
     train_loader = build_dataflow(train_dataset, True, args.batch_size, args.workers, args.distributed, args.not_pin_memory)
     val_loader = build_dataflow(val_dataset, False, args.batch_size, args.workers, args.distributed, args.not_pin_memory)
 
     return train_loader, val_loader
 
+def take_care_of_pretraining(sd, args):
+    old_to_new_pairs = []
+    if args.downsample0_renaming:
+        for k in sd:
+            if "downsample0" in k:
+                old_to_new_pairs.append((k, k.replace("downsample0", "downsample.0")))
+            elif "downsample1" in k:
+                old_to_new_pairs.append((k, k.replace("downsample1", "downsample.1")))
+
+    if args.downsample_0_renaming:
+        for k in sd:
+            if "downsample.0" in k:
+                old_to_new_pairs.append((k, k.replace("downsample.0", "downsample0")))
+            elif "downsample.1" in k:
+                old_to_new_pairs.append((k, k.replace("downsample.1", "downsample1")))
+
+    for old_key, new_key in old_to_new_pairs:
+        sd[new_key] = sd.pop(old_key)
+    old_to_new_pairs = []
+
+    for old_key, new_key in old_to_new_pairs:
+        sd[new_key] = sd.pop(old_key)
+
+    old_to_new_pairs = []
+    if args.shift and args.ada_reso_skip:
+        for k in sd:
+            if "conv1.net." in k:
+                old_to_new_pairs.append((k, k.replace("conv1.net.", "conv1.")))
+    for old_key, new_key in old_to_new_pairs:
+        sd[new_key] = sd.pop(old_key)
+
+    del_keys = []
+    if args.ignore_loading_gate_fc:
+        del_keys += [k for k in sd if "gate_fc" in k]
+    for k in del_keys:
+        del sd[k]
+    return sd
 
 def handle_frozen_things_in(model, args):
     # TODO(yue) freeze some params in the policy + lstm layers

@@ -49,6 +49,8 @@ class TSNDataSet(data.Dataset):
                  remove_missing=False, dense_sample=False, twice_sample=False,
                  dataset=None, filelist_suffix="", folder_suffix=None, save_meta=False, rank=0):
 
+
+
         self.root_path = root_path
         # self.list_file = list_file
         self.list_file = \

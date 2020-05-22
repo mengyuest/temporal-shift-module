@@ -58,10 +58,11 @@ def shift(x, n_segment, fold_div=3, inplace=False):
     return out.view(nt, c, h, w)
 
 class PolicyBlock(nn.Module):
-    def __init__(self, in_planes, out_planes, norm_layer, args):
+    def __init__(self, in_planes, out_planes, norm_layer, shared, args):
         super(PolicyBlock, self).__init__()
         self.args = args
-
+        self.norm_layer = norm_layer
+        self.shared = shared
         in_factor = 1
         out_factor = 2
         if self.args.gate_history:
@@ -70,21 +71,26 @@ class PolicyBlock(nn.Module):
                 out_factor = 3
         self.action_dim = out_factor
 
+        in_dim = in_planes * in_factor
+        out_dim = out_planes * out_factor // self.args.granularity
+        keyword = "%d_%d" % (in_dim, out_dim)
+        if self.args.relative_hidden_size > 0:
+            hidden_dim = int(self.args.relative_hidden_size * out_planes // self.args.granularity)
+        elif self.args.hidden_quota > 0:
+            hidden_dim = self.args.hidden_quota // (out_planes // self.args.granularity)
+        else:
+            hidden_dim = self.args.gate_hidden_dim
+
         if self.args.single_linear:
-            self.gate_fc0 = nn.Linear(in_planes * in_factor, out_planes * out_factor)
+            self.gate_fc0 = nn.Linear(in_dim, out_dim)
             if self.args.gate_bn_between_fcs:
-                self.gate_bn = nn.BatchNorm1d(out_planes * out_factor)
+                self.gate_bn = nn.BatchNorm1d(out_dim)
             if self.args.gate_relu_between_fcs:
                 self.gate_relu = nn.ReLU(inplace=True)
 
             normal_(self.gate_fc0.weight, 0, 0.001)
             constant_(self.gate_fc0.bias, 0)
         elif self.args.triple_linear:
-            if self.args.relative_hidden_size > 0:
-                hidden_dim = int(self.args.relative_hidden_size * out_planes)
-            else:
-                hidden_dim = self.args.gate_hidden_dim
-
             self.gate_fc0 = nn.Linear(in_planes * in_factor, hidden_dim)
             if self.args.gate_bn_between_fcs:
                 self.gate_bn = nn.BatchNorm1d(hidden_dim)
@@ -97,7 +103,7 @@ class PolicyBlock(nn.Module):
                 self.gate_bn1 = nn.BatchNorm1d(hidden_dim)
             if self.args.gate_relu_between_fcs:
                 self.gate_relu1 = nn.ReLU(inplace=True)
-            self.gate_fc2 = nn.Linear(hidden_dim, out_planes * out_factor)
+            self.gate_fc2 = nn.Linear(hidden_dim, out_dim)
 
             normal_(self.gate_fc0.weight, 0, 0.001)
             constant_(self.gate_fc0.bias, 0)
@@ -107,26 +113,32 @@ class PolicyBlock(nn.Module):
             constant_(self.gate_fc2.bias, 0)
 
         else:
-            if self.args.relative_hidden_size > 0:
-                hidden_dim = int(self.args.relative_hidden_size * out_planes)
+            if self.args.shared_policy_net:
+                self.gate_fc0 = self.shared[0][keyword]
             else:
-                hidden_dim = self.args.gate_hidden_dim
-            self.gate_fc0 = nn.Linear(in_planes * in_factor, hidden_dim)
+                self.gate_fc0 = nn.Linear(in_dim, hidden_dim)
             if self.args.gate_bn_between_fcs:
                 self.gate_bn = nn.BatchNorm1d(hidden_dim)
             if self.args.gate_relu_between_fcs:
                 self.gate_relu = nn.ReLU(inplace=True)
-            self.gate_fc1 = nn.Linear(hidden_dim, out_planes * out_factor)
+            if self.args.shared_policy_net:
+                self.gate_fc1 = self.shared[1][keyword]
+            else:
+                self.gate_fc1 = nn.Linear(hidden_dim, out_dim)
 
-            normal_(self.gate_fc0.weight, 0, 0.001)
-            constant_(self.gate_fc0.bias, 0)
-            normal_(self.gate_fc1.weight, 0, 0.001)
-            constant_(self.gate_fc1.bias, 0)
+            # print("net0:", in_planes * in_factor)
+            # print("net1:", out_planes * out_factor)
+            # print("hidden", hidden_dim)
+            # print("share0:", shared[0][keyword].weight.shape)
+            # print("share1:", shared[1][keyword].weight.shape)
+
+            if not self.args.shared_policy_net:
+                normal_(self.gate_fc0.weight, 0, 0.001)
+                constant_(self.gate_fc0.bias, 0)
+                normal_(self.gate_fc1.weight, 0, 0.001)
+                constant_(self.gate_fc1.bias, 0)
 
         self.num_channels = out_planes
-
-
-
 
     def forward(self, x, **kwargs):
         # data preparation
@@ -183,9 +195,12 @@ class PolicyBlock(nn.Module):
             x_c = self.gate_fc1(x_c)
 
         # gating operations
-        x_c2d = x_c.view(x.shape[0], self.num_channels, self.action_dim)
+        x_c2d = x_c.view(x.shape[0], self.num_channels // self.args.granularity, self.action_dim)
         x_c2d = torch.log(F.softmax(x_c2d, dim=2).clamp(min=1e-8))
         mask = F.gumbel_softmax(logits=x_c2d, tau=kwargs["tau"], hard=not self.args.gate_gumbel_use_soft)
+
+        if self.args.granularity>1:
+            mask = mask.repeat(1, self.args.granularity, 1)
 
         return mask  # TODO: BT*C*ACT_DIM
 
@@ -259,7 +274,7 @@ class BasicBlock(nn.Module):
     expansion = 1
 
     def __init__(self, inplanes, planes, stride=1, downsample0=None, downsample1=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None, args=None):
+                 base_width=64, dilation=1, norm_layer=None, shared=None, args=None):
         super(BasicBlock, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -285,10 +300,10 @@ class BasicBlock(nn.Module):
                                         self.args.gate_random_hard_policy,
                                         self.args.gate_threshold])
         if self.adaptive_policy:
-            self.policy_net = PolicyBlock(in_planes=inplanes, out_planes=planes, norm_layer=norm_layer, args=args)
+            self.policy_net = PolicyBlock(in_planes=inplanes, out_planes=planes, norm_layer=norm_layer, shared=shared, args=args)
 
             if self.args.dense_in_block:
-                self.policy_net2 = PolicyBlock(in_planes=planes, out_planes=planes, norm_layer=norm_layer, args=args)
+                self.policy_net2 = PolicyBlock(in_planes=planes, out_planes=planes, norm_layer=norm_layer, shared=shared, args=args)
 
     def count_flops(self, input_data_shape, **kwargs):
         conv1_flops, conv1_out_shape = count_conv2d_flops(input_data_shape, self.conv1)
@@ -355,7 +370,7 @@ class Bottleneck(nn.Module):
     expansion = 4
 
     def __init__(self, inplanes, planes, stride=1, downsample0=None, downsample1=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None, args=None):
+                 base_width=64, dilation=1, norm_layer=None, shared=None, args=None):
         super(Bottleneck, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -380,9 +395,9 @@ class Bottleneck(nn.Module):
                                         self.args.gate_random_hard_policy,
                                         self.args.gate_threshold])
         if self.adaptive_policy:
-            self.policy_net = PolicyBlock(in_planes=inplanes, out_planes=width, norm_layer=norm_layer, args=args)
+            self.policy_net = PolicyBlock(in_planes=inplanes, out_planes=width, norm_layer=norm_layer, shared=shared, args=args)
             if self.args.dense_in_block:
-                self.policy_net2 = PolicyBlock(in_planes=width, out_planes=width, norm_layer=norm_layer, args=args)
+                self.policy_net2 = PolicyBlock(in_planes=width, out_planes=width, norm_layer=norm_layer, shared=shared, args=args)
 
     def count_flops(self, input_data_shape, **kwargs):
         conv1_flops, conv1_out_shape = count_conv2d_flops(input_data_shape, self.conv1)
@@ -470,6 +485,13 @@ class BateNet(nn.Module):
         self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
         self.bn1 = norm_layer(self.inplanes)
         self.args = args
+        # TODO (yue)
+        if self.args.shared_policy_net:
+            self.gate_fc0s = nn.ModuleDict()
+            self.gate_fc1s = nn.ModuleDict()
+        else:
+            self.gate_fc0s = None
+            self.gate_fc1s = None
 
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
@@ -503,6 +525,30 @@ class BateNet(nn.Module):
                     #     nn.init.constant_(bn.weight, 0)
                     nn.init.constant_(m.bn2.weight, 0)
 
+    def update_shared_net(self, in_planes, out_planes):
+        in_factor = 1
+        out_factor = 2
+        if self.args.gate_history:
+            in_factor = 2
+            if not self.args.gate_no_skipping:
+                out_factor = 3
+        if self.args.relative_hidden_size > 0:
+            hidden_dim = int(self.args.relative_hidden_size * out_planes // self.args.granularity)
+        elif self.args.hidden_quota > 0:
+            hidden_dim = self.args.hidden_quota // (out_planes // self.args.granularity)
+        else:
+            hidden_dim = self.args.gate_hidden_dim
+        in_dim = in_planes * in_factor
+        out_dim = out_planes * out_factor // self.args.granularity
+        keyword = "%d_%d" % (in_dim, out_dim)
+        if keyword not in self.gate_fc0s:
+            self.gate_fc0s[keyword] = nn.Linear(in_dim, hidden_dim)
+            self.gate_fc1s[keyword] = nn.Linear(hidden_dim, out_dim)
+            normal_(self.gate_fc0s[keyword].weight, 0, 0.001)
+            constant_(self.gate_fc0s[keyword].bias, 0)
+            normal_(self.gate_fc1s[keyword].weight, 0, 0.001)
+            constant_(self.gate_fc1s[keyword].bias, 0)
+
     def _make_layer(self, block, planes_list_0, blocks, stride=1, dilate=False):
         norm_layer = self._norm_layer
         downsample0 = None
@@ -515,14 +561,22 @@ class BateNet(nn.Module):
             downsample0 = conv1x1(self.inplanes, planes_list_0 * block.expansion, stride)
             downsample1 = norm_layer(planes_list_0 * block.expansion)
 
+
+        if self.args.shared_policy_net:
+            self.update_shared_net(self.inplanes, planes_list_0)
+
         layers = nn.ModuleList()
         layers.append(block(self.inplanes, planes_list_0, stride, downsample0, downsample1, self.groups,
-                            self.base_width, previous_dilation, norm_layer, args=self.args))
+                            self.base_width, previous_dilation, norm_layer, shared=(self.gate_fc0s, self.gate_fc1s), args=self.args))
         self.inplanes = planes_list_0 * block.expansion
         for k in range(1, blocks):
+
+            if self.args.shared_policy_net:
+                self.update_shared_net(self.inplanes, planes_list_0)
+
             layers.append(block(self.inplanes, planes_list_0, groups=self.groups,
                                 base_width=self.base_width, dilation=self.dilation,
-                                norm_layer=norm_layer, args=self.args))
+                                norm_layer=norm_layer, shared=(self.gate_fc0s, self.gate_fc1s), args=self.args))
         return layers
 
     def count_flops(self, input_data_shape, **kwargs):

@@ -17,7 +17,7 @@ class TSN_Ada(nn.Module):
         self.dropout = args.dropout
         self.pretrain = args.pretrain
 
-        self.is_shift = args.is_shift
+        self.is_shift = args.shift
         self.shift_div = args.shift_div
         self.shift_place = args.shift_place
         self.fc_lr5 = False

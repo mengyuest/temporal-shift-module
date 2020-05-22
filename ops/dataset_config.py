@@ -131,7 +131,7 @@ def return_something(modality):
 
 
 def return_somethingv2(modality):
-    filename_categories = ospj(common.STHV2_PATH,'category.txt')
+    filename_categories = ospj(common.STHV2_META_PATH,'classInd.txt')
     if modality == 'RGB':
         global ROOT_DATASET
         ROOT_DATASET = common.DATA_PATH
@@ -139,9 +139,9 @@ def return_somethingv2(modality):
         #filename_imglist_train = 'something/v2/train_videofolder.txt'
         #filename_imglist_val = 'something/v2/val_videofolder.txt'
         root_data = common.STHV2_FRAMES
-        filename_imglist_train = ospj(common.STHV2_PATH, "train_videofolder.txt")
-        filename_imglist_val = ospj(common.STHV2_PATH, "val_videofolder.txt")
-        prefix = '{:06d}.jpg'
+        filename_imglist_train = ospj(common.STHV2_META_PATH, "train_videofolder.txt")
+        filename_imglist_val = ospj(common.STHV2_META_PATH, "val_videofolder.txt")
+        prefix = '{:05d}.jpg'
     elif modality == 'Flow':
         root_data = ROOT_DATASET + 'something/v2/20bn-something-something-v2-flow'
         filename_imglist_train = 'something/v2/train_videofolder_flow.txt'
@@ -243,7 +243,7 @@ def return_kinetics(modality):
     return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
 
 
-def return_dataset(dataset):
+def return_dataset(dataset, data_path):
     dict_single = {'jester': return_jester, 'something': return_something, 'somethingv2': return_somethingv2,
                    'ucf101': return_ucf101, 'hmdb51': return_hmdb51,
                    'kinetics': return_kinetics,
@@ -256,6 +256,7 @@ def return_dataset(dataset):
                    'low20sth': return_low20sth,
                    'low42sth': return_low42sth,
                    } # TODO(yue)
+    common.set_manual_data_path(data_path, None)
     if dataset in dict_single:
         file_categories, file_imglist_train, file_imglist_val, root_data, prefix = dict_single[dataset]('RGB')
     else:

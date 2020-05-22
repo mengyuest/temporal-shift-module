@@ -1,137 +1,110 @@
 import os,sys
+from os.path import expanduser
 from os.path import join as ospj
 import socket
 import getpass
 host_name = socket.gethostname()
 user_name = getpass.getuser()
 
+#TODO check user_name and assign DATA_PATH, EXPS_PATH
+if user_name in ["meng", "mengyue", "cvpr", "DPLDymng"]:
+    import common_yue
+    DATA_PATH, EXPS_PATH = common_yue.get_paths()
 
-# TODO(yue) path
-# TODO WSC (power machines)
-if "c699" in host_name and user_name in ["sunxm"]:
-    ROOT_DIR="/gpfs/wscgpfs02/sunxm"
-    CODE_PREFIX = "snippets/"
-    DATA_PREFIX="data"
-    LOG_PREFIX="snippets"
-# TODO WSC (power machines)
-elif "c699" in host_name and user_name in ["cvpr"]:
-    ROOT_DIR="/gpfs/wscgpfs02/cvpr"
-    CODE_PREFIX = "code/"
-    DATA_PREFIX="datasets"
-    LOG_PREFIX=""
+elif user_name in ["cclin", "DPLDchun"]:
+    import common_cc
+    DATA_PATH, EXPS_PATH = common_cc.get_paths()
 
-# TODO DIVA [01-05]
-elif "diva0" in host_name and user_name in ["meng", "cclin", "rameswar"]:
-    ROOT_DIR="/store"
-    CODE_PREFIX = "workspaces/%s"%user_name
-    DATA_PREFIX="datasets"
-    LOG_PREFIX = "workspaces/%s"%user_name
-
-# TODO CCC (power machines)
-elif "dcc" in host_name and user_name in ["cvpr", "ieee", "sc071139"]:
-    ROOT_DIR = "/dccstor/longxun"
-    CODE_PREFIX = "../../u/cvpr"
-    DATA_PREFIX = "datasets"
-    #DATA_PREFIX = "../multimodalvideo"
-    LOG_PREFIX = "../multimodalvideo/yue"
-
-#TODO satori (power machines)
-elif ("node" in host_name or "service" in host_name )and user_name == "mengyue":
-    ROOT_DIR = "/nobackup/users/mengyue"
-    CODE_PREFIX = "code"
-    DATA_PREFIX = "datasets"
-    # DATA_PREFIX = "../multimodalvideo"
-    LOG_PREFIX = ""
-
-#TODO AIMOS (power machines)
-elif user_name == "DPLDymng":
-    ROOT_DIR = "/gpfs/u/home/DPLD/DPLDymng/scratch"
-    CODE_PREFIX = "code"
-    DATA_PREFIX = "datasets"
-    LOG_PREFIX = ""
-
-else:
-    exit("unauthorized user@host '%s@%s'" % (user_name, host_name))
-
-CODE_PATH=ospj(ROOT_DIR, CODE_PREFIX,"temporal-shift-module")
-DATA_PATH = ospj(ROOT_DIR, DATA_PREFIX)
-STHV2_PATH=ospj(DATA_PATH, "something/v2")
-STHV2_FRAMES=ospj(STHV2_PATH, '20bn-something-something-v2-frames')
-
-#TODO(yue) UCF101
-UCF101_PATH=ospj(DATA_PATH, "UCF101")
-if "dcc" in host_name:
-    UCF101_PATH = UCF101_PATH.replace("longxun/datasets", "multimodalvideo")
-UCF101_META_PATH = ospj(UCF101_PATH, "file_list")
-UCF101_FRAMES=ospj(UCF101_PATH, 'frame')
-
-#TODO(yue) HMDB51
-HMDB51_PATH=ospj(DATA_PATH, "HMDB51")
-HMDB51_META_PATH = ospj(HMDB51_PATH, "split")
-HMDB51_FRAMES=ospj(HMDB51_PATH, 'frame')
-
-#TODO(yue) activity-net-v1.3
-ACTNET_PATH=ospj(DATA_PATH, "activity-net-v1.3")
-if "dcc" in host_name:
-    ACTNET_PATH = ACTNET_PATH.replace("longxun/datasets","multimodalvideo")
-ACTNET_META_PATH = ACTNET_PATH
-ACTNET_FRAMES=ospj(ACTNET_PATH, 'frames')
-
-#TODO(yue) FCVID
-FCVID_PATH=ospj(DATA_PATH, "fcvid")
-if "dcc" in host_name:
-    FCVID_PATH = FCVID_PATH.replace("longxun/datasets","multimodalvideo")
-FCVID_META_PATH = FCVID_PATH
-FCVID_FRAMES=ospj(FCVID_PATH, 'frames')
-
-#TODO(yue) mini-something
-MINISTH_PATH=ospj(DATA_PATH, "something2something-v2")
-if "dcc" in host_name:
-    MINISTH_PATH = MINISTH_PATH.replace("longxun/datasets","multimodalvideo")
-MINISTH_META_PATH = MINISTH_PATH
-MINISTH_FRAMES=ospj(MINISTH_PATH, 'frames')
+elif user_name in ["rameswar", "DPLDpndr"]:
+    import common_rpanda
+    DATA_PATH, EXPS_PATH = common_rpanda.get_paths()
 
 
-#TODO(yue) charades
-CHARADES_PATH = ospj(DATA_PATH, "charades")
-if "dcc" in host_name:
-    CHARADES_PATH = CHARADES_PATH.replace("longxun/datasets", "multimodalvideo")
-CHARADES_META_PATH = CHARADES_PATH
-CHARADES_FRAMES=ospj(CHARADES_PATH, 'Charades_v1_rgb')
+def inner_set_manual_data_path(data_path, exps_path):
+    if data_path is not None:
+        global DATA_PATH
+        DATA_PATH = data_path
 
-#TODO(yue) epic
-EPIC_PATH = ospj(DATA_PATH, "EPIC_KITCHENS_2018")
-if "dcc" in host_name:
-    EPIC_PATH = EPIC_PATH.replace("longxun/datasets", "multimodalvideo")
-EPIC_META_PATH = EPIC_PATH
-EPIC_FRAMES=ospj(EPIC_PATH, 'frames')
-
-#TODO(yue) mini-kinetics
-MINIK_PATH=ospj(DATA_PATH, "kinetics-qf")
-if "dcc" in host_name:
-    MINIK_PATH = MINIK_PATH.replace("longxun/datasets","multimodalvideo")
-MINIK_META_PATH = MINIK_PATH
-if "diva" in host_name:
-    MINIK_META_PATH = MINIK_PATH.replace("kinetics-qf","kinetics-100")
-# print(MINIK_META_PATH)
-MINIK_FRAMES=ospj(MINIK_PATH)
+    if exps_path is not None:
+        global EXPS_PATH
+        EXPS_PATH = exps_path
 
 
-#TODO(yue) mini-kinetics
-K400_PATH=ospj(DATA_PATH, "k400-toy")
-if "dcc" in host_name:
-    K400_PATH = K400_PATH.replace("longxun/datasets","multimodalvideo")
-K400_META_PATH = K400_PATH
-if "diva" in host_name:
-    K400_META_PATH = K400_PATH.replace("kinetics-qf","kinetics-100")
-K400_FRAMES = ospj(K400_PATH, 'images')
+def set_manual_data_path(data_path, exps_path):
+    inner_set_manual_data_path(data_path, exps_path)
 
+    global STHV2_PATH
+    global STHV2_META_PATH
+    global STHV2_FRAMES
+    STHV2_PATH = ospj(DATA_PATH, "something2something-v2")
+    STHV2_META_PATH = STHV2_PATH
+    STHV2_FRAMES=ospj(STHV2_PATH, 'frames')
+    # STHV2_PATH=ospj(DATA_PATH, "something/v2")
+    # STHV2_META_PATH = STHV2_PATH
+    # STHV2_FRAMES=ospj(STHV2_PATH, '20bn-something-something-v2-frames')
 
-#TODO(yue) cifar-10
-CIFAR10_PATH=ospj(DATA_PATH, "cifar10_data")
-CIFAR10_META_PATH = CIFAR10_PATH
+    #TODO(yue) UCF101
+    global UCF101_PATH
+    global UCF101_META_PATH
+    global UCF101_FRAMES
+    UCF101_PATH=ospj(DATA_PATH, "UCF101")
+    UCF101_META_PATH = ospj(UCF101_PATH, "file_list")
+    UCF101_FRAMES=ospj(UCF101_PATH, 'frame')
 
-EXPS_PATH=ospj(ROOT_DIR, LOG_PREFIX,"logs_tsm")
+    #TODO(yue) HMDB51
+    global HMDB51_PATH
+    global HMDB51_META_PATH
+    global HMDB51_FRAMES
+    HMDB51_PATH=ospj(DATA_PATH, "HMDB51")
+    HMDB51_META_PATH = ospj(HMDB51_PATH, "split")
+    HMDB51_FRAMES=ospj(HMDB51_PATH, 'frame')
 
-from os.path import expanduser
-PYTORCH_CKPT_DIR = ospj(expanduser("~"), ".cache/torch/checkpoints")
+    #TODO(yue) activity-net-v1.3
+    global ACTNET_PATH
+    global ACTNET_META_PATH
+    global ACTNET_FRAMES
+    ACTNET_PATH=ospj(DATA_PATH, "activity-net-v1.3")
+    ACTNET_META_PATH = ACTNET_PATH
+    ACTNET_FRAMES=ospj(ACTNET_PATH, 'frames')
+
+    #TODO(yue) FCVID
+    global FCVID_PATH
+    global FCVID_META_PATH
+    global FCVID_FRAMES
+    FCVID_PATH=ospj(DATA_PATH, "fcvid")
+    FCVID_META_PATH = FCVID_PATH
+    FCVID_FRAMES=ospj(FCVID_PATH, 'frames')
+
+    #TODO(yue) mini-somethingV2
+    global MINISTH_PATH
+    global MINISTH_META_PATH
+    global MINISTH_FRAMES
+    MINISTH_PATH=ospj(DATA_PATH, "something2something-v2")
+    MINISTH_META_PATH = MINISTH_PATH
+    MINISTH_FRAMES=ospj(MINISTH_PATH, 'frames')
+
+    #TODO(yue) charades
+    global CHARADES_PATH
+    global CHARADES_META_PATH
+    global CHARADES_FRAMES
+    CHARADES_PATH = ospj(DATA_PATH, "charades")
+    CHARADES_META_PATH = CHARADES_PATH
+    CHARADES_FRAMES=ospj(CHARADES_PATH, 'Charades_v1_rgb')
+
+    #TODO(yue) epic
+    global EPIC_PATH
+    global EPIC_META_PATH
+    global EPIC_FRAMES
+    EPIC_PATH = ospj(DATA_PATH, "EPIC_KITCHENS_2018")
+    EPIC_META_PATH = EPIC_PATH
+    EPIC_FRAMES=ospj(EPIC_PATH, 'frames')
+
+    #TODO(yue) mini-kinetics
+    global MINIK_PATH
+    global MINIK_META_PATH
+    global MINIK_FRAMES
+    MINIK_PATH=ospj(DATA_PATH, "kinetics-qf")
+    MINIK_META_PATH = MINIK_PATH
+    if "diva" in host_name:
+        MINIK_META_PATH = MINIK_PATH.replace("kinetics-qf", "kinetics-100")
+    MINIK_FRAMES = ospj(MINIK_PATH)

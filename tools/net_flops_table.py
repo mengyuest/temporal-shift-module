@@ -54,6 +54,29 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
 
     flops, params = profile(model, inputs=(dummy_data,))
 
+    if args.shared_policy_net:
+        args.shared_policy_net = False
+        model = getattr(ops.batenet, model_name)(pretrained=False, args=args)
+        setattr(model, last_layer, nn.Linear(feat_dim_dict[model_name], num_classes))
+        flops, _ = profile(model, inputs=(dummy_data,))
+        args.shared_policy_net = True
+    # sep_n=0
+    # shared_n=0
+    # rest_n=0
+    # if args.shared_policy_net:
+    #     for k,v in model.named_parameters():
+    #
+    #         if "gate_fc" in k:
+    #             print(k)
+    #             if "fc0s" not in k and "fc1s" not in k:
+    #                 print(v.numel())
+    #                 sep_n += v.numel()
+    #             else:
+    #                 shared_n += v.numel()
+    #         else:
+    #             rest_n+=v.numel()
+    # print("total:  %.2f\npolicy: %.2f\nshared: %.2f\nrest:   %.2f"%(params/1e6, sep_n/1e6, shared_n/1e6, rest_n/1e6))
+    # exit()
     flops = flops / dummy_data.shape[0]
 
     return flops / 1e9, params / 1e6

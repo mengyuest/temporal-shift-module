@@ -384,7 +384,7 @@ parser.add_argument('--multiprocessing-distributed', '--mpd', action='store_true
                          'multi node data parallel training')
 parser.add_argument('--sync-bn', '--sb', action='store_true', help='sync BN across GPUs')
 # parser.add_argument('--expand_hidden_dim', action='store_true',  help=' ')
-parser.add_argument('--world-size', default=1, type=int, help='number of nodes for distributed training')
+parser.add_argument('--world-size', '--ws', default=1, type=int, help='number of nodes for distributed training')
 parser.add_argument('--rank', default=0, type=int, help='node rank for distributed training')
 parser.add_argument('--dist-url', default='tcp://127.0.0.1:23456', type=str, help='url used to set up distributed training')
 parser.add_argument('--dist-backend', default='nccl', type=str, help='distributed backend')
@@ -397,7 +397,7 @@ parser.add_argument('--auto_resume', action='store_true', help='auto resume for 
 parser.add_argument('--not_pin_memory', action='store_true', help='not pin memory')
 parser.add_argument('--relative_hidden_size', type=float, default=-1.0)
 parser.add_argument('--gflops_loss_type', type=str, choices=['real', 'upb'], default='real')
-parser.add_argument('--backup_epoch_list', default=[9, 39], type=int, nargs="+") # keep old best models (for pretraining)
+parser.add_argument('--backup_epoch_list', default=[9], type=int, nargs="+") # keep old best models (for pretraining)
 parser.add_argument('--warmup_epochs', default=-1, type=int, help='number of epochs for warmup')
 parser.add_argument('--sth_no_flip', action='store_true')
 
@@ -405,3 +405,16 @@ parser.add_argument('--single_linear', action='store_true')
 parser.add_argument('--triple_linear', action='store_true')
 
 parser.add_argument('--verb_noun_acc', action='store_true')
+
+parser.add_argument('--data_path', default=None, type=str, help='Only use it when your dataset is saved in '
+                                                                'a customized path. Otherwise follow the '
+                                                                'rules in common_*.py')
+parser.add_argument('--exps_path', default=None, type=str, help='Only use it when your experiment log is saved in '
+                                                                'a customized path. Otherwise follow the '
+                                                                'rules in common_*.py')
+
+parser.add_argument('--shared_policy_net', action='store_true')
+parser.add_argument('--granularity', default=1, type=int)
+parser.add_argument('--hidden_quota', default=-1, type=int)
+
+parser.add_argument('--finetune_last10', action='store_true')

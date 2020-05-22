@@ -107,6 +107,9 @@ class Recorder:
     def is_current_best(self):
         return self.best_at == len(self.history)-1
 
+    def at(self, idx):
+        return self.history[idx]
+
 
 
 def count_conv2d_flops(input_data_shape, conv):

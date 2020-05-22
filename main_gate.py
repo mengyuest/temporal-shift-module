@@ -36,10 +36,11 @@ import numpy as np
 import common
 from os.path import join as ospj
 from shutil import copyfile
-
+import shutil
 
 def main():
     args = parser.parse_args()
+    common.set_manual_data_path(args.data_path, args.exps_path)
 
     #TODO(distributed)
     if args.hostfile != '':
@@ -72,7 +73,9 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
         node_seed_offset = 0
     set_random_seed(node_seed_offset + args.random_seed, args)
 
-    args.num_class, args.train_list, args.val_list, args.root_path, prefix = dataset_config.return_dataset(args.dataset)
+    args.num_class, args.train_list, args.val_list, args.root_path, prefix = \
+        dataset_config.return_dataset(args.dataset,
+                                      args.data_path)  # TODO this is only used if manually set
 
     # TODO(distributed)
     if args.gpus is not None:
@@ -108,7 +111,7 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
         # For multiprocessing distributed, DistributedDataParallel constructor
         # should always set the single device scope, otherwise,
         # DistributedDataParallel will use all available devices.
-        if args.gpus is not None:
+        if args.gpus is not None and not isinstance(args.gpus, list):
             torch.cuda.set_device(args.gpus)
             model.cuda(args.gpus)
             # When using a single GPU per process and per
@@ -177,10 +180,13 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
     # else:
     criterion = torch.nn.CrossEntropyLoss().cuda()
 
-    # TODO do simple eval here?
-
     if args.rank==0:
         exp_full_path = setup_log_directory(args.exp_header, test_mode, args, logger)
+        # TODO stat runtime info
+        import socket
+        import getpass
+        print("%s@%s started the experiment at %s"%(getpass.getuser(), socket.gethostname(), logger._timestr))
+
         if not test_mode:
             with open(os.path.join(exp_full_path, 'args.txt'), 'w') as f:
                 f.write(str(args))
@@ -190,7 +196,7 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
 
     # TODO(yue)
     if args.rank == 0:
-        map_record, mmap_record, prec_record = get_recorders(3)
+        map_record, mmap_record, prec_record, prec5_record = get_recorders(4)
         best_train_usage_str = None
         best_val_usage_str = None
 
@@ -208,7 +214,7 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
         # evaluation
         if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
             set_random_seed(args.random_seed, args)
-            mAP, mmAP, prec1, val_usage_str = validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, args, tf_writer)
+            mAP, mmAP, prec1, prec5, val_usage_str = validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, args, tf_writer)
 
             if args.distributed:
                 dist.barrier()
@@ -218,16 +224,18 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
                 map_record.update(mAP)
                 mmap_record.update(mmAP)
                 prec_record.update(prec1)
+                prec5_record.update(prec5)
 
                 best_by = {"map": map_record, "mmap": mmap_record, "acc": prec_record}
                 if best_by[args.choose_best_by].is_current_best():
                     best_train_usage_str = train_usage_str if not args.skip_training else "(Eval Mode)"
                     best_val_usage_str = val_usage_str
 
-                print('Best mAP: %.3f (epoch=%d)\t\tBest mmAP: %.3f(epoch=%d)\t\tBest Prec@1: %.3f (epoch=%d)' % (
+                print('Best mAP: %.3f (epoch=%d)\tBest mmAP: %.3f(epoch=%d)\tBest Prec@1: %.3f (epoch=%d) w. Prec@5: %.3f' % (
                     map_record.best_val, map_record.best_at,
                     mmap_record.best_val, mmap_record.best_at,
-                    prec_record.best_val, prec_record.best_at))
+                    prec_record.best_val, prec_record.best_at,
+                    prec5_record.at(prec_record.best_at)))
 
             if args.skip_training:
                 break
@@ -240,6 +248,7 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
                     'state_dict': model.state_dict(),
                     'optimizer': optimizer.state_dict(),
                     'best_prec1': prec_record.best_val,
+                    'prec5_at_best_prec1': prec5_record.at(prec_record.best_at),
                     'best_mmap': mmap_record.best_val,
                     'best_map': map_record.best_val,
                 }
@@ -286,6 +295,8 @@ def init_gflops_table(model, args):
                 print("block", i, ",".join(["%.4f GFLOPS" % (x / 1e9) for x in block]))
         return base_model_gflops, gflops_list
     else:
+        if args.rank == 0:
+            print("Network@%d (%.4f GFLOPS, %.4f M params)" % (args.reso_list[0], base_model_gflops, params))
         return base_model_gflops, None
 
 def compute_gflops_by_mask(mask_tensor_list, base_model_gflops, gflops_list, args):
@@ -502,7 +513,6 @@ def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_te
         "gflops_loss": gflops_loss,
         "thres_loss": thres_loss,
     }
-
 
 def elastic_list_print(l, limit=8):
     if isinstance(l, str):
@@ -793,7 +803,7 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
             tf_writer.add_scalar('acc/test_top5', top5.avg, epoch)
     else:
         usage_str = "Empty: non-master node"
-    return mAP, mmAP, top1.avg, usage_str
+    return mAP, mmAP, top1.avg, top5.avg, usage_str
 
 
 def save_checkpoint(state, is_best, shall_backup, exp_full_path, decorator):
@@ -852,6 +862,9 @@ def build_dataflow(dataset, is_train, batch_size, workers, is_distributed, not_p
 
 def get_data_loaders(model, prefix, args):
     if args.rank == 0:
+        print("data_path : %s" % args.root_path)
+        print("train_list: %s" % args.train_list)
+        print("val_list  : %s" % args.val_list)
         print("%s: %d classes" % (args.dataset, args.num_class))
 
     train_augmentation = model.module.get_augmentation(

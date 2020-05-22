@@ -6,7 +6,7 @@ import getpass
 host_name = socket.gethostname()
 user_name = getpass.getuser()
 
-#TODO check user_name and assign DATA_PATH, EXPS_PATH
+#TODO check who you are and assign DATA_PATH, EXPS_PATH
 if user_name in ["meng", "mengyue", "cvpr", "DPLDymng"]:
     import common_yue
     DATA_PATH, EXPS_PATH = common_yue.get_paths()

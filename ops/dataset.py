@@ -47,7 +47,8 @@ class TSNDataSet(data.Dataset):
                  num_segments=3, image_tmpl='img_{:05d}.jpg', transform=None,
                  random_shift=True, test_mode=False,
                  remove_missing=False, dense_sample=False, twice_sample=False,
-                 dataset=None, filelist_suffix="", folder_suffix=None, save_meta=False, rank=0):
+                 dataset=None, filelist_suffix="", folder_suffix=None, save_meta=False,
+                 always_flip=False, conditional_flip=False, adaptive_flip=False, rank=0):
 
 
 
@@ -68,6 +69,9 @@ class TSNDataSet(data.Dataset):
         self.dataset = dataset
         self.root_path += folder_suffix
         self.save_meta = save_meta
+        self.always_flip = always_flip
+        self.conditional_flip = conditional_flip
+        self.adaptive_flip = adaptive_flip
         self.rank = rank
 
         if self.dense_sample:
@@ -225,15 +229,41 @@ class TSNDataSet(data.Dataset):
 
     def get(self, record, indices):
         images = list()
+        switch_d = {"somethingv2": {86: 87, 87: 86, 93: 94, 94: 93}, "jester": {0: 1, 1: 0, 6: 7, 7: 6}}
         for seg_ind in indices:
             images.extend(self._load_image(record.path, record.offset+int(seg_ind)))
 
-        process_data = self.transform(images)
+        return_label = record.label
+        # in training, transform0-> flip;  transform1->noflip
+        # in val data loader, two transforms are the same (noflip)
+        if self.always_flip:  # always flip in training data loader no matter what
+            process_data = self.transform[0](images)  # flip (only in train)
+
+        elif self.conditional_flip:  # flip in training data loader only if label not contains left/right semantic
+            # print("label", record.label)
+            if self.dataset in switch_d and record.label[0].item() in switch_d[self.dataset]:  # special labels
+                process_data = self.transform[1](images)  # no flip
+            else:
+                process_data = self.transform[0](images)  # flip
+
+        elif self.adaptive_flip:  # flip in training and change the label correspondingly
+            process_data = self.transform[0](images)  # flip
+            if self.random_shift:  # random shift means it's in training data loader #TODO(fragile!)
+                if self.dataset in switch_d and record.label[0].item() in switch_d[self.dataset]:
+                    return_label = torch.ones_like(record.label)
+                    return_label[-1] = -1
+                    return_label[-2] = -1
+                    return_label[0] = switch_d[self.dataset][record.label[0].item()]
+        else: # flip/no flip based on entire dataset
+            if "something" in self.dataset or "jester" in self.dataset:
+                process_data = self.transform[1](images)  # no flip
+            else:
+                process_data = self.transform[0](images)  # flip
 
         if self.save_meta:
-            return process_data, record.path, indices, record.label
+            return process_data, record.path, indices, return_label
         else:
-            return process_data, record.label
+            return process_data, return_label
 
 
     def __len__(self):

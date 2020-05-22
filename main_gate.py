@@ -867,15 +867,22 @@ def get_data_loaders(model, prefix, args):
         print("val_list  : %s" % args.val_list)
         print("%s: %d classes" % (args.dataset, args.num_class))
 
-    train_augmentation = model.module.get_augmentation(
-        flip=False if 'something' in args.dataset or 'jester' in args.dataset else True)
+    # train_augmentation = model.module.get_augmentation(
+    #     flip=False if 'something' in args.dataset or 'jester' in args.dataset else True)
 
-    train_transform = torchvision.transforms.Compose([
-                       train_augmentation,
-                       Stack(roll=False),
-                       ToTorchFormatTensor(div=True),
-                       GroupNormalize(model.module.input_mean, model.module.input_std),
-                   ])
+    train_transform_flip = torchvision.transforms.Compose([
+        model.module.get_augmentation(flip=True),
+        Stack(roll=False),
+        ToTorchFormatTensor(div=True),
+        GroupNormalize(model.module.input_mean, model.module.input_std),
+    ])
+
+    train_transform_nofl = torchvision.transforms.Compose([
+        model.module.get_augmentation(flip=False),
+        Stack(roll=False),
+        ToTorchFormatTensor(div=True),
+        GroupNormalize(model.module.input_mean, model.module.input_std),
+    ])
 
     val_transform = torchvision.transforms.Compose([
                        GroupScale(int(model.module.scale_size)),
@@ -888,19 +895,22 @@ def get_data_loaders(model, prefix, args):
     train_dataset = TSNDataSet(args.root_path, args.train_list,
                                num_segments=args.num_segments,
                                image_tmpl=prefix,
-                               transform=train_transform,
+                               transform=(train_transform_flip, train_transform_nofl),
                                dense_sample=args.dense_sample,
                                dataset=args.dataset,
                                filelist_suffix=args.filelist_suffix,
                                folder_suffix=args.folder_suffix,
                                save_meta=args.save_meta,
+                               always_flip=args.always_flip,
+                               conditional_flip=args.conditional_flip,
+                               adaptive_flip=args.adaptive_flip,
                                rank=args.rank)
 
     val_dataset = TSNDataSet(args.root_path, args.val_list,
                              num_segments=args.num_segments,
                              image_tmpl=prefix,
                              random_shift=False,
-                             transform=val_transform,
+                             transform=(val_transform, val_transform),
                              dense_sample=args.dense_sample,
                              dataset=args.dataset,
                              filelist_suffix=args.filelist_suffix,

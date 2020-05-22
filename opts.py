@@ -418,3 +418,6 @@ parser.add_argument('--granularity', default=1, type=int)
 parser.add_argument('--hidden_quota', default=-1, type=int)
 
 parser.add_argument('--finetune_last10', action='store_true')
+parser.add_argument('--always_flip', action='store_true')
+parser.add_argument('--conditional_flip', action='store_true')
+parser.add_argument('--adaptive_flip', action='store_true')

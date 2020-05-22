@@ -19,6 +19,9 @@ class VideoRecord(object):
         if set_offset:
             self._offset = int(self._data[2])
             self._labels[0] = int(self._data[3])
+            if len(self._data)==6:
+                self._labels[1]=int(self._data[4])
+                self._labels[2] = int(self._data[5])
         else:
             self._offset = 0
             labels=sorted(list(set([int(x) for x in self._data[2:]])))
@@ -49,8 +52,6 @@ class TSNDataSet(data.Dataset):
                  remove_missing=False, dense_sample=False, twice_sample=False,
                  dataset=None, filelist_suffix="", folder_suffix=None, save_meta=False,
                  always_flip=False, conditional_flip=False, adaptive_flip=False, rank=0):
-
-
 
         self.root_path = root_path
         # self.list_file = list_file

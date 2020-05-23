@@ -421,3 +421,7 @@ parser.add_argument('--finetune_last10', action='store_true')
 parser.add_argument('--always_flip', action='store_true')
 parser.add_argument('--conditional_flip', action='store_true')
 parser.add_argument('--adaptive_flip', action='store_true')
+
+parser.add_argument('--use_segk8', action='store_true')
+parser.add_argument('--use_tsmk8', action='store_true')
+parser.add_argument('--use_tsmk16', action='store_true')

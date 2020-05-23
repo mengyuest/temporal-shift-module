@@ -77,11 +77,11 @@ def return_charades(modality):
 
 
 def return_epic(modality):
-    filename_categories = ospj(common.EPIC_META_PATH, 'classIndActions.txt')
+    filename_categories = "data/epic_kitchens2018/classInd.txt"  #ospj(common.EPIC_META_PATH, 'classIndActions.txt')
     if modality == 'RGB':
         root_data = common.EPIC_FRAMES
-        filename_imglist_train = ospj(common.EPIC_META_PATH, 'training_actions.txt')
-        filename_imglist_val = ospj(common.EPIC_META_PATH, 'validation_actions.txt')
+        filename_imglist_train = "data/epic_kitchens2018/training_split.txt" #ospj(common.EPIC_META_PATH, 'training_split.txt')
+        filename_imglist_val = "data/epic_kitchens2018/validation_split.txt" #ospj(common.EPIC_META_PATH, 'validation_split.txt')
         prefix = 'frame_{:010d}.jpg'
     else:
         raise NotImplementedError('no such modality:' + modality)
@@ -220,12 +220,24 @@ def return_minik(modality):
 
 
 def return_jester(modality):
-    filename_categories = 'jester/category.txt'
+    filename_categories = 'jester/classInd.txt'
     if modality == 'RGB':
         prefix = '{:05d}.jpg'
-        root_data = ROOT_DATASET + 'jester/20bn-jester-v1'
-        filename_imglist_train = 'jester/train_videofolder.txt'
-        filename_imglist_val = 'jester/val_videofolder.txt'
+        root_data = common.JESTER_FRAMES
+        filename_imglist_train = 'jester/train_split.txt'
+        filename_imglist_val = 'jester/validation_split.txt'
+    else:
+        raise NotImplementedError('no such modality:'+modality)
+    return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
+
+
+def return_minijester(modality):
+    filename_categories = "data/jester/classInd.txt"
+    if modality == 'RGB':
+        prefix = '{:05d}.jpg'
+        root_data = common.JESTER_FRAMES
+        filename_imglist_train = "data/jester/train_split_mini.txt"
+        filename_imglist_val = "data/jester/validation_split_mini.txt"
     else:
         raise NotImplementedError('no such modality:'+modality)
     return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix
@@ -249,6 +261,7 @@ def return_dataset(dataset, data_path):
                    'kinetics': return_kinetics,
                    'actnet': return_actnet, 'fcvid':return_fcvid,
                    'charades': return_charades,
+                   'minijester': return_minijester,
                    'epic': return_epic, 'epic_verb': return_epic_verb, 'epic_noun': return_epic_noun,
                    'ministh': return_ministh, 'minik': return_minik,
                    'tinysth': return_tinysth,

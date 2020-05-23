@@ -75,6 +75,15 @@ class TSNDataSet(data.Dataset):
         self.adaptive_flip = adaptive_flip
         self.rank = rank
 
+        if self.dataset == "epic":
+            self.a_v_m={}
+            self.a_n_m={}
+            lines = open("data/epic_kitchens2018/classInd.txt").readlines()
+            for l in lines:
+                items = l.strip().split(",")
+                self.a_v_m[int(items[0])] = int(items[2])
+                self.a_n_m[int(items[0])] = int(items[3])
+
         if self.dense_sample:
             if self.rank==0:
                 print('=> Using dense sample for the dataset...')
@@ -109,8 +118,10 @@ class TSNDataSet(data.Dataset):
         if self.dataset == "kinetics":
             tmp = [[x[0], x[-2], x[-1]] for x in tmp]
 
-        if self.dataset == "charades" or "epic" in self.dataset:
+        if self.dataset == "charades":
             tmp = [[x[0], int(x[2])-int(x[1]), x[1], x[-1]] for x in tmp]
+        elif self.dataset == "epic":
+            tmp = [[x[0], int(x[2]) - int(x[1]), x[1], x[3], x[4], x[5]] for x in tmp]
 
         if not self.test_mode or self.remove_missing:
             tmp = [item for item in tmp if int(item[1]) >= 3]
@@ -247,14 +258,14 @@ class TSNDataSet(data.Dataset):
             else:
                 process_data = self.transform[0](images)  # flip
 
-        elif self.adaptive_flip:  # flip in training and change the label correspondingly
-            process_data = self.transform[0](images)  # flip
-            if self.random_shift:  # random shift means it's in training data loader #TODO(fragile!)
-                if self.dataset in switch_d and record.label[0].item() in switch_d[self.dataset]:
-                    return_label = torch.ones_like(record.label)
-                    return_label[-1] = -1
-                    return_label[-2] = -1
-                    return_label[0] = switch_d[self.dataset][record.label[0].item()]
+        # elif self.adaptive_flip:  # flip in training and change the label correspondingly
+        #     process_data = self.transform[0](images)  # flip
+        #     if self.random_shift:  # random shift means it's in training data loader #TODO(fragile!)
+        #         if self.dataset in switch_d and record.label[0].item() in switch_d[self.dataset]:
+        #             return_label = torch.ones_like(record.label)
+        #             return_label[-1] = -1
+        #             return_label[-2] = -1
+        #             return_label[0] = switch_d[self.dataset][record.label[0].item()]
         else: # flip/no flip based on entire dataset
             if "something" in self.dataset or "jester" in self.dataset:
                 process_data = self.transform[1](images)  # no flip

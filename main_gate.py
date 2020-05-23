@@ -3,6 +3,7 @@ import warnings
 warnings.filterwarnings("ignore")
 
 import os
+from os.path import expanduser
 import sys
 import time
 import multiprocessing
@@ -18,7 +19,7 @@ from ops.models_gate import TSN_Gate
 from ops.models_ada import TSN_Ada
 from ops.transforms import *
 from ops import dataset_config
-from ops.utils import AverageMeter, accuracy, cal_map, Recorder
+from ops.utils import AverageMeter, accuracy, cal_map, Recorder, verb_noun_accuracy
 from opts import parser
 
 from tensorboardX import SummaryWriter
@@ -159,12 +160,23 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
                 print(("=> no checkpoint found at '{}'".format(args.resume)))
 
     # TODO(yue) loading pretrained weights
-    elif test_mode or args.base_pretrained_from != "":
-        the_model_path = args.base_pretrained_from
-        if test_mode:
-            the_model_path = ospj(args.test_from, "models", "ckpt.best.pth.tar")
+    elif test_mode or args.base_pretrained_from != "" or args.use_tsmk8 or args.use_segk8 or args.use_tsmk16:
+        if args.use_segk8:
+            the_model_path = expanduser(
+                "~/.cache/torch/checkpoints/TSM_kinetics_RGB_resnet50_avg_segment5_e50.pth")
+        elif args.use_tsmk8:
+            the_model_path = expanduser(
+                "~/.cache/torch/checkpoints/TSM_kinetics_RGB_resnet50_shift8_blockres_avg_segment8_e50.pth")
+        elif args.use_tsmk16:
+            the_model_path = expanduser(
+                "~/.cache/torch/checkpoints/TSM_kinetics_RGB_resnet50_shift8_blockres_avg_segment16_e50.pth")
+        else:
+            the_model_path = args.base_pretrained_from
+            if test_mode:
+                the_model_path = ospj(args.test_from, "models", "ckpt.best.pth.tar")
+            the_model_path = common.EXPS_PATH + "/" + the_model_path
 
-        sd = torch.load(common.EXPS_PATH + "/" + the_model_path)['state_dict']
+        sd = torch.load(the_model_path)['state_dict']
         sd = take_care_of_pretraining(sd, args)
 
         model_dict = model.state_dict()
@@ -197,6 +209,8 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
     # TODO(yue)
     if args.rank == 0:
         map_record, mmap_record, prec_record, prec5_record = get_recorders(4)
+        if args.dataset == "epic":
+            verb_prec1_record, verb_prec5_record, noun_prec1_record, noun_prec5_record = get_recorders(4)
         best_train_usage_str = None
         best_val_usage_str = None
 
@@ -214,7 +228,8 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
         # evaluation
         if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
             set_random_seed(args.random_seed, args)
-            mAP, mmAP, prec1, prec5, val_usage_str = validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, args, tf_writer)
+            mAP, mmAP, prec1, prec5, val_usage_str, epic_precs = \
+                validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, args, tf_writer)
 
             if args.distributed:
                 dist.barrier()
@@ -225,17 +240,30 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
                 mmap_record.update(mmAP)
                 prec_record.update(prec1)
                 prec5_record.update(prec5)
+                if args.dataset == "epic":
+                    verb_prec1_record.update(epic_precs[0])
+                    verb_prec5_record.update(epic_precs[1])
+                    noun_prec1_record.update(epic_precs[2])
+                    noun_prec5_record.update(epic_precs[3])
 
                 best_by = {"map": map_record, "mmap": mmap_record, "acc": prec_record}
                 if best_by[args.choose_best_by].is_current_best():
                     best_train_usage_str = train_usage_str if not args.skip_training else "(Eval Mode)"
                     best_val_usage_str = val_usage_str
 
-                print('Best mAP: %.3f (epoch=%d)\tBest mmAP: %.3f(epoch=%d)\tBest Prec@1: %.3f (epoch=%d) w. Prec@5: %.3f' % (
+                epic_str = ""
+                if args.dataset == "epic":
+                    epic_str = "V@1:%.3f V@5:%.3f N@1:%.3f N@5:%.3f" % (
+                        verb_prec1_record.at(prec_record.best_at), verb_prec5_record.at(prec_record.best_at),
+                        noun_prec1_record.at(prec_record.best_at), noun_prec5_record.at(prec_record.best_at)
+                    )
+
+                print('Best mAP: %.3f (epoch=%d)\tBest mmAP: %.3f(epoch=%d)\tBest Prec@1: %.3f (epoch=%d) w. Prec@5: %.3f %s' % (
                     map_record.best_val, map_record.best_at,
                     mmap_record.best_val, mmap_record.best_at,
                     prec_record.best_val, prec_record.best_at,
-                    prec5_record.at(prec_record.best_at)))
+                    prec5_record.at(prec_record.best_at), epic_str
+                ))
 
             if args.skip_training:
                 break
@@ -551,6 +579,8 @@ def get_average_meters(number):
 
 def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, gflops_list, args, tf_writer):
     batch_time, data_time, top1, top5 = get_average_meters(4)
+    if args.dataset=="epic":
+        verb_top1, verb_top5, noun_top1, noun_top5 = get_average_meters(4)
     losses_dict = {}
     if args.ada_reso_skip:
         mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _ in gflops_list]
@@ -594,12 +624,26 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
         else:
             loss_dict = {"loss": criterion(output, target_var[:, 0])}
         prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
+
+        if args.dataset == "epic":
+            verb_prec1, verb_prec5, noun_prec1, noun_prec5 = verb_noun_accuracy(
+                train_loader.a_v_m, train_loader.a_n_m, output.data, target, topk=(1, 5))
+
         if dist.is_initialized():
             world_size = dist.get_world_size()
             dist.all_reduce(prec1)
             dist.all_reduce(prec5)
             prec1 /= world_size
             prec5 /= world_size
+            if args.dataset == "epic":
+                dist.all_reduce(verb_prec1)
+                dist.all_reduce(verb_prec5)
+                dist.all_reduce(noun_prec1)
+                dist.all_reduce(noun_prec5)
+                verb_prec1 /= world_size
+                verb_prec5 /= world_size
+                noun_prec1 /= world_size
+                noun_prec5 /= world_size
 
         # record losses and accuracy
         if len(losses_dict)==0:
@@ -608,6 +652,11 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
             losses_dict[loss_name].update(loss_dict[loss_name].item(), batchsize)
         top1.update(prec1.item(), batchsize)
         top5.update(prec5.item(), batchsize)
+        if args.dataset == "epic":
+            verb_top1.update(verb_prec1.item(), batchsize)
+            verb_top5.update(verb_prec5.item(), batchsize)
+            noun_top1.update(noun_prec1.item(), batchsize)
+            noun_top5.update(noun_prec5.item(), batchsize)
 
         # compute gradient and do SGD step
         loss_dict["loss"].backward()
@@ -616,7 +665,6 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
             clip_grad_norm_(model.parameters(), args.clip_gradient)
         optimizer.step()
         optimizer.zero_grad()
-
 
         # gather masks
         if args.ada_reso_skip:
@@ -637,6 +685,11 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
                             'Prec@5 {top5.val:.3f}({top5.avg:.3f})\t'.format(
                 epoch, i, len(train_loader), optimizer.param_groups[-1]['lr'] * 0.1, batch_time=batch_time,
                 data_time=data_time, loss=losses_dict["loss"], top1=top1, top5=top5))  # TODO
+
+            if args.dataset=="epic":
+                print_output += "V@1 {v1.val:.3f}({v1.avg:.3f}) V@5 {v5.val:.3f}({v5.avg:.3f}) " \
+                                "N@1 {n1.val:.3f}({n1.avg:.3f}) N@5 {n5.val:.3f}({n5.avg:.3f}) ".\
+                    format(v1=verb_top1, v5=verb_top5, n1=noun_top1, n5=noun_top5)
 
             for loss_name in losses_dict:
                 if loss_name == "loss" or "mask" in loss_name:
@@ -675,6 +728,8 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
 
 def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, args, tf_writer=None):
     batch_time, top1, top5 = get_average_meters(3)
+    if args.dataset=="epic":
+        verb_top1, verb_top5, noun_top1, noun_top5 = get_average_meters(4)
     # TODO(yue)
     all_results = []
     all_targets = []
@@ -715,12 +770,26 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
                 loss_dict = {"loss": criterion(output, target[:, 0])}
 
             prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
+
+            if args.dataset == "epic":
+                verb_prec1, verb_prec5, noun_prec1, noun_prec5 = verb_noun_accuracy(
+                    val_loader.a_v_m, val_loader.a_n_m, output.data, target, topk=(1, 5))
+
             if dist.is_initialized():
                 world_size = dist.get_world_size()
                 dist.all_reduce(prec1)
                 dist.all_reduce(prec5)
                 prec1 /= world_size
                 prec5 /= world_size
+                if args.dataset == "epic":
+                    dist.all_reduce(verb_prec1)
+                    dist.all_reduce(verb_prec5)
+                    dist.all_reduce(noun_prec1)
+                    dist.all_reduce(noun_prec5)
+                    verb_prec1 /= world_size
+                    verb_prec5 /= world_size
+                    noun_prec1 /= world_size
+                    noun_prec5 /= world_size
 
             all_results.append(output)
             all_targets.append(target)
@@ -732,6 +801,11 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
                 losses_dict[loss_name].update(loss_dict[loss_name].item(), batchsize)
             top1.update(prec1.item(), batchsize)
             top5.update(prec5.item(), batchsize)
+            if args.dataset == "epic":
+                verb_top1.update(verb_prec1.item(), batchsize)
+                verb_top5.update(verb_prec5.item(), batchsize)
+                noun_top1.update(noun_prec1.item(), batchsize)
+                noun_top5.update(noun_prec5.item(), batchsize)
 
             if args.ada_reso_skip:
                 # gather masks
@@ -750,6 +824,10 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
                                 'Prec@5 {top5.val:.3f}({top5.avg:.3f})\t'.
                                 format(i, len(val_loader), batch_time=batch_time,
                                        loss=losses_dict["loss"], top1=top1, top5=top5))
+                if args.dataset == "epic":
+                    print_output += "V@1 {v1.val:.3f}({v1.avg:.3f}) V@5 {v5.val:.3f}({v5.avg:.3f}) " \
+                                    "N@1 {n1.val:.3f}({n1.avg:.3f}) N@5 {n5.val:.3f}({n5.avg:.3f}) ". \
+                        format(v1=verb_top1, v5=verb_top5, n1=noun_top1, n5=noun_top5)
 
                 for loss_name in losses_dict:
                     if loss_name == "loss" or "mask" in loss_name:
@@ -787,8 +865,13 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
         mmAP = mmAP_tensor.item()
 
     if args.rank==0:
-        print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} Loss {loss.avg:.5f}'
-              .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses_dict["loss"]))
+        epic_str=""
+        if args.dataset=="epic":
+            epic_str = "V@1: %.3f V@5: %.3f N@1: %.3f N@5: %.3f" % (verb_top1.avg, verb_top5.avg, noun_top1.avg, noun_top5.avg)
+
+        print('Testing: mAP {mAP:.3f} mmAP {mmAP:.3f} Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f} {epic_str:s} Loss {loss.avg:.5f}'
+              .format(mAP=mAP, mmAP=mmAP, top1=top1, top5=top5, loss=losses_dict["loss"],
+              epic_str=epic_str))
         if args.ada_reso_skip:
             usage_str = get_policy_usage_str(upb_batch_gflops, real_batch_gflops)
             print(usage_str)
@@ -803,7 +886,10 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
             tf_writer.add_scalar('acc/test_top5', top5.avg, epoch)
     else:
         usage_str = "Empty: non-master node"
-    return mAP, mmAP, top1.avg, top5.avg, usage_str
+    if args.dataset=="epic":
+        return mAP, mmAP, top1.avg, top5.avg, usage_str, (verb_top1.avg, verb_top5.avg, noun_top1.avg, noun_top5.avg)
+    else:
+        return mAP, mmAP, top1.avg, top5.avg, usage_str, None
 
 
 def save_checkpoint(state, is_best, shall_backup, exp_full_path, decorator):
@@ -921,6 +1007,14 @@ def get_data_loaders(model, prefix, args):
     train_loader = build_dataflow(train_dataset, True, args.batch_size, args.workers, args.distributed, args.not_pin_memory)
     val_loader = build_dataflow(val_dataset, False, args.batch_size, args.workers, args.distributed, args.not_pin_memory)
 
+    if args.dataset == "epic":
+        train_loader.a_v_m = train_dataset.a_v_m
+        train_loader.a_n_m = train_dataset.a_n_m
+        val_loader.a_v_m = val_dataset.a_v_m
+        val_loader.a_n_m = val_dataset.a_n_m
+        print("a_v_m",len(train_loader.a_v_m), len(set(train_loader.a_v_m.values())))
+        print("a_n_m", len(train_loader.a_n_m), len(set(train_loader.a_n_m.values())))
+
     return train_loader, val_loader
 
 def take_care_of_pretraining(sd, args):
@@ -932,7 +1026,7 @@ def take_care_of_pretraining(sd, args):
             elif "downsample1" in k:
                 old_to_new_pairs.append((k, k.replace("downsample1", "downsample.1")))
 
-    if args.downsample_0_renaming:
+    if args.downsample_0_renaming or (any([args.use_segk8, args.use_tsmk8, args.use_tsmk8]) and args.ada_reso_skip):
         for k in sd:
             if "downsample.0" in k:
                 old_to_new_pairs.append((k, k.replace("downsample.0", "downsample0")))
@@ -953,6 +1047,12 @@ def take_care_of_pretraining(sd, args):
                 old_to_new_pairs.append((k, k.replace("conv1.net.", "conv1.")))
     for old_key, new_key in old_to_new_pairs:
         sd[new_key] = sd.pop(old_key)
+
+    del_keys = []
+    if args.ignore_new_fc_weight or any([args.use_segk8, args.use_tsmk8, args.use_tsmk8]):
+        del_keys += [k for k in sd if "module.new_fc" in k]
+    for k in del_keys:
+        del sd[k]
 
     del_keys = []
     if args.ignore_loading_gate_fc:

@@ -41,6 +41,25 @@ def accuracy(output, target, topk=(1,)):
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
 
+def get_marginal_output(output, the_map, num_clusters):
+    # num_clusters = len(set(the_map.values()))
+    sub_output = torch.zeros_like(output[:, :num_clusters])
+    for k in the_map:
+        sub_output[:, the_map[k]] += output[:, k]
+    return sub_output
+
+def verb_noun_accuracy(a_v_map, a_n_map, output, target, topk):
+    verb_output = get_marginal_output(output, a_v_map, 125)
+    noun_output = get_marginal_output(output, a_n_map, 352)
+    # print(target)
+    # print(verb_output, target[:,1])
+    # print(noun_output, target[:,2])
+    # print("verb_out",verb_output)
+    # print("noun_output",noun_output)
+    verb_top1, verb_top5 = accuracy(verb_output, target[:, 1], topk)
+    noun_top1, noun_top5 = accuracy(noun_output, target[:, 2], topk)
+    return verb_top1, verb_top5, noun_top1, noun_top5
+
 def get_multi_hot(test_y, classes, assumes_starts_zero=True):
     bs = test_y.shape[0]
     label_cnt = 0
@@ -185,3 +204,15 @@ def count_fc_flops(input_data_shape, fc):
 #     if any([x[1]!="normal" for x in stack_list]):
 #         import ipdb
 #         ipdb.set_trace()
+
+
+# if __name__ == "__main__":
+#     output=torch.tensor([[0.6,0.05,0.15,0.10,0.10,0,0,0],[0.2,0.3,0.2,0.1,0.2,0,0,0],[0.2,0.2,0.1,0.1,0.4,0,0,0]])
+#     target = torch.tensor([[0,1,1],[3,0,1],[4,1,2]])
+#
+#     a_v_m={0:1, 1:0, 2:1, 3:0, 4:1, 5:2, 6:3}
+#     a_n_m={0:1, 1:0, 2:0, 3:1, 4:2, 5:2, 6:3}
+#
+#     top1, top5 = accuracy(output, target[:,0], topk=(1,5))
+#     verb_top1, verb_top5, noun_top1, noun_top5 = verb_noun_accuracy(a_v_m, a_n_m, output, target, topk=(1,3))
+#     print(top1, top5, verb_top1, verb_top5, noun_top1, noun_top5)

@@ -13,7 +13,7 @@ import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import torch.optim
 from torch.nn.utils import clip_grad_norm_
-
+import torch.nn.functional as f
 from ops.dataset import TSNDataSet
 from ops.models_gate import TSN_Gate
 from ops.models_ada import TSN_Ada
@@ -334,6 +334,7 @@ def compute_gflops_by_mask(mask_tensor_list, base_model_gflops, gflops_list, arg
     # TODO: saving = s1/C1 * [FLOPS(conv1)] + s0/C1 * [FLOPS(conv1) + FLOPS(conv2)]
     upperbound_gflops = base_model_gflops
     real_gflops = base_model_gflops
+
     if "bate" in args.arch:
         for m_i, mask in enumerate(mask_tensor_list):
             #compute precise GFLOPS
@@ -343,7 +344,7 @@ def compute_gflops_by_mask(mask_tensor_list, base_model_gflops, gflops_list, arg
                     upsave[:, t] = (1 - mask[:, t, :, -1]) * (1 - mask[:, t + 1, :, -2])
                 else:
                     upsave[:, t] = 1 - mask[:, t, :, -1] # since no reusing, as long as not keeping, save from upstream conv
-            upsave[:, -1] = 1-mask[:, t, :, -1]
+            upsave[:, -1] = 1 - mask[:, t, :, -1]
             upsave = torch.mean(upsave)
 
             if args.gate_no_skipping: # downstream conv gflops' saving is from skippings
@@ -364,7 +365,7 @@ def compute_gflops_by_mask(mask_tensor_list, base_model_gflops, gflops_list, arg
                 layer_i = m_i
             up_flops = gflops_list[layer_i][0 + conv_offset] / 1e9
             down_flops = gflops_list[layer_i][1 + conv_offset] * real_count / 1e9
-            embed_conv_flops=gflops_list[layer_i][-1] * real_count / 1e9
+            embed_conv_flops = gflops_list[layer_i][-1] * real_count / 1e9
 
             upperbound_gflops = upperbound_gflops - downsave * (down_flops - embed_conv_flops) # in worst case, we only compute saving from downstream conv
             real_gflops = real_gflops - upsave * up_flops - downsave * (down_flops - embed_conv_flops)
@@ -391,7 +392,7 @@ def compute_gflops_by_mask(mask_tensor_list, base_model_gflops, gflops_list, arg
 
 def print_mask_statistics(mask_tensor_list, args):
     if "cgnet" in args.arch:
-        cnt_ = [torch.sum(x, dim=[0, 1]) for x in mask_tensor_list]
+        cnt_ = [torch.sum(x, dim=[0, 1]) for x in mask_tensor_list] # sum up over t
         cnt_out = sum([x[0] for x in cnt_])
         cnt_full = sum([x[1] for x in cnt_])
         print("Overall sparsity: %.4f"%(1-1.0*cnt_full/cnt_out))
@@ -412,81 +413,76 @@ def print_mask_statistics(mask_tensor_list, args):
         else:
             dim_str = ["save", "curr"]
 
-        for b_i in [None]: #[None, 0]:
-            print("For example(b=0):" if b_i == 0 else "Overall:")
-            b_start = b_i if b_i is not None else 0
-            b_end = b_i + 1 if b_i is not None else mask_tensor_list[0].shape[0]
+        print("Overall:")
 
-            for t_i in [None]: #[None, num_segments // 2]:  # "[None, 0, num_segments // 2, num_segments - 1]:
-                t_start = t_i if t_i is not None else 0
-                t_end = t_i + 1 if t_i is not None else mask_tensor_list[0].shape[1]
-                for dim_i in range(len(dim_str)):
-                    s_list = []
-                    d_list = []
-                    p_list = []
+        normalized_tensor_list=[]
+        for mask in mask_tensor_list:
+            normalized_tensor_list.append(f.normalize(mask, dim=-1, p=1))
 
-                    layer_i_list = [iii for iii in range(len(mask_tensor_list))]
-                    cap_length = 8
-                    if len(mask_tensor_list) > cap_length:
-                        layer_i_list = [int(iii) for iii in np.linspace(0, len(mask_tensor_list)-1, cap_length, endpoint=True)]
+        for t_i in [None]: #[None, num_segments // 2]:  # "[None, 0, num_segments // 2, num_segments - 1]:
+            t_start = t_i if t_i is not None else 0
+            t_end = t_i + 1 if t_i is not None else mask_tensor_list[0].shape[0]
+            for dim_i in range(len(dim_str)):
+                s_list = []
 
-                    for layer_i in layer_i_list:
-                        s_list.append(torch.mean(mask_tensor_list[layer_i][b_start:b_end, t_start:t_end, :, dim_i]))
-                        d_list.append(
-                            torch.std(torch.mean(mask_tensor_list[layer_i][b_start:b_end, t_start:t_end, :, dim_i], dim=-1),
-                                      unbiased=not (b_i == 0)))
-                        # TODO channel-wise fire percentage for instances
-                        # TODO this can be a channel percentage histogram, ranged from 0~1, where we only count five buckets
-                        # TODO (0.00~0.20) (0.20~0.40) (0.40~0.60) (0.60~0.80) (0.80~1.00)
-                        percentage = torch.mean(mask_tensor_list[layer_i][b_start:b_end, t_start:t_end, :, dim_i],
-                                                dim=[0, 1])
-                        p_list.append(torch.histc(percentage, bins=5, min=0, max=1) / percentage.shape[0])
-                    t = "%3d" % t_i if t_i is not None else "all"
-                    print("(t=%s, %s)usage: " % (t, dim_str[dim_i]),
-                          "  ".join(["%.4f(%.4f) " % (s, d) for s, d in zip(s_list, d_list)]))
-                    print("                  ",
-                          " ".join(["(" + (",".join(["%02d" % (min(99, x * 100)) for x in p])) + ")" for p in p_list]))
+                layer_i_list = [iii for iii in range(len(mask_tensor_list))]
+                cap_length = 8
+                if len(mask_tensor_list) > cap_length:
+                    layer_i_list = [int(iii) for iii in np.linspace(0, len(mask_tensor_list)-1, cap_length, endpoint=True)]
+
+                for layer_i in layer_i_list:
+                    s_list.append(torch.mean(normalized_tensor_list[layer_i][t_start:t_end, :, dim_i]))
+                    # d_list.append(
+                    #     torch.std(torch.mean(mask_tensor_list[layer_i][t_start:t_end, :, dim_i], dim=-1), unbiased=True))
+                    # TODO channel-wise fire percentage for instances
+                    # TODO this can be a channel percentage histogram, ranged from 0~1, where we only count five buckets
+                    # TODO (0.00~0.20) (0.20~0.40) (0.40~0.60) (0.60~0.80) (0.80~1.00)
+                    # percentage = torch.mean(mask_tensor_list[layer_i][t_start:t_end, :, dim_i], dim=[0])
+                    # p_list.append(torch.histc(percentage, bins=5, min=0, max=1) / percentage.shape[0])
+                t = "%3d" % t_i if t_i is not None else "all"
+                print("(t=%s, %s)usage: " % (t, dim_str[dim_i]),
+                      "  ".join(["%.4f " % (s) for s in s_list]))
+                # print("                  ",
+                #       " ".join(["(" + (",".join(["%02d" % (min(99, x * 100)) for x in p])) + ")" for p in p_list]))
             print()
 
-
-
-        if args.dense_in_block:
-            stat_skip0 = 0
-            stat_reuse0 = 0
-            stat_keep0 = 0
-            stat_skip1 = 0
-            stat_reuse1 = 0
-            stat_keep1 = 0
-            for layer_i, mask in enumerate(mask_tensor_list):
-                if layer_i % 2 == 0:
-                    if not args.gate_no_skipping:
-                        stat_skip0 += torch.sum(mask[:, :, :, 0]).item()
-                    if args.gate_history:
-                        stat_reuse0 += torch.sum(mask[:, :, :, -2]).item()
-                    stat_keep0 += torch.sum(mask[:, :, :, -1]).item()
-                else:
-                    if not args.gate_no_skipping:
-                        stat_skip1 += torch.sum(mask[:, :, :, 0]).item()
-                    if args.gate_history:
-                        stat_reuse1 += torch.sum(mask[:, :, :, -2]).item()
-                    stat_keep1 += torch.sum(mask[:, :, :, -1]).item()
-            stat_total0 = stat_skip0 + stat_reuse0 + stat_keep0
-            stat_total1 = stat_skip1 + stat_reuse1 + stat_keep1
-            print("(=0)\nskip : %.4f  reuse: %.4f  keep : %.4f"
-                  % (stat_skip0 / stat_total0, stat_reuse0 / stat_total0, stat_keep0 / stat_total0))
-
-            print("(=1)\nskip : %.4f  reuse: %.4f  keep : %.4f"
-                  % (stat_skip1 / stat_total1, stat_reuse1 / stat_total1, stat_keep1 / stat_total1))
+        # if args.dense_in_block:
+        #     stat_skip0 = 0
+        #     stat_reuse0 = 0
+        #     stat_keep0 = 0
+        #     stat_skip1 = 0
+        #     stat_reuse1 = 0
+        #     stat_keep1 = 0
+        #     for layer_i, mask in enumerate(mask_tensor_list):
+        #         if layer_i % 2 == 0:
+        #             if not args.gate_no_skipping:
+        #                 stat_skip0 += torch.sum(mask[:, :, :, 0]).item()
+        #             if args.gate_history:
+        #                 stat_reuse0 += torch.sum(mask[:, :, :, -2]).item()
+        #             stat_keep0 += torch.sum(mask[:, :, :, -1]).item()
+        #         else:
+        #             if not args.gate_no_skipping:
+        #                 stat_skip1 += torch.sum(mask[:, :, :, 0]).item()
+        #             if args.gate_history:
+        #                 stat_reuse1 += torch.sum(mask[:, :, :, -2]).item()
+        #             stat_keep1 += torch.sum(mask[:, :, :, -1]).item()
+        #     stat_total0 = stat_skip0 + stat_reuse0 + stat_keep0
+        #     stat_total1 = stat_skip1 + stat_reuse1 + stat_keep1
+        #     print("(=0)\nskip : %.4f  reuse: %.4f  keep : %.4f"
+        #           % (stat_skip0 / stat_total0, stat_reuse0 / stat_total0, stat_keep0 / stat_total0))
+        #
+        #     print("(=1)\nskip : %.4f  reuse: %.4f  keep : %.4f"
+        #           % (stat_skip1 / stat_total1, stat_reuse1 / stat_total1, stat_keep1 / stat_total1))
 
         stat_skip = 0
         stat_reuse = 0
         stat_keep = 0
         for mask in mask_tensor_list:
             if not args.gate_no_skipping:
-                stat_skip += torch.sum(mask[:, :, :, 0]).item()
+                stat_skip += torch.sum(mask[:, :, 0]).item()
             if args.gate_history:
-                stat_reuse += torch.sum(mask[:, :, :, -2]).item()
-            stat_keep += torch.sum(mask[:, :, :, -1]).item()
+                stat_reuse += torch.sum(mask[:, :, -2]).item()
+            stat_keep += torch.sum(mask[:, :, -1]).item()
 
         stat_total = stat_skip + stat_reuse + stat_keep
         print("(overall)\nskip : %.4f  reuse: %.4f  keep : %.4f\n"
@@ -583,7 +579,13 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
         verb_top1, verb_top5, noun_top1, noun_top5 = get_average_meters(4)
     losses_dict = {}
     if args.ada_reso_skip:
-        mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _ in gflops_list]
+        # mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _ in gflops_list]
+        mask_stack_list_list = [0 for _ in gflops_list] + [0 for _ in gflops_list] if args.dense_in_block else [0 for
+                                                                                                                  _ in
+                                                                                                                  gflops_list]
+        upb_batch_gflops_list=[]
+        real_batch_gflops_list=[]
+
     tau = get_current_temperature(epoch, args)
 
     # switch to train mode
@@ -619,8 +621,13 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
             model(input=input_var_list, tau=tau, is_training=True, curr_step=epoch * len(train_loader) + i)
 
         if args.ada_reso_skip:
+            # for m_i in range(len(mask_stack_list)):
+            #     mask_stack_list[m_i] = torch.sum(mask_stack_list[m_i], dim=0)
+            #     mask_stack_list[m_i] = f.normalize(mask_stack_list[m_i], dim=-1, p=1)
             upb_gflops_tensor, real_gflops_tensor = compute_gflops_by_mask(mask_stack_list, base_model_gflops, gflops_list, args)
             loss_dict = compute_losses(criterion, output, target_var[:, 0], mask_stack_list, upb_gflops_tensor, real_gflops_tensor, epoch, model, args)
+            upb_batch_gflops_list.append(upb_gflops_tensor.detach())
+            real_batch_gflops_list.append(real_gflops_tensor.detach())
         else:
             loss_dict = {"loss": criterion(output, target_var[:, 0])}
         prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
@@ -669,7 +676,8 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
         # gather masks
         if args.ada_reso_skip:
             for layer_i, mask_stack in enumerate(mask_stack_list):
-                mask_stack_list_list[layer_i].append(mask_stack.detach()) #TODO removed cpu()
+                # mask_stack_list_list[layer_i].append(mask_stack.detach()) #TODO removed cpu()
+                mask_stack_list_list[layer_i] += torch.sum(mask_stack.detach(), dim=0)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -698,9 +706,11 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
                     format(header=loss_name[0], loss=losses_dict[loss_name])
             print(print_output)
     if args.ada_reso_skip:
-        for layer_i in range(len(mask_stack_list_list)):
-            mask_stack_list_list[layer_i] = torch.cat(mask_stack_list_list[layer_i], dim=0)
-        upb_batch_gflops, real_batch_gflops = compute_gflops_by_mask(mask_stack_list_list, base_model_gflops, gflops_list, args)
+        # for layer_i in range(len(mask_stack_list_list)):
+        #     mask_stack_list_list[layer_i] = torch.cat(mask_stack_list_list[layer_i], dim=0)
+        # upb_batch_gflops, real_batch_gflops = compute_gflops_by_mask(mask_stack_list_list, base_model_gflops, gflops_list, args)
+        upb_batch_gflops= torch.mean(torch.stack(upb_batch_gflops_list))
+        real_batch_gflops = torch.mean(torch.stack(real_batch_gflops_list))
         if dist.is_initialized():
             world_size = dist.get_world_size()
             dist.all_reduce(upb_batch_gflops)
@@ -737,9 +747,12 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
     tau = get_current_temperature(epoch, args)
 
     if args.ada_reso_skip:
-        mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _
-                                                                                                               in
-                                                                                                               gflops_list]
+        # mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _ in gflops_list]
+        mask_stack_list_list = [0 for _ in gflops_list] + [0 for _ in gflops_list] if args.dense_in_block else [0 for
+                                                                                                                  _ in
+                                                                                                                  gflops_list]
+        upb_batch_gflops_list = []
+        real_batch_gflops_list = []
 
     losses_dict={}
 
@@ -766,6 +779,8 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
             if args.ada_reso_skip:
                 upb_gflops_tensor, real_gflops_tensor = compute_gflops_by_mask(mask_stack_list, base_model_gflops, gflops_list, args)
                 loss_dict = compute_losses(criterion, output, target[:, 0], mask_stack_list, upb_gflops_tensor, real_gflops_tensor, epoch, model, args)
+                upb_batch_gflops_list.append(upb_gflops_tensor)
+                real_batch_gflops_list.append(real_gflops_tensor)
             else:
                 loss_dict = {"loss": criterion(output, target[:, 0])}
 
@@ -810,7 +825,8 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
             if args.ada_reso_skip:
                 # gather masks
                 for layer_i, mask_stack in enumerate(mask_stack_list):
-                    mask_stack_list_list[layer_i].append(mask_stack.detach()) #TODO remvoed .cpu()
+                    # mask_stack_list_list[layer_i].append(mask_stack.detach()) #TODO remvoed .cpu()
+                    mask_stack_list_list[layer_i] += torch.sum(mask_stack.detach(), dim=0)  # TODO remvoed .cpu()
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -836,9 +852,11 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
                         format(header=loss_name[0], loss=losses_dict[loss_name])
                 print(print_output)
     if args.ada_reso_skip:
-        for layer_i in range(len(mask_stack_list_list)):
-            mask_stack_list_list[layer_i] = torch.cat(mask_stack_list_list[layer_i], dim=0)
-        upb_batch_gflops, real_batch_gflops = compute_gflops_by_mask(mask_stack_list_list, base_model_gflops, gflops_list, args)
+        # for layer_i in range(len(mask_stack_list_list)):
+        #     mask_stack_list_list[layer_i] = torch.cat(mask_stack_list_list[layer_i], dim=0)
+        # upb_batch_gflops, real_batch_gflops = compute_gflops_by_mask(mask_stack_list_list, base_model_gflops, gflops_list, args)
+        upb_batch_gflops = torch.mean(torch.stack(upb_batch_gflops_list))
+        real_batch_gflops = torch.mean(torch.stack(real_batch_gflops_list))
 
     mAP, _ = cal_map(torch.cat(all_results, 0).cpu(),
                      torch.cat(all_targets, 0)[:, 0:1].cpu())  # TODO(yue) single-label mAP

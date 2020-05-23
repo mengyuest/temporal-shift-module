@@ -75,6 +75,12 @@ class TSN_Gate(nn.Module):
         if "cgnet" in self.args.arch:
             for i in range(len(mask_stack_list)):
                 mask_stack_list[i] = torch.stack(mask_stack_list[i], dim=1)  # TODO: B*T*K
+        # elif "batenet" in self.args.arch:
+        #     for i in range(len(mask_stack_list)):
+        #         print(mask_stack_list[i].shape)
+        #         mask_stack_list[i] = mask_stack_list[i].view(_b, _t, mask_stack_list[i].shape[1], mask_stack_list[i].shape[2])  # TODO: B*T*K
+        #         print(mask_stack_list[i].shape)
+        #         print(mask_stack_list[i].shape)
         return output, mask_stack_list, None, torch.stack([base_out], dim=1)
 
     @property

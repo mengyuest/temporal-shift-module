@@ -76,13 +76,17 @@ class TSNDataSet(data.Dataset):
         self.rank = rank
 
         if self.dataset == "epic":
-            self.a_v_m={}
-            self.a_n_m={}
+            self.a_v_m = torch.zeros(2513, 125)
+            self.a_n_m = torch.zeros(2513, 352)
             lines = open("data/epic_kitchens2018/classInd.txt").readlines()
             for l in lines:
                 items = l.strip().split(",")
-                self.a_v_m[int(items[0])] = int(items[2])
-                self.a_n_m[int(items[0])] = int(items[3])
+                self.a_v_m[int(items[0]), int(items[2])] = 1
+                self.a_n_m[int(items[0]), int(items[3])] = 1
+                # self.a_v_m[int(items[0])] = int(items[2])
+                # self.a_n_m[int(items[0])] = int(items[3])
+            self.a_v_m = self.a_v_m.cuda()
+            self.a_n_m = self.a_n_m.cuda()
 
         if self.dense_sample:
             if self.rank==0:

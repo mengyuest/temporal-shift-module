@@ -134,10 +134,12 @@ class TSN_Gate(nn.Module):
         lr10_bias = []
         bn = []
         custom_ops = []
+        gate_ops_weight = []
+        gate_ops_bias = []
 
         conv_cnt = 0
         bn_cnt = 0
-        for m in self.modules():
+        for m_name, m in self.named_modules():
             if isinstance(m, torch.nn.Conv2d) or isinstance(m, torch.nn.Conv1d) or isinstance(m, CGConv2dNew):
                 ps = list(m.parameters())
                 if isinstance(m, CGConv2dNew):
@@ -153,23 +155,25 @@ class TSN_Gate(nn.Module):
                     normal_weight.append(ps[0])
                     if len(ps) == 2:
                         normal_bias.append(ps[1])
+
+            elif isinstance(m, torch.nn.BatchNorm1d) and "gate_bn" in m_name:
+                if not self.args.gate_npb:
+                    bn.extend(list(m.parameters()))
+
+            elif self.args.gate_lr_factor != 1 and "gate_fc" in m_name and isinstance(m, torch.nn.Linear):
+                assert(isinstance(m, torch.nn.Linear) == False)
+                ps = list(m.parameters())
+                gate_ops_weight.append(ps[0])
+                if len(ps) == 2:
+                    gate_ops_bias.append(ps[1])
+
             elif isinstance(m, torch.nn.Linear):
                 ps = list(m.parameters())
                 normal_weight.append(ps[0])
                 if len(ps) == 2:
                     normal_bias.append(ps[1])
 
-            elif isinstance(m, torch.nn.BatchNorm1d):
-                bn_cnt += 1
-                # later BN's are frozen
-                if not self._enable_pbn or bn_cnt == 1:
-                    bn.extend(list(m.parameters()))
             elif isinstance(m, torch.nn.BatchNorm2d):
-                bn_cnt += 1
-                # later BN's are frozen
-                if not self._enable_pbn or bn_cnt == 1:
-                    bn.extend(list(m.parameters()))
-            elif isinstance(m, torch.nn.BatchNorm3d):
                 bn_cnt += 1
                 # later BN's are frozen
                 if not self._enable_pbn or bn_cnt == 1:
@@ -199,6 +203,10 @@ class TSN_Gate(nn.Module):
              'name': "BN scale/shift"},
             {'params': custom_ops, 'lr_mult': 1, 'decay_mult': 1,
              'name': "custom_ops"},
+            # for gate policy
+            {'params': gate_ops_weight, 'lr_mult': self.args.gate_lr_factor, 'decay_mult': 1,
+             'name': "gate_ops_weight"},
+            {'params': gate_ops_bias, 'lr_mult': self.args.gate_lr_factor * 2, 'decay_mult': 0},
             # for fc
             {'params': lr5_weight, 'lr_mult': 5, 'decay_mult': 1,
              'name': "lr5_weight"},

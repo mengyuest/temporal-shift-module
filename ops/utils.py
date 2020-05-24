@@ -43,9 +43,10 @@ def accuracy(output, target, topk=(1,)):
 
 def get_marginal_output(output, the_map, num_clusters):
     # num_clusters = len(set(the_map.values()))
-    sub_output = torch.zeros_like(output[:, :num_clusters])
-    for k in the_map:
-        sub_output[:, the_map[k]] += output[:, k]
+    # sub_output = torch.zeros_like(output[:, :num_clusters])
+    # for k in the_map:
+    #     sub_output[:, the_map[k]] += output[:, k]
+    sub_output = torch.matmul(output, the_map)
     return sub_output
 
 def verb_noun_accuracy(a_v_map, a_n_map, output, target, topk):

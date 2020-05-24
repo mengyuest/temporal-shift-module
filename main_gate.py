@@ -19,7 +19,7 @@ from ops.models_gate import TSN_Gate
 from ops.models_ada import TSN_Ada
 from ops.transforms import *
 from ops import dataset_config
-from ops.utils import AverageMeter, accuracy, cal_map, Recorder, verb_noun_accuracy
+from ops.utils import AverageMeter, accuracy, cal_map, Recorder, verb_noun_accuracy, get_marginal_output
 from opts import parser
 
 from tensorboardX import SummaryWriter
@@ -254,8 +254,8 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
                 epic_str = ""
                 if args.dataset == "epic":
                     epic_str = "V@1:%.3f V@5:%.3f N@1:%.3f N@5:%.3f" % (
-                        verb_prec1_record.at(prec_record.best_at), verb_prec5_record.at(prec_record.best_at),
-                        noun_prec1_record.at(prec_record.best_at), noun_prec5_record.at(prec_record.best_at)
+                        verb_prec1_record.best_val, verb_prec5_record.best_val,
+                        noun_prec1_record.best_val, noun_prec5_record.best_val
                     )
 
                 print('Best mAP: %.3f (epoch=%d)\tBest mmAP: %.3f(epoch=%d)\tBest Prec@1: %.3f (epoch=%d) w. Prec@5: %.3f %s' % (
@@ -500,8 +500,16 @@ def reverse_onehot(a):
             print(i, r)
         return None
 
+def compute_epic_losses(criterion, prediction, target, a_v_m, a_n_m):
+    v_pred = get_marginal_output(prediction, a_v_m, 125)
+    n_pred = get_marginal_output(prediction, a_n_m, 352)
+    v_acc_loss = criterion(v_pred, target[:, 1])
+    n_acc_loss = criterion(n_pred, target[:, 2])
+    acc_loss = v_acc_loss + n_acc_loss
+    return v_acc_loss, n_acc_loss, acc_loss
 
-def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_tensor, real_gflops_tensor, epoch_i, model, args):
+def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_tensor, real_gflops_tensor, epoch_i, model,
+                   a_v_m, a_n_m, args):
     if args.gflops_loss_type == "real":
         gflops_tensor = real_gflops_tensor
     else:
@@ -514,7 +522,10 @@ def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_te
         factor = 1.
 
     # accuracy loss
-    acc_loss = criterion(prediction, target)
+    if args.dataset == "epic":  # combined_verb/noun_losses
+        v_acc_loss, n_acc_loss, acc_loss = compute_epic_losses(criterion, prediction, target, a_v_m, a_n_m)
+    else:
+        acc_loss = criterion(prediction, target[:, 0])
 
     # gflops loss
     gflops_loss = acc_loss * 0
@@ -530,13 +541,24 @@ def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_te
                 thres_loss += args.threshold_loss_weight * torch.sum((param-args.gtarget) ** 2)
 
     loss = acc_loss + gflops_loss + thres_loss
-    return {
-        "loss": loss,
-        "acc_loss": acc_loss,
-        "eff_loss": loss - acc_loss,
-        "gflops_loss": gflops_loss,
-        "thres_loss": thres_loss,
-    }
+    if args.dataset == "epic":
+        return {
+            "loss": loss,
+            "verb_loss": v_acc_loss,
+            "noun_loss": n_acc_loss,
+            "eff_loss": loss - acc_loss,
+            "gflops_loss": gflops_loss,
+            "thres_loss": thres_loss,
+        }
+
+    else:
+        return {
+            "loss": loss,
+            "acc_loss": acc_loss,
+            "eff_loss": loss - acc_loss,
+            "gflops_loss": gflops_loss,
+            "thres_loss": thres_loss,
+        }
 
 def elastic_list_print(l, limit=8):
     if isinstance(l, str):
@@ -625,11 +647,18 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
             #     mask_stack_list[m_i] = torch.sum(mask_stack_list[m_i], dim=0)
             #     mask_stack_list[m_i] = f.normalize(mask_stack_list[m_i], dim=-1, p=1)
             upb_gflops_tensor, real_gflops_tensor = compute_gflops_by_mask(mask_stack_list, base_model_gflops, gflops_list, args)
-            loss_dict = compute_losses(criterion, output, target_var[:, 0], mask_stack_list, upb_gflops_tensor, real_gflops_tensor, epoch, model, args)
+            loss_dict = compute_losses(criterion, output, target_var, mask_stack_list,
+                                       upb_gflops_tensor, real_gflops_tensor, epoch, model,
+                                       train_loader.a_v_m, train_loader.a_n_m, args)
             upb_batch_gflops_list.append(upb_gflops_tensor.detach())
             real_batch_gflops_list.append(real_gflops_tensor.detach())
         else:
-            loss_dict = {"loss": criterion(output, target_var[:, 0])}
+            if args.dataset == "epic":
+                v_acc_loss, n_acc_loss, acc_loss = compute_epic_losses(criterion, output, target_var,
+                                                                       train_loader.a_v_m, train_loader.a_n_m)
+                loss_dict = {"loss": acc_loss, "verb_loss": v_acc_loss, "noun_loss": n_acc_loss}
+            else:
+                loss_dict = {"loss": criterion(output, target_var[:, 0])}
         prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
 
         if args.dataset == "epic":
@@ -695,14 +724,14 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
                 data_time=data_time, loss=losses_dict["loss"], top1=top1, top5=top5))  # TODO
 
             if args.dataset=="epic":
-                print_output += "V@1 {v1.val:.3f}({v1.avg:.3f}) V@5 {v5.val:.3f}({v5.avg:.3f}) " \
-                                "N@1 {n1.val:.3f}({n1.avg:.3f}) N@5 {n5.val:.3f}({n5.avg:.3f}) ".\
+                print_output += "V@1({v1.avg:.3f}) ({v5.avg:.3f}) " \
+                                "N@1({n1.avg:.3f}) ({n5.avg:.3f}) ".\
                     format(v1=verb_top1, v5=verb_top5, n1=noun_top1, n5=noun_top5)
 
             for loss_name in losses_dict:
                 if loss_name == "loss" or "mask" in loss_name:
                     continue
-                print_output += ' {header:s} {loss.val:.3f}({loss.avg:.3f})'.\
+                print_output += ' {header:s} ({loss.avg:.3f})'.\
                     format(header=loss_name[0], loss=losses_dict[loss_name])
             print(print_output)
     if args.ada_reso_skip:
@@ -778,11 +807,18 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
             # measure losses, accuracy and predictions
             if args.ada_reso_skip:
                 upb_gflops_tensor, real_gflops_tensor = compute_gflops_by_mask(mask_stack_list, base_model_gflops, gflops_list, args)
-                loss_dict = compute_losses(criterion, output, target[:, 0], mask_stack_list, upb_gflops_tensor, real_gflops_tensor, epoch, model, args)
+                loss_dict = compute_losses(criterion, output, target, mask_stack_list,
+                                           upb_gflops_tensor, real_gflops_tensor, epoch, model,
+                                           val_loader.a_v_m, val_loader.a_n_m, args)
                 upb_batch_gflops_list.append(upb_gflops_tensor)
                 real_batch_gflops_list.append(real_gflops_tensor)
             else:
-                loss_dict = {"loss": criterion(output, target[:, 0])}
+                if args.dataset=="epic":
+                    v_acc_loss, n_acc_loss, acc_loss = compute_epic_losses(criterion, output, target,
+                                                                           val_loader.a_v_m, val_loader.a_n_m)
+                    loss_dict = {"loss": acc_loss, "verb_loss": v_acc_loss, "noun_loss": n_acc_loss}
+                else:
+                    loss_dict = {"loss": criterion(output, target[:, 0])}
 
             prec1, prec5 = accuracy(output.data, target[:, 0], topk=(1, 5))
 
@@ -1030,8 +1066,8 @@ def get_data_loaders(model, prefix, args):
         train_loader.a_n_m = train_dataset.a_n_m
         val_loader.a_v_m = val_dataset.a_v_m
         val_loader.a_n_m = val_dataset.a_n_m
-        print("a_v_m",len(train_loader.a_v_m), len(set(train_loader.a_v_m.values())))
-        print("a_n_m", len(train_loader.a_n_m), len(set(train_loader.a_n_m.values())))
+        # print("a_v_m",len(train_loader.a_v_m), len(set(train_loader.a_v_m.values())))
+        # print("a_n_m", len(train_loader.a_n_m), len(set(train_loader.a_n_m.values())))
 
     return train_loader, val_loader
 

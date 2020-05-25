@@ -113,17 +113,21 @@ def return_epic_noun(modality):
 
 
 def return_something(modality):
-    filename_categories = 'something/v1/category.txt'
+    # filename_categories = 'something/v1/category.txt'
+    filename_categories = ospj(common.STHV1_META_PATH,'classInd.txt')
     if modality == 'RGB':
-        root_data = ROOT_DATASET + 'something/v1/20bn-something-something-v1'
-        filename_imglist_train = 'something/v1/train_videofolder.txt'
-        filename_imglist_val = 'something/v1/val_videofolder.txt'
+        # root_data = ROOT_DATASET + 'something/v1/20bn-something-something-v1'
+        # filename_imglist_train = 'something/v1/train_videofolder.txt'
+        # filename_imglist_val = 'something/v1/val_videofolder.txt'
+        root_data = common.STHV1_FRAMES
+        filename_imglist_train = ospj(common.STHV1_META_PATH, "train_split.txt")
+        filename_imglist_val = ospj(common.STHV1_META_PATH, "validation_split.txt")
         prefix = '{:05d}.jpg'
-    elif modality == 'Flow':
-        root_data = ROOT_DATASET + 'something/v1/20bn-something-something-v1-flow'
-        filename_imglist_train = 'something/v1/train_videofolder_flow.txt'
-        filename_imglist_val = 'something/v1/val_videofolder_flow.txt'
-        prefix = '{:06d}-{}_{:05d}.jpg'
+    # elif modality == 'Flow':
+    #     root_data = ROOT_DATASET + 'something/v1/20bn-something-something-v1-flow'
+    #     filename_imglist_train = 'something/v1/train_videofolder_flow.txt'
+    #     filename_imglist_val = 'something/v1/val_videofolder_flow.txt'
+    #     prefix = '{:06d}-{}_{:05d}.jpg'
     else:
         print('no such modality:'+modality)
         raise NotImplementedError

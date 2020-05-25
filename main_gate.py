@@ -474,17 +474,20 @@ def print_mask_statistics(mask_tensor_list, args):
         #     print("(=1)\nskip : %.4f  reuse: %.4f  keep : %.4f"
         #           % (stat_skip1 / stat_total1, stat_reuse1 / stat_total1, stat_keep1 / stat_total1))
 
-        stat_skip = 0
-        stat_reuse = 0
-        stat_keep = 0
-        for mask in mask_tensor_list:
-            if not args.gate_no_skipping:
-                stat_skip += torch.sum(mask[:, :, 0]).item()
-            if args.gate_history:
-                stat_reuse += torch.sum(mask[:, :, -2]).item()
-            stat_keep += torch.sum(mask[:, :, -1]).item()
+        # stat_skip = 0
+        # stat_reuse = 0
+        # stat_keep = 0
+        # for mask in mask_tensor_list:
+        #     if not args.gate_no_skipping:
+        #         stat_skip += torch.sum(mask[:, :, 0]).item()
+        #     if args.gate_history:
+        #         stat_reuse += torch.sum(mask[:, :, -2]).item()
+        #     stat_keep += torch.sum(mask[:, :, -1]).item()
+        #
+        # stat_total = stat_skip + stat_reuse + stat_keep
 
-        stat_total = stat_skip + stat_reuse + stat_keep
+        stat_skip, stat_reuse, stat_keep, stat_total = get_mask_usage(mask_tensor_list, args)
+
         print("(overall)\nskip : %.4f  reuse: %.4f  keep : %.4f\n"
               % (stat_skip/stat_total, stat_reuse/stat_total, stat_keep/stat_total))
 
@@ -500,6 +503,20 @@ def reverse_onehot(a):
             print(i, r)
         return None
 
+def get_mask_usage(mask_tensor_list, args):
+    stat_skip = 0
+    stat_reuse = 0
+    stat_keep = 0
+    for mask in mask_tensor_list:
+        if not args.gate_no_skipping:
+            stat_skip += torch.sum(mask[:, :, 0])
+        if args.gate_history:
+            stat_reuse += torch.sum(mask[:, :, -2])
+        stat_keep += torch.sum(mask[:, :, -1])
+
+    stat_total = stat_skip + stat_reuse + stat_keep
+    return stat_skip, stat_reuse, stat_keep, stat_total
+
 def compute_epic_losses(criterion, prediction, target, a_v_m, a_n_m):
     v_pred = get_marginal_output(prediction, a_v_m, 125)
     n_pred = get_marginal_output(prediction, a_n_m, 352)
@@ -510,6 +527,7 @@ def compute_epic_losses(criterion, prediction, target, a_v_m, a_n_m):
 
 def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_tensor, real_gflops_tensor, epoch_i, model,
                    a_v_m, a_n_m, args):
+    loss_dict={}
     if args.gflops_loss_type == "real":
         gflops_tensor = real_gflops_tensor
     else:
@@ -524,13 +542,29 @@ def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_te
     # accuracy loss
     if args.dataset == "epic":  # combined_verb/noun_losses
         v_acc_loss, n_acc_loss, acc_loss = compute_epic_losses(criterion, prediction, target, a_v_m, a_n_m)
+        loss_dict["verb_loss"] = v_acc_loss
+        loss_dict["noun_loss"] = n_acc_loss
     else:
         acc_loss = criterion(prediction, target[:, 0])
+        loss_dict["acc_loss"] = acc_loss
 
+    loss_dict["eff_loss"] = acc_loss * 0
     # gflops loss
     gflops_loss = acc_loss * 0
     if args.gate_gflops_loss_weight > 0:
         gflops_loss = torch.abs(gflops_tensor - args.gate_gflops_bias) * args.gate_gflops_loss_weight * factor
+        loss_dict["gflops_loss"] = gflops_loss
+        loss_dict["eff_loss"] += gflops_loss
+
+    # regularizer loss
+    regu_loss = acc_loss * 0
+    if args.keep_weight > 0 or args.reuse_weight>0 or args.skip_weight>0:
+        stat_skip, stat_reuse, stat_keep, stat_total = get_mask_usage(mask_stack_list, args)
+        regu_loss += args.skip_weight * (((stat_skip / stat_total - args.skip_ratio) / args.skip_ratio) ** 2)
+        regu_loss += args.reuse_weight * (((stat_reuse / stat_total - args.reuse_ratio) / args.reuse_ratio) ** 2)
+        regu_loss += args.keep_weight * (((stat_keep / stat_total - args.keep_ratio) / args.keep_ratio) ** 2)
+        loss_dict["regu_loss"] = regu_loss
+        loss_dict["eff_loss"] += regu_loss
 
     # threshold loss for cgnet
     thres_loss = acc_loss * 0
@@ -539,26 +573,31 @@ def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_te
             if 'threshold' in name:
                 # print(param)
                 thres_loss += args.threshold_loss_weight * torch.sum((param-args.gtarget) ** 2)
-
+        loss_dict["thres_loss"] = thres_loss
+        loss_dict["eff_loss"] += thres_loss
     loss = acc_loss + gflops_loss + thres_loss
-    if args.dataset == "epic":
-        return {
-            "loss": loss,
-            "verb_loss": v_acc_loss,
-            "noun_loss": n_acc_loss,
-            "eff_loss": loss - acc_loss,
-            "gflops_loss": gflops_loss,
-            "thres_loss": thres_loss,
-        }
+    loss_dict["loss"] = loss
 
-    else:
-        return {
-            "loss": loss,
-            "acc_loss": acc_loss,
-            "eff_loss": loss - acc_loss,
-            "gflops_loss": gflops_loss,
-            "thres_loss": thres_loss,
-        }
+    return loss_dict
+    # if args.dataset == "epic":
+    #     return {
+    #         "loss": loss,
+    #         "verb_loss": v_acc_loss,
+    #         "noun_loss": n_acc_loss,
+    #         "eff_loss": loss - acc_loss,
+    #         "regu_loss": loss - acc_loss,
+    #         "gflops_loss": gflops_loss,
+    #         "thres_loss": thres_loss,
+    #     }
+    #
+    # else:
+    #     return {
+    #         "loss": loss,
+    #         "acc_loss": acc_loss,
+    #         "eff_loss": loss - acc_loss,
+    #         "gflops_loss": gflops_loss,
+    #         "thres_loss": thres_loss,
+    #     }
 
 def elastic_list_print(l, limit=8):
     if isinstance(l, str):
@@ -1066,8 +1105,11 @@ def get_data_loaders(model, prefix, args):
         train_loader.a_n_m = train_dataset.a_n_m
         val_loader.a_v_m = val_dataset.a_v_m
         val_loader.a_n_m = val_dataset.a_n_m
-        # print("a_v_m",len(train_loader.a_v_m), len(set(train_loader.a_v_m.values())))
-        # print("a_n_m", len(train_loader.a_n_m), len(set(train_loader.a_n_m.values())))
+    else:
+        train_loader.a_v_m = None
+        train_loader.a_n_m = None
+        val_loader.a_v_m = None
+        val_loader.a_n_m = None
 
     return train_loader, val_loader
 
@@ -1129,8 +1171,8 @@ def handle_frozen_things_in(model, args):
     if len(args.frozen_list) > 0:
         for name, param in model.module.named_parameters():
             for keyword in args.frozen_list:
-                if keyword[0] == "*":
-                    if keyword[-1] == "*":  # TODO middle
+                if keyword[0] == "J":
+                    if keyword[-1] == "J":  # TODO middle
                         if keyword[1:-1] in name:
                             param.requires_grad = False
                             if args.rank==0:
@@ -1140,7 +1182,7 @@ def handle_frozen_things_in(model, args):
                             param.requires_grad = False
                             if args.rank == 0:
                                 print(keyword, "->", name, "frozen")
-                elif keyword[-1] == "*":  # TODO prefix
+                elif keyword[-1] == "J":  # TODO prefix
                     if name.startswith(keyword[:-1]):
                         param.requires_grad = False
                         if args.rank == 0:

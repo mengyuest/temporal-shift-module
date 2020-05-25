@@ -197,7 +197,14 @@ class PolicyBlock(nn.Module):
         # gating operations
         x_c2d = x_c.view(x.shape[0], self.num_channels // self.args.granularity, self.action_dim)
         x_c2d = torch.log(F.softmax(x_c2d, dim=2).clamp(min=1e-8))
+        # if 0 ==  x_c2d.get_device() and x_c2d.shape[1]==64:
+        #     print(x_c2d[0, 1])
         mask = F.gumbel_softmax(logits=x_c2d, tau=kwargs["tau"], hard=not self.args.gate_gumbel_use_soft)
+
+        #TODO debug
+        # if 0 == x_c2d.get_device() and x_c2d.shape[1] == 64:
+        #     print(mask[0,1])
+        #     print()
 
         if self.args.granularity>1:
             mask = mask.repeat(1, self.args.granularity, 1)

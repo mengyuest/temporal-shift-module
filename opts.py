@@ -427,3 +427,13 @@ parser.add_argument('--use_tsmk8', action='store_true')
 parser.add_argument('--use_tsmk16', action='store_true')
 parser.add_argument('--gate_npb', action='store_true')
 parser.add_argument('--gate_lr_factor', default=1.0, type=float)
+
+
+parser.add_argument('--skip_ratio', default=0.375, type=float)
+parser.add_argument('--skip_weight', default=0.0, type=float)
+
+parser.add_argument('--reuse_ratio', default=0.125, type=float)
+parser.add_argument('--reuse_weight', default=0.0, type=float)
+
+parser.add_argument('--keep_ratio', default=0.5, type=float)
+parser.add_argument('--keep_weight', default=0.0, type=float)

@@ -37,6 +37,13 @@ def inner_set_manual_data_path(data_path, exps_path):
 def set_manual_data_path(data_path, exps_path):
     inner_set_manual_data_path(data_path, exps_path)
 
+    global STHV1_PATH
+    global STHV1_META_PATH
+    global STHV1_FRAMES
+    STHV1_PATH = ospj(DATA_PATH, "sthv1")
+    STHV1_META_PATH = STHV1_PATH
+    STHV1_FRAMES = ospj(STHV1_PATH, '20bn-something-something-v1')
+
     global STHV2_PATH
     global STHV2_META_PATH
     global STHV2_FRAMES

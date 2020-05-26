@@ -455,6 +455,7 @@ class Bottleneck(nn.Module):
             mask = self.policy_net(x, **kwargs)
         else:
             mask = handcraft_policy_for_masks(x, out, self.num_channels, self.use_current, self.args)
+
         out = fuse_out_with_mask(out, mask, h_map_updated, self.args)
 
         x2 = out
@@ -523,13 +524,13 @@ class BateNet(nn.Module):
 
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        self.layer1 = self._make_layer(block, 64 * 1, layers[0])
+        self.layer1 = self._make_layer(block, 64 * 1, layers[0], layer_offset=0)
         self.layer2 = self._make_layer(block, 64 * 2, layers[1],
-                                       stride=2, dilate=replace_stride_with_dilation[0])
+                                       stride=2, dilate=replace_stride_with_dilation[0], layer_offset=layers[0])
         self.layer3 = self._make_layer(block, 64 * 4, layers[2],
-                                       stride=2, dilate=replace_stride_with_dilation[1])
+                                       stride=2, dilate=replace_stride_with_dilation[1], layer_offset=layers[0] + layers[1])
         self.layer4 = self._make_layer(block, 64 * 8, layers[3],
-                                       stride=2, dilate=replace_stride_with_dilation[2])
+                                       stride=2, dilate=replace_stride_with_dilation[2], layer_offset=layers[0] + layers[1] + layers[2])
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
@@ -577,7 +578,7 @@ class BateNet(nn.Module):
             normal_(self.gate_fc1s[keyword].weight, 0, 0.001)
             constant_(self.gate_fc1s[keyword].bias, 0)
 
-    def _make_layer(self, block, planes_list_0, blocks, stride=1, dilate=False):
+    def _make_layer(self, block, planes_list_0, blocks, stride=1, dilate=False, layer_offset=-1):
         norm_layer = self._norm_layer
         downsample0 = None
         downsample1 = None
@@ -592,7 +593,13 @@ class BateNet(nn.Module):
         _d={1:0, 2:1, 4:2, 8:3}
         layer_idx = _d[planes_list_0//64]
 
-        enable_policy = (layer_idx >= self.args.enable_from and layer_idx < self.args.disable_from)
+
+
+        if len(self.args.enabled_layers) > 0:
+            enable_policy = layer_offset in self.args.enabled_layers
+            print("stage-%d layer-%d (abs: %d) enabled:%s"%(layer_idx, 0, layer_offset, enable_policy))
+        else:
+            enable_policy = (layer_idx >= self.args.enable_from and layer_idx < self.args.disable_from)
 
         if self.args.shared_policy_net and enable_policy:
             self.update_shared_net(self.inplanes, planes_list_0)
@@ -602,6 +609,10 @@ class BateNet(nn.Module):
                             self.base_width, previous_dilation, norm_layer, shared=(self.gate_fc0s, self.gate_fc1s), shall_enable=enable_policy, args=self.args))
         self.inplanes = planes_list_0 * block.expansion
         for k in range(1, blocks):
+
+            if len(self.args.enabled_layers) > 0:
+                enable_policy = layer_offset + k in self.args.enabled_layers
+                print("stage-%d layer-%d (abs: %d) enabled:%s" % (layer_idx, k, layer_offset + k, enable_policy))
 
             if self.args.shared_policy_net and enable_policy:
                 self.update_shared_net(self.inplanes, planes_list_0)

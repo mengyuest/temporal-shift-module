@@ -397,7 +397,7 @@ parser.add_argument('--auto_resume', action='store_true', help='auto resume for 
 parser.add_argument('--not_pin_memory', action='store_true', help='not pin memory')
 parser.add_argument('--relative_hidden_size', type=float, default=-1.0)
 parser.add_argument('--gflops_loss_type', type=str, choices=['real', 'upb'], default='real')
-parser.add_argument('--backup_epoch_list', default=[9], type=int, nargs="+") # keep old best models (for pretraining)
+parser.add_argument('--backup_epoch_list', default=[9, 39], type=int, nargs="+") # keep old best models (for pretraining)
 parser.add_argument('--warmup_epochs', default=-1, type=int, help='number of epochs for warmup')
 parser.add_argument('--sth_no_flip', action='store_true')
 
@@ -437,3 +437,7 @@ parser.add_argument('--reuse_weight', default=0.0, type=float)
 
 parser.add_argument('--keep_ratio', default=0.5, type=float)
 parser.add_argument('--keep_weight', default=0.0, type=float)
+
+parser.add_argument('--gate_reduce_type', type=str, default="avg", choices=['avg', 'max'])
+parser.add_argument('--enable_from', default=0, type=int)
+parser.add_argument('--disable_from', default=4, type=int)

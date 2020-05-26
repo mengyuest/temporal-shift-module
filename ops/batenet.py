@@ -142,7 +142,10 @@ class PolicyBlock(nn.Module):
 
     def forward(self, x, **kwargs):
         # data preparation
-        x_c = nn.AdaptiveAvgPool2d((1, 1))(x)
+        if self.args.gate_reduce_type=="avg":
+            x_c = nn.AdaptiveAvgPool2d((1, 1))(x)
+        elif self.args.gate_reduce_type=="max":
+            x_c = nn.AdaptiveMaxPool2d((1, 1))(x)
         x_c = torch.flatten(x_c, 1)
         _nt, _c = x_c.shape
         _t = self.args.num_segments
@@ -212,10 +215,14 @@ class PolicyBlock(nn.Module):
         return mask  # TODO: BT*C*ACT_DIM
 
 
-def handcraft_policy_for_masks(x, out, num_channels, args):
+def handcraft_policy_for_masks(x, out, num_channels, use_current, args):
     factor = 3 if args.gate_history else 2
 
-    if args.gate_all_zero_policy:
+    if use_current:
+        mask = torch.zeros(x.shape[0], num_channels, factor, device=x.device)
+        mask[:, :, -1] = 1.
+
+    elif args.gate_all_zero_policy:
         mask = torch.zeros(x.shape[0], num_channels, factor, device=x.device)
     elif args.gate_all_one_policy:
         mask = torch.ones(x.shape[0], num_channels, factor, device=x.device)
@@ -281,7 +288,7 @@ class BasicBlock(nn.Module):
     expansion = 1
 
     def __init__(self, inplanes, planes, stride=1, downsample0=None, downsample1=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None, shared=None, args=None):
+                 base_width=64, dilation=1, norm_layer=None, shared=None, shall_enable=None, args=None):
         super(BasicBlock, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -300,12 +307,19 @@ class BasicBlock(nn.Module):
         self.stride = stride
 
         self.args = args
+        self.shall_enable = shall_enable
         self.num_channels = planes
         self.adaptive_policy = not any([self.args.gate_all_zero_policy,
                                         self.args.gate_all_one_policy,
                                         self.args.gate_random_soft_policy,
                                         self.args.gate_random_hard_policy,
                                         self.args.gate_threshold])
+        if self.shall_enable==False and self.adaptive_policy:
+            self.adaptive_policy=False
+            self.use_current=True
+        else:
+            self.use_current=False
+
         if self.adaptive_policy:
             self.policy_net = PolicyBlock(in_planes=inplanes, out_planes=planes, norm_layer=norm_layer, shared=shared, args=args)
 
@@ -338,7 +352,7 @@ class BasicBlock(nn.Module):
         if self.adaptive_policy:
             mask = self.policy_net(x, **kwargs)
         else:
-            mask = handcraft_policy_for_masks(x, out, self.num_channels, self.args)
+            mask = handcraft_policy_for_masks(x, out, self.num_channels, self.use_current, self.args)
         out = fuse_out_with_mask(out, mask, h_map_updated, self.args)
 
         x2 = out
@@ -351,7 +365,7 @@ class BasicBlock(nn.Module):
             if self.adaptive_policy:
                 mask2 = self.policy_net2(x2, **kwargs)
             else:
-                mask2 = handcraft_policy_for_masks(x2, out, self.num_channels, self.args)
+                mask2 = handcraft_policy_for_masks(x2, out, self.num_channels, self.use_current, self.args)
             out = fuse_out_with_mask(out, mask2, h_map_updated2, self.args)
             mask2 = mask2.view((-1, self.args.num_segments) + mask2.shape[1:])
         else:
@@ -377,7 +391,7 @@ class Bottleneck(nn.Module):
     expansion = 4
 
     def __init__(self, inplanes, planes, stride=1, downsample0=None, downsample1=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None, shared=None, args=None):
+                 base_width=64, dilation=1, norm_layer=None, shared=None, shall_enable=None, args=None):
         super(Bottleneck, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -395,12 +409,19 @@ class Bottleneck(nn.Module):
         self.stride = stride
 
         self.args = args
+        self.shall_enable = shall_enable
         self.num_channels = width
         self.adaptive_policy = not any([self.args.gate_all_zero_policy,
                                         self.args.gate_all_one_policy,
                                         self.args.gate_random_soft_policy,
                                         self.args.gate_random_hard_policy,
                                         self.args.gate_threshold])
+        if self.shall_enable==False and self.adaptive_policy:
+            self.adaptive_policy=False
+            self.use_current=True
+        else:
+            self.use_current=False
+
         if self.adaptive_policy:
             self.policy_net = PolicyBlock(in_planes=inplanes, out_planes=width, norm_layer=norm_layer, shared=shared, args=args)
             if self.args.dense_in_block:
@@ -433,7 +454,7 @@ class Bottleneck(nn.Module):
         if self.adaptive_policy:
             mask = self.policy_net(x, **kwargs)
         else:
-            mask = handcraft_policy_for_masks(x, out, self.num_channels, self.args)
+            mask = handcraft_policy_for_masks(x, out, self.num_channels, self.use_current, self.args)
         out = fuse_out_with_mask(out, mask, h_map_updated, self.args)
 
         x2 = out
@@ -447,7 +468,7 @@ class Bottleneck(nn.Module):
             if self.adaptive_policy:
                 mask2 = self.policy_net2(x2, **kwargs)
             else:
-                mask2 = handcraft_policy_for_masks(x2, out, self.num_channels, self.args)
+                mask2 = handcraft_policy_for_masks(x2, out, self.num_channels, self.use_current, self.args)
             out = fuse_out_with_mask(out, mask2, h_map_updated2, self.args)
             mask2 = mask2.view((-1, self.args.num_segments) + mask2.shape[1:])
         else:
@@ -568,22 +589,26 @@ class BateNet(nn.Module):
             downsample0 = conv1x1(self.inplanes, planes_list_0 * block.expansion, stride)
             downsample1 = norm_layer(planes_list_0 * block.expansion)
 
+        _d={1:0, 2:1, 4:2, 8:3}
+        layer_idx = _d[planes_list_0//64]
 
-        if self.args.shared_policy_net:
+        enable_policy = (layer_idx >= self.args.enable_from and layer_idx < self.args.disable_from)
+
+        if self.args.shared_policy_net and enable_policy:
             self.update_shared_net(self.inplanes, planes_list_0)
 
         layers = nn.ModuleList()
         layers.append(block(self.inplanes, planes_list_0, stride, downsample0, downsample1, self.groups,
-                            self.base_width, previous_dilation, norm_layer, shared=(self.gate_fc0s, self.gate_fc1s), args=self.args))
+                            self.base_width, previous_dilation, norm_layer, shared=(self.gate_fc0s, self.gate_fc1s), shall_enable=enable_policy, args=self.args))
         self.inplanes = planes_list_0 * block.expansion
         for k in range(1, blocks):
 
-            if self.args.shared_policy_net:
+            if self.args.shared_policy_net and enable_policy:
                 self.update_shared_net(self.inplanes, planes_list_0)
 
             layers.append(block(self.inplanes, planes_list_0, groups=self.groups,
                                 base_width=self.base_width, dilation=self.dilation,
-                                norm_layer=norm_layer, shared=(self.gate_fc0s, self.gate_fc1s), args=self.args))
+                                norm_layer=norm_layer, shared=(self.gate_fc0s, self.gate_fc1s), shall_enable=enable_policy, args=self.args))
         return layers
 
     def count_flops(self, input_data_shape, **kwargs):

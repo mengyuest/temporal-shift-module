@@ -551,7 +551,7 @@ def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_te
     loss_dict["eff_loss"] = acc_loss * 0
     # gflops loss
     gflops_loss = acc_loss * 0
-    if args.gate_gflops_loss_weight > 0:
+    if args.gate_gflops_loss_weight > 0 and epoch_i > args.eff_loss_after:
         gflops_loss = torch.abs(gflops_tensor - args.gate_gflops_bias) * args.gate_gflops_loss_weight * factor
         loss_dict["gflops_loss"] = gflops_loss
         loss_dict["eff_loss"] += gflops_loss

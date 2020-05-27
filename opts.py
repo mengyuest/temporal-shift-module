@@ -315,6 +315,7 @@ parser.add_argument('--isemhash_max_step', default=2000, type=int)
 # Efficiency loss
 parser.add_argument('--gate_gflops_loss_weight', default=0.0, type=float)
 parser.add_argument('--gate_gflops_bias', default=0.0, type=float)
+parser.add_argument('--gate_gflops_threshold', default=0.0, type=float)
 parser.add_argument('--gate_norm_loss_weight', default=0.0, type=float)
 parser.add_argument('--gate_norm_loss_factors', default=[2, 1, 1], type=float, nargs="+")
 parser.add_argument('--gate_norm', type=int, choices=[1, 2], default=1)
@@ -397,6 +398,7 @@ parser.add_argument('--auto_resume', action='store_true', help='auto resume for 
 parser.add_argument('--not_pin_memory', action='store_true', help='not pin memory')
 parser.add_argument('--relative_hidden_size', type=float, default=-1.0)
 parser.add_argument('--gflops_loss_type', type=str, choices=['real', 'upb'], default='real')
+parser.add_argument('--gflops_loss_norm', default=1, type=int)
 parser.add_argument('--backup_epoch_list', default=[9, 39], type=int, nargs="+") # keep old best models (for pretraining)
 parser.add_argument('--warmup_epochs', default=-1, type=int, help='number of epochs for warmup')
 parser.add_argument('--sth_no_flip', action='store_true')
@@ -442,3 +444,19 @@ parser.add_argument('--gate_reduce_type', type=str, default="avg", choices=['avg
 parser.add_argument('--enable_from', default=0, type=int)
 parser.add_argument('--disable_from', default=4, type=int)
 parser.add_argument('--enabled_layers', default=[], type=int, nargs="+")
+parser.add_argument('--enabled_stages', default=[], type=int, nargs="+")
+
+parser.add_argument('--gate_loss_starts_from', default=0, type=int)
+
+
+#TODO selected portion of channels for adaptive (unit as 64)
+parser.add_argument('--gate_channel_starts', default=0, type=int)
+parser.add_argument('--gate_channel_ends', default=64, type=int)
+
+#TODO four actions (adding also)
+
+#TODO (filter embedding)
+
+#TODO add conv code
+
+#TODO partial current

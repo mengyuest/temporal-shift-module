@@ -73,6 +73,9 @@ class PolicyBlock(nn.Module):
 
         in_dim = in_planes * in_factor
         out_dim = out_planes * out_factor // self.args.granularity
+        out_dim = out_dim * (args.gate_channel_ends - args.gate_channel_starts) // 64
+        self.num_channels = out_dim // self.action_dim
+
         keyword = "%d_%d" % (in_dim, out_dim)
         if self.args.relative_hidden_size > 0:
             hidden_dim = int(self.args.relative_hidden_size * out_planes // self.args.granularity)
@@ -138,7 +141,7 @@ class PolicyBlock(nn.Module):
                 normal_(self.gate_fc1.weight, 0, 0.001)
                 constant_(self.gate_fc1.bias, 0)
 
-        self.num_channels = out_planes
+
 
     def forward(self, x, **kwargs):
         # data preparation
@@ -211,8 +214,17 @@ class PolicyBlock(nn.Module):
 
         if self.args.granularity>1:
             mask = mask.repeat(1, self.args.granularity, 1)
+        if self.args.gate_channel_starts>0 or self.args.gate_channel_ends<64:
+            full_channels = mask.shape[1] // (self.args.gate_channel_ends-self.args.gate_channel_starts) * 64
+            channel_starts = full_channels // 64 * self.args.gate_channel_starts
+            channel_ends = full_channels // 64 * self.args.gate_channel_ends
+            outer_mask = torch.zeros(mask.shape[0], full_channels, mask.shape[2]).to(mask.device)
+            outer_mask[:, :, -1] = 1.
+            outer_mask[:, channel_starts:channel_ends] = mask
 
-        return mask  # TODO: BT*C*ACT_DIM
+            return outer_mask
+        else:
+            return mask  # TODO: BT*C*ACT_DIM
 
 
 def handcraft_policy_for_masks(x, out, num_channels, use_current, args):
@@ -569,6 +581,7 @@ class BateNet(nn.Module):
             hidden_dim = self.args.gate_hidden_dim
         in_dim = in_planes * in_factor
         out_dim = out_planes * out_factor // self.args.granularity
+        out_dim = out_dim // 64 * (self.args.gate_channel_ends - self.args.gate_channel_starts)
         keyword = "%d_%d" % (in_dim, out_dim)
         if keyword not in self.gate_fc0s:
             self.gate_fc0s[keyword] = nn.Linear(in_dim, hidden_dim)
@@ -593,11 +606,11 @@ class BateNet(nn.Module):
         _d={1:0, 2:1, 4:2, 8:3}
         layer_idx = _d[planes_list_0//64]
 
-
-
         if len(self.args.enabled_layers) > 0:
             enable_policy = layer_offset in self.args.enabled_layers
             print("stage-%d layer-%d (abs: %d) enabled:%s"%(layer_idx, 0, layer_offset, enable_policy))
+        elif len(self.args.enabled_stages) > 0:
+            enable_policy = layer_idx in self.args.enabled_stages
         else:
             enable_policy = (layer_idx >= self.args.enable_from and layer_idx < self.args.disable_from)
 

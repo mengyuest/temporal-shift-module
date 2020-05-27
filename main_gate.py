@@ -526,7 +526,7 @@ def compute_epic_losses(criterion, prediction, target, a_v_m, a_n_m):
     return v_acc_loss, n_acc_loss, acc_loss
 
 def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_tensor, real_gflops_tensor, epoch_i, model,
-                   a_v_m, a_n_m, args):
+                   a_v_m, a_n_m, base_model_gflops, args):
     loss_dict={}
     if args.gflops_loss_type == "real":
         gflops_tensor = real_gflops_tensor
@@ -538,6 +538,9 @@ def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_te
         factor = 1. / args.gate_linear_phase * min(args.gate_linear_phase, epoch_i)
     else:
         factor = 1.
+
+    if epoch_i < args.gate_loss_starts_from:
+        factor = 0.
 
     # accuracy loss
     if args.dataset == "epic":  # combined_verb/noun_losses
@@ -552,7 +555,10 @@ def compute_losses(criterion, prediction, target, mask_stack_list, upb_gflops_te
     # gflops loss
     gflops_loss = acc_loss * 0
     if args.gate_gflops_loss_weight > 0 and epoch_i > args.eff_loss_after:
-        gflops_loss = torch.abs(gflops_tensor - args.gate_gflops_bias) * args.gate_gflops_loss_weight * factor
+        if args.gflops_loss_norm == 1:
+            gflops_loss = torch.abs(gflops_tensor - args.gate_gflops_bias) * args.gate_gflops_loss_weight * factor
+        elif args.gflops_loss_norm == 2:
+            gflops_loss = ((gflops_tensor/base_model_gflops - args.gate_gflops_threshold)**2) * args.gate_gflops_loss_weight * factor
         loss_dict["gflops_loss"] = gflops_loss
         loss_dict["eff_loss"] += gflops_loss
 
@@ -688,7 +694,7 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
             upb_gflops_tensor, real_gflops_tensor = compute_gflops_by_mask(mask_stack_list, base_model_gflops, gflops_list, args)
             loss_dict = compute_losses(criterion, output, target_var, mask_stack_list,
                                        upb_gflops_tensor, real_gflops_tensor, epoch, model,
-                                       train_loader.a_v_m, train_loader.a_n_m, args)
+                                       train_loader.a_v_m, train_loader.a_n_m, base_model_gflops, args)
             upb_batch_gflops_list.append(upb_gflops_tensor.detach())
             real_batch_gflops_list.append(real_gflops_tensor.detach())
         else:
@@ -848,7 +854,7 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
                 upb_gflops_tensor, real_gflops_tensor = compute_gflops_by_mask(mask_stack_list, base_model_gflops, gflops_list, args)
                 loss_dict = compute_losses(criterion, output, target, mask_stack_list,
                                            upb_gflops_tensor, real_gflops_tensor, epoch, model,
-                                           val_loader.a_v_m, val_loader.a_n_m, args)
+                                           val_loader.a_v_m, val_loader.a_n_m, base_model_gflops, args)
                 upb_batch_gflops_list.append(upb_gflops_tensor)
                 real_batch_gflops_list.append(real_gflops_tensor)
             else:

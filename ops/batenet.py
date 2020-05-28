@@ -84,6 +84,18 @@ class PolicyBlock(nn.Module):
         else:
             hidden_dim = self.args.gate_hidden_dim
 
+        if self.args.gate_conv_embed_type != "None":
+            if self.args.gate_conv_embed_type == "conv3x3":
+                self.gate_conv_embed = conv3x3(in_planes, in_planes, stride=1, groups=1, dilation=1)
+            elif self.args.gate_conv_embed_type == "conv3x3dw":
+                self.gate_conv_embed = conv3x3(in_planes, in_planes, stride=1, groups=in_planes, dilation=1)
+            elif self.args.gate_conv_embed_type == "conv1x1":
+                self.gate_conv_embed = conv1x1(in_planes, in_planes, stride=1, groups=1, dilation=1)
+            elif self.args.gate_conv_embed_type == "conv1x1dw":
+                self.gate_conv_embed = conv1x1(in_planes, in_planes, stride=1, groups=in_planes, dilation=1)
+            self.gate_conv_embed_bn = nn.BatchNorm2d(in_planes)
+            self.gate_conv_embed_relu = nn.ReLU(inplace=True)
+
         if self.args.single_linear:
             self.gate_fc0 = nn.Linear(in_dim, out_dim)
             if self.args.gate_bn_between_fcs:
@@ -145,10 +157,17 @@ class PolicyBlock(nn.Module):
 
     def forward(self, x, **kwargs):
         # data preparation
+        if self.args.gate_conv_embed_type != "None":
+            x_input = self.gate_conv_embed(x)
+            x_input = self.gate_conv_embed_bn(x_input)
+            x_input = self.gate_conv_embed_relu(x_input)
+        else:
+            x_input = x
+
         if self.args.gate_reduce_type=="avg":
-            x_c = nn.AdaptiveAvgPool2d((1, 1))(x)
+            x_c = nn.AdaptiveAvgPool2d((1, 1))(x_input)
         elif self.args.gate_reduce_type=="max":
-            x_c = nn.AdaptiveMaxPool2d((1, 1))(x)
+            x_c = nn.AdaptiveMaxPool2d((1, 1))(x_input)
         x_c = torch.flatten(x_c, 1)
         _nt, _c = x_c.shape
         _t = self.args.num_segments
@@ -338,6 +357,11 @@ class BasicBlock(nn.Module):
             if self.args.dense_in_block:
                 self.policy_net2 = PolicyBlock(in_planes=planes, out_planes=planes, norm_layer=norm_layer, shared=shared, args=args)
 
+        if self.args.gate_history_conv_type in ['ghost', 'ghostbnrelu']:
+            self.gate_hist_conv = conv3x3(planes, planes, groups=planes)
+            if self.args.gate_history_conv_type == 'ghostbnrelu':
+                self.gate_hist_bnrelu = nn.Sequential(norm_layer(planes), nn.ReLU(inplace=True))
+
     def count_flops(self, input_data_shape, **kwargs):
         conv1_flops, conv1_out_shape = count_conv2d_flops(input_data_shape, self.conv1)
         conv2_flops, conv2_out_shape = count_conv2d_flops(conv1_out_shape, self.conv2)
@@ -439,6 +463,11 @@ class Bottleneck(nn.Module):
             if self.args.dense_in_block:
                 self.policy_net2 = PolicyBlock(in_planes=width, out_planes=width, norm_layer=norm_layer, shared=shared, args=args)
 
+        if self.args.gate_history_conv_type in ['ghost', 'ghostbnrelu']:
+            self.gate_hist_conv = conv3x3(width, width, groups=width)
+            if self.args.gate_history_conv_type == 'ghostbnrelu':
+                self.gate_hist_bnrelu = nn.Sequential(norm_layer(width), nn.ReLU(inplace=True))
+
     def count_flops(self, input_data_shape, **kwargs):
         conv1_flops, conv1_out_shape = count_conv2d_flops(input_data_shape, self.conv1)
         conv2_flops, conv2_out_shape = count_conv2d_flops(conv1_out_shape, self.conv2)
@@ -463,6 +492,11 @@ class Bottleneck(nn.Module):
 
         # gate functions
         h_map_updated = get_hmap(out, self.args, **kwargs)
+        if self.args.gate_history_conv_type in ['ghost', 'ghostbnrelu']:
+            h_map_updated = self.gate_hist_conv(h_map_updated)
+            if self.args.gate_history_conv_type == 'ghostbnrelu':
+                h_map_updated = self.gate_hist_bnrelu(h_map_updated)
+
         if self.adaptive_policy:
             mask = self.policy_net(x, **kwargs)
         else:
@@ -546,6 +580,18 @@ class BateNet(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512 * block.expansion, num_classes)
 
+        if self.args.policy_attention:
+            self.attention_fc0 = nn.Linear(16*3, 16)
+            self.attention_relu = nn.ReLU(inplace=True)
+            self.attention_bn = nn.BatchNorm1d(16)
+            self.attention_fc1 = nn.Linear(16, 1)
+            normal_(self.attention_fc0.weight, 0, 0.001)
+            constant_(self.attention_fc0.bias, 0)
+            normal_(self.attention_fc1.weight, 0, 0.001)
+            constant_(self.attention_fc1.bias, 0)
+            nn.init.constant_(self.attention_bn.weight, 1)
+            nn.init.constant_(self.attention_bn.bias, 0)
+
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -553,14 +599,14 @@ class BateNet(nn.Module):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
 
+        zero_init_residual = args.zero_init_residual
         # Zero-initialize the last BN in each residual branch,
         # so that the residual branch starts with zeros, and each residual block behaves like an identity.
         # This improves the model by 0.2~0.3% according to https://arxiv.org/abs/1706.02677
         if zero_init_residual:
             for m in self.modules():
                 if isinstance(m, Bottleneck):
-                    for bn in m.bn3s:
-                        nn.init.constant_(bn.weight, 0)
+                    nn.init.constant_(m.bn3.weight, 0)
                 elif isinstance(m, BasicBlock):
                     # for bn in m.bn2s:
                     #     nn.init.constant_(bn.weight, 0)
@@ -683,7 +729,21 @@ class BateNet(nn.Module):
         x = torch.flatten(x, 1)
         out = self.fc(x)
 
-        return out, mask_stack_list
+        if self.args.policy_attention:
+            mask_stat_list=[]
+            for mask_stack in mask_stack_list:
+                mask_stat = torch.stack([torch.mean(mask_stack[:, :, :, act_i], dim=-1) for act_i in range(3)], dim=-1)
+                mask_stat_list.append(mask_stat)
+            mask_stat_tensor = torch.stack(mask_stat_list, dim=-2)
+            att_input = mask_stat_tensor.view(x.shape[0], len(mask_stack_list) * 3)
+            att_mid = self.attention_fc0(att_input)
+            att_mid = self.attention_bn(att_mid)
+            att_mid = self.attention_fc1(att_mid)
+            attention = torch.softmax(att_mid.view(-1, self.args.num_segments), dim=-1).clamp(min=1e-8)
+
+            return out, mask_stack_list, attention
+        else:
+            return out, mask_stack_list
 
 
 

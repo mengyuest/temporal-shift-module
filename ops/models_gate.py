@@ -67,10 +67,21 @@ class TSN_Gate(nn.Module):
         if "cgnet" in self.args.arch:
             feat, mask_stack_list = self.base_model(input_data.view(_b, _t, _c, _h, _w))
         elif "batenet" in self.args.arch:
-            feat, mask_stack_list = self.base_model(input_data.view(_b * _t, _c, _h, _w),
-                                                    tau=kwargs["tau"], is_training=is_training, curr_step=curr_step)
+            if self.args.policy_attention:
+                feat, mask_stack_list, attention = self.base_model(input_data.view(_b * _t, _c, _h, _w),
+                                                        tau=kwargs["tau"], is_training=is_training, curr_step=curr_step)
+            else:
+                feat, mask_stack_list = self.base_model(input_data.view(_b * _t, _c, _h, _w),
+                                                        tau=kwargs["tau"], is_training=is_training, curr_step=curr_step)
         base_out = self.new_fc(feat.view(_b * _t, -1)).view(_b, _t, -1)
-        output = base_out.mean(dim=1).squeeze(1)
+
+        if self.args.policy_attention:
+            # print("att", attention.shape)
+            # print("att", attention[0])
+            output = (base_out * attention.unsqueeze(-1)).sum(dim=1)
+            # print("output",output[0])
+        else:
+            output = base_out.mean(dim=1).squeeze(1)
 
         if "cgnet" in self.args.arch:
             for i in range(len(mask_stack_list)):
@@ -81,7 +92,10 @@ class TSN_Gate(nn.Module):
         #         mask_stack_list[i] = mask_stack_list[i].view(_b, _t, mask_stack_list[i].shape[1], mask_stack_list[i].shape[2])  # TODO: B*T*K
         #         print(mask_stack_list[i].shape)
         #         print(mask_stack_list[i].shape)
-        return output, mask_stack_list, None, torch.stack([base_out], dim=1)
+        if self.args.save_meta_gate:
+            return output, mask_stack_list, None, torch.stack([base_out], dim=1)
+        else:
+            return output, mask_stack_list, None, torch.stack([base_out], dim=1)
 
     @property
     def crop_size(self):
@@ -156,7 +170,7 @@ class TSN_Gate(nn.Module):
                     if len(ps) == 2:
                         normal_bias.append(ps[1])
 
-            elif isinstance(m, torch.nn.BatchNorm1d) and "gate_bn" in m_name:
+            elif isinstance(m, torch.nn.BatchNorm1d) and ("gate_bn" in m_name or "attention" in m_name):
                 if not self.args.gate_npb:
                     bn.extend(list(m.parameters()))
 

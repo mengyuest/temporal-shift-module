@@ -453,9 +453,18 @@ parser.add_argument('--gate_loss_starts_from', default=0, type=int)
 parser.add_argument('--gate_channel_starts', default=0, type=int)
 parser.add_argument('--gate_channel_ends', default=64, type=int)
 
-#TODO four actions (adding also)
 
-#TODO (filter embedding)
+parser.add_argument('--zero_init_residual', action='store_true')
+
+#TODO (filter embedding, full conv?)
+parser.add_argument('--gate_conv_embed_type', type=str, default="None", choices=['None', 'conv3x3', 'conv3x3dw', 'conv1x1', 'conv1x1dw'])
+
+
+#TODO attention for prediction
+parser.add_argument('--save_meta_gate', action='store_true')
+parser.add_argument('--policy_attention', action='store_true')
+
+#TODO four actions (adding also)
 
 #TODO add conv code
 

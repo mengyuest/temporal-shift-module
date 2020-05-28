@@ -229,7 +229,7 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
         if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
             set_random_seed(args.random_seed, args)
             mAP, mmAP, prec1, prec5, val_usage_str, epic_precs = \
-                validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, args, tf_writer)
+                validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, exp_full_path, args, tf_writer)
 
             if args.distributed:
                 dist.barrier()
@@ -810,13 +810,17 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
     return usage_str
 
 
-def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, args, tf_writer=None):
+def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, exp_full_path, args, tf_writer=None):
     batch_time, top1, top5 = get_average_meters(3)
     if args.dataset=="epic":
         verb_top1, verb_top5, noun_top1, noun_top5 = get_average_meters(4)
     # TODO(yue)
     all_results = []
     all_targets = []
+
+    if args.save_meta_gate:
+        gate_meta_list = []
+        mask_stat_list = []
 
     tau = get_current_temperature(epoch, args)
 
@@ -846,7 +850,7 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
             # target = input_tuple[-1].cuda(args.gpus, non_blocking=True)
 
             # model forward function
-            output, mask_stack_list, _, _ = \
+            output, mask_stack_list, _, gate_meta = \
                 model(input=input_tuple[:-1], tau=tau, is_training=False, curr_step=0)
 
             # measure losses, accuracy and predictions
@@ -909,6 +913,14 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
                     # mask_stack_list_list[layer_i].append(mask_stack.detach()) #TODO remvoed .cpu()
                     mask_stack_list_list[layer_i] += torch.sum(mask_stack.detach(), dim=0)  # TODO remvoed .cpu()
 
+            if args.save_meta_gate:
+                gate_meta_list.append(gate_meta.cpu())
+                mask_stat=[]
+                for layer_i, mask_stack in enumerate(mask_stack_list):
+                    mask_stat.append(torch.sum(mask_stack.cpu(), dim=2))  # TODO: N*T*C*3 -> N*T*3
+                mask_stat = torch.stack(mask_stat, dim=2)  # TODO L, N*T*3->N*T*L*3
+                mask_stat_list.append(mask_stat)
+
             # measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
@@ -944,7 +956,6 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
     mmAP, _ = cal_map(torch.cat(all_results, 0).cpu(), torch.cat(all_targets, 0).cpu())  # TODO(yue)  multi-label mAP
 
 
-
     if dist.is_initialized():
         mAP_tensor = torch.tensor(mAP).to(all_results[0].device)
         mmAP_tensor = torch.tensor(mmAP).to(all_results[0].device)
@@ -978,6 +989,14 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
             print_mask_statistics(mask_stack_list_list, args)
         else:
             usage_str = "Base Model"
+
+        if args.save_meta_gate:
+            #  TODO all_targets, all_preds, all_mask_stats
+            all_mask_stats = torch.cat(mask_stat_list, dim=0)
+            all_preds = torch.cat(gate_meta_list, dim=0)
+
+            np.savez("%s/meta-gate-val.npy" % (exp_full_path),
+                     mask_stats=all_mask_stats.numpy(), preds=all_preds.numpy(), targets=torch.cat(all_targets, 0).cpu().numpy())
 
         if tf_writer is not None:
             tf_writer.add_scalar('loss/test', losses_dict["loss"].avg, epoch)

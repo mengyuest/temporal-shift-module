@@ -6,7 +6,7 @@ import ops.cg_utils as G
 
 from ops.utils import count_relu_flops, count_bn_flops, count_fc_flops, count_conv2d_flops
 
-__all__ = ['CGNet', 'cgnet18',
+__all__ = ['CGNet', 'cgnet18', 'cgnet50',
            # 'resnet34', 'resnet50', 'resnet101', 'resnet152', 'resnext50_32x4d', 'resnext101_32x8d',
            # 'wide_resnet50_2', 'wide_resnet101_2'
            ]
@@ -14,6 +14,7 @@ __all__ = ['CGNet', 'cgnet18',
 
 model_urls = {
     'cgnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
+    'cgnet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
     # 'resnet34': 'https://download.pytorch.org/models/resnet34-333f7ec4.pth',
     # 'resnet50': 'https://download.pytorch.org/models/resnet50-19c8e357.pth',
     # 'resnet101': 'https://download.pytorch.org/models/resnet101-5d3b4d8f.pth',
@@ -72,6 +73,10 @@ class BasicBlock(nn.Module):
     def forward(self, x):
         identity = x
 
+        # # shift operations
+        # if self.args.shift:
+        #     x = shift(x, self.args.num_segments, fold_div=self.args.shift_div, inplace=False)
+
         out, n_all_pos = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
@@ -112,13 +117,20 @@ class Bottleneck(nn.Module):
     expansion = 4
 
     def __init__(self, inplanes, planes, stride=1, downsample=None, groups=1,
-                 base_width=64, dilation=1, norm_layer=None):
+                 base_width=64, dilation=1, norm_layer=None, args=None):
         super(Bottleneck, self).__init__()
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
         width = int(planes * (base_width / 64.)) * groups
         # Both self.conv2 and self.downsample layers downsample the input when stride != 1
-        self.conv1 = conv1x1(inplanes, width)
+
+        # self.conv1 = conv1x1(inplanes, width)
+        self.args = args
+        self.conv1 = G.CGConv2dNew(inplanes, width, kernel_size=1,
+                                   stride=1, padding=0, bias=False,
+                                   p=args.partitions, th=args.ginit, alpha=args.alpha,
+                                   use_group=args.use_group, shuffle=args.shuffle, sparse_bp=args.sparse_bp)
+
         self.bn1 = norm_layer(width)
         self.conv2 = conv3x3(width, width, stride, groups, dilation)
         self.bn2 = norm_layer(width)
@@ -131,7 +143,12 @@ class Bottleneck(nn.Module):
     def forward(self, x):
         identity = x
 
-        out = self.conv1(x)
+        # shift operations
+        # if self.args.shift:
+        #     x = shift(x, self.args.num_segments, fold_div=self.args.shift_div, inplace=False)
+
+        # out = self.conv1(x)
+        out, n_all_pos = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
 
@@ -148,8 +165,41 @@ class Bottleneck(nn.Module):
         out += identity
         out = self.relu(out)
 
-        return out
+        return out, n_all_pos, None
 
+    def count_flops(self, input_data_shape, **kwargs):
+        conv1_flops, conv1_out_shape = count_conv2d_flops(input_data_shape, self.conv1)
+        conv2_flops, conv2_out_shape = count_conv2d_flops(conv1_out_shape, self.conv2)
+        if self.downsample is not None:
+            downsample_flops, _ = count_conv2d_flops(input_data_shape, self.downsample[0])
+        else:
+            downsample_flops = 0
+
+        gate_history_conv_flops = 0
+        return [conv1_flops, conv2_flops, downsample_flops, gate_history_conv_flops], conv2_out_shape
+
+
+# def shift(x, n_segment, fold_div=3, inplace=False):
+#     nt, c, h, w = x.size()
+#     print(nt,c,h,w)
+#     print(n_segment)
+#     print()
+#     n_batch = nt // n_segment
+#     x = x.view(n_batch, n_segment, c, h, w)
+#
+#     fold = c // fold_div
+#     if inplace:
+#         # Due to some out of order error when performing parallel computing.
+#         # May need to write a CUDA kernel.
+#         raise NotImplementedError
+#         # out = InplaceShift.apply(x, fold)
+#     else:
+#         out = torch.zeros_like(x)
+#         out[:, :-1, :fold] = x[:, 1:, :fold]  # shift left
+#         out[:, 1:, fold: 2 * fold] = x[:, :-1, fold: 2 * fold]  # shift right
+#         out[:, :, 2 * fold:] = x[:, :, 2 * fold:]  # not shift
+#
+#     return out.view(nt, c, h, w)
 
 class CGNet(nn.Module):
 
@@ -323,6 +373,15 @@ def cgnet18(pretrained=False, progress=True, **kwargs):
     return _cgnet('cgnet18', BasicBlock, [2, 2, 2, 2], pretrained, progress,
                    **kwargs)
 
+def cgnet50(pretrained=False, progress=True, **kwargs):
+    r"""ResNet-50 model from
+    `"Deep Residual Learning for Image Recognition" <https://arxiv.org/pdf/1512.03385.pdf>`_
+    Args:
+        pretrained (bool): If True, returns a model pre-trained on ImageNet
+        progress (bool): If True, displays a progress bar of the download to stderr
+    """
+    return _cgnet('cgnet50', Bottleneck, [3, 4, 6, 3], pretrained, progress,
+                   **kwargs)
 
 # def resnet34(pretrained=False, progress=True, **kwargs):
 #     r"""ResNet-34 model from

@@ -646,10 +646,13 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
         verb_top1, verb_top5, noun_top1, noun_top5 = get_average_meters(4)
     losses_dict = {}
     if args.ada_reso_skip:
-        # mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _ in gflops_list]
-        mask_stack_list_list = [0 for _ in gflops_list] + [0 for _ in gflops_list] if args.dense_in_block else [0 for
+
+        if "batenet" in args.arch:
+            mask_stack_list_list = [0 for _ in gflops_list] + [0 for _ in gflops_list] if args.dense_in_block else [0 for
                                                                                                                   _ in
                                                                                                                   gflops_list]
+        else:
+            mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _ in gflops_list]
         upb_batch_gflops_list=[]
         real_batch_gflops_list=[]
 
@@ -750,8 +753,10 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
         # gather masks
         if args.ada_reso_skip:
             for layer_i, mask_stack in enumerate(mask_stack_list):
-                # mask_stack_list_list[layer_i].append(mask_stack.detach()) #TODO removed cpu()
-                mask_stack_list_list[layer_i] += torch.sum(mask_stack.detach(), dim=0)
+                if "batenet" in args.arch:
+                    mask_stack_list_list[layer_i] += torch.sum(mask_stack.detach(), dim=0)
+                else:  # TODO CGNet
+                    mask_stack_list_list[layer_i].append(mask_stack.detach()) #TODO removed cpu()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -780,8 +785,9 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
                     format(header=loss_name[0], loss=losses_dict[loss_name])
             print(print_output)
     if args.ada_reso_skip:
-        # for layer_i in range(len(mask_stack_list_list)):
-        #     mask_stack_list_list[layer_i] = torch.cat(mask_stack_list_list[layer_i], dim=0)
+        if "cgnet" in args.arch:
+            for layer_i in range(len(mask_stack_list_list)):
+                mask_stack_list_list[layer_i] = torch.cat(mask_stack_list_list[layer_i], dim=0)
         # upb_batch_gflops, real_batch_gflops = compute_gflops_by_mask(mask_stack_list_list, base_model_gflops, gflops_list, args)
         upb_batch_gflops= torch.mean(torch.stack(upb_batch_gflops_list))
         real_batch_gflops = torch.mean(torch.stack(real_batch_gflops_list))
@@ -825,10 +831,12 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
     tau = get_current_temperature(epoch, args)
 
     if args.ada_reso_skip:
-        # mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _ in gflops_list]
-        mask_stack_list_list = [0 for _ in gflops_list] + [0 for _ in gflops_list] if args.dense_in_block else [0 for
+        if "batenet" in args.arch:
+            mask_stack_list_list = [0 for _ in gflops_list] + [0 for _ in gflops_list] if args.dense_in_block else [0 for
                                                                                                                   _ in
                                                                                                                   gflops_list]
+        else:
+            mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _ in gflops_list]
         upb_batch_gflops_list = []
         real_batch_gflops_list = []
 
@@ -910,8 +918,10 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
             if args.ada_reso_skip:
                 # gather masks
                 for layer_i, mask_stack in enumerate(mask_stack_list):
-                    # mask_stack_list_list[layer_i].append(mask_stack.detach()) #TODO remvoed .cpu()
-                    mask_stack_list_list[layer_i] += torch.sum(mask_stack.detach(), dim=0)  # TODO remvoed .cpu()
+                    if "batenet" in args.arch:
+                        mask_stack_list_list[layer_i] += torch.sum(mask_stack.detach(), dim=0)  # TODO remvoed .cpu()
+                    else:  # TODO CGNet
+                        mask_stack_list_list[layer_i].append(mask_stack.detach()) #TODO remvoed .cpu()
 
             if args.save_meta_gate:
                 gate_meta_list.append(gate_meta.cpu())
@@ -945,8 +955,9 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
                         format(header=loss_name[0], loss=losses_dict[loss_name])
                 print(print_output)
     if args.ada_reso_skip:
-        # for layer_i in range(len(mask_stack_list_list)):
-        #     mask_stack_list_list[layer_i] = torch.cat(mask_stack_list_list[layer_i], dim=0)
+        if "cgnet" in args.arch:
+            for layer_i in range(len(mask_stack_list_list)):
+                mask_stack_list_list[layer_i] = torch.cat(mask_stack_list_list[layer_i], dim=0)
         # upb_batch_gflops, real_batch_gflops = compute_gflops_by_mask(mask_stack_list_list, base_model_gflops, gflops_list, args)
         upb_batch_gflops = torch.mean(torch.stack(upb_batch_gflops_list))
         real_batch_gflops = torch.mean(torch.stack(real_batch_gflops_list))

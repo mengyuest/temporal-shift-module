@@ -257,6 +257,9 @@ def handcraft_policy_for_masks(x, out, num_channels, use_current, args):
         mask = torch.zeros(x.shape[0], num_channels, factor, device=x.device)
     elif args.gate_all_one_policy:
         mask = torch.ones(x.shape[0], num_channels, factor, device=x.device)
+    elif args.gate_only_current_policy:
+        mask = torch.zeros(x.shape[0], num_channels, factor, device=x.device)
+        mask[:, :, -1] = 1.
     elif args.gate_random_soft_policy:
         mask = torch.rand(x.shape[0], num_channels, factor, device=x.device)
     elif args.gate_random_hard_policy:
@@ -342,6 +345,7 @@ class BasicBlock(nn.Module):
         self.num_channels = planes
         self.adaptive_policy = not any([self.args.gate_all_zero_policy,
                                         self.args.gate_all_one_policy,
+                                        self.args.gate_only_current_policy,
                                         self.args.gate_random_soft_policy,
                                         self.args.gate_random_hard_policy,
                                         self.args.gate_threshold])
@@ -449,6 +453,7 @@ class Bottleneck(nn.Module):
         self.num_channels = width
         self.adaptive_policy = not any([self.args.gate_all_zero_policy,
                                         self.args.gate_all_one_policy,
+                                        self.args.gate_only_current_policy,
                                         self.args.gate_random_soft_policy,
                                         self.args.gate_random_hard_policy,
                                         self.args.gate_threshold])

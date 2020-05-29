@@ -280,6 +280,7 @@ parser.add_argument('--gate_history_fusion', action='store_true')
 
 # randomness
 parser.add_argument('--gate_all_one_policy', action='store_true')
+parser.add_argument('--gate_only_current_policy', action='store_true')
 parser.add_argument('--gate_all_zero_policy', action='store_true')
 parser.add_argument('--gate_random_hard_policy', action='store_true')
 parser.add_argument('--gate_random_soft_policy', action='store_true')

@@ -49,6 +49,8 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
         dummy_data = torch.randn(1, 3, resolution, resolution)
         if "batenet" in model_name:
             dummy_data = torch.randn(1 * args.num_segments, 3, resolution, resolution)
+        elif "cgnet" in model_name:
+            dummy_data = torch.randn(1, args.num_segments, 3, resolution, resolution)
     else:
         dummy_data = torch.randn(1, 3, seg_len, resolution, resolution)
 
@@ -130,28 +132,26 @@ if __name__ == "__main__":
     #                   num_filters_list=[64, 48, 32], default_signal=0, last_conv_same=False,
     #                   msd_indices_list=[], mer_indices_list=[], args=None)
 
-
-    args = DebugClass()
-    args.threshold_loss_weight=0.0001
-    args.partitions=4
-    args.ginit=0.0
-    args.alpha=2.0
-    args.gtarget=1.0
-    args.use_group=True
-    args.shuffle=True
-    args.sparse_bp=True
-
-    gflops, params = get_gflops_params("cgnet18", 224, 200, seg_len=-1, pretrained=False,
-                                       num_filters_list=[], default_signal=-1, last_conv_same=False,
-                                       msd_indices_list=[], mer_indices_list=[],
-                                       args=args)
+    # args = DebugClass()
+    # args.threshold_loss_weight=0.0001
+    # args.partitions=4
+    # args.ginit=0.0
+    # args.alpha=2.0
+    # args.gtarget=1.0
+    # args.use_group=True
+    # args.shuffle=True
+    # args.sparse_bp=True
+    #
+    # gflops, params = get_gflops_params("cgnet18", 224, 200, seg_len=-1, pretrained=False,
+    #                                    num_filters_list=[], default_signal=-1, last_conv_same=False,
+    #                                    msd_indices_list=[], mer_indices_list=[],
+    #                                    args=args)
 
 
     # gflops, params = get_gflops_params("resnet18", 224, 200, seg_len=-1, pretrained=False,
     #                                    num_filters_list=[], default_signal=-1, last_conv_same=False,
     #                                    msd_indices_list=[], mer_indices_list=[],
     #                                    args=args)
-
 
     # import ops.cg_utils as G
     #
@@ -162,6 +162,27 @@ if __name__ == "__main__":
     #
     # print(conv1)
     # print(type(conv1))
+
+
+
+
+    args = DebugClass()
+    args.ada_reso_skip = True
+    args.gate_gumbel_softmax = True
+    args.gate_history = True
+    args.fusion_type = "cat"
+    args.gate_hidden_dim = 1024
+    args.relative_hidden_size = -1.0
+    args.hidden_quota = -1
+    args.shared_policy_net = True
+
+
+
+    gflops, params = get_gflops_params("batenet50", 224, 174, seg_len=-1, pretrained=False,
+                                       num_filters_list=[], default_signal=-1, last_conv_same=False,
+                                       msd_indices_list=[], mer_indices_list=[],
+                                       args=args)
+
     print("gflops", gflops, "params", params)
 
 

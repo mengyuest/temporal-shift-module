@@ -38,6 +38,7 @@ import common
 from os.path import join as ospj
 from shutil import copyfile
 import shutil
+import pickle
 
 def main():
     args = parser.parse_args()
@@ -426,7 +427,7 @@ def print_mask_statistics(mask_tensor_list, args):
                 s_list = []
 
                 layer_i_list = [iii for iii in range(len(mask_tensor_list))]
-                cap_length = 8
+                cap_length = args.cap_length
                 if len(mask_tensor_list) > cap_length:
                     layer_i_list = [int(iii) for iii in np.linspace(0, len(mask_tensor_list)-1, cap_length, endpoint=True)]
 
@@ -826,7 +827,7 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
 
     if args.save_meta_gate:
         gate_meta_list = []
-        mask_stat_list = []
+        mask_stat_list = [[] for _ in gflops_list]  # []
 
     tau = get_current_temperature(epoch, args)
 
@@ -925,11 +926,16 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
 
             if args.save_meta_gate:
                 gate_meta_list.append(gate_meta.cpu())
-                mask_stat=[]
+                # mask_stat=[]
+                # for layer_i, mask_stack in enumerate(mask_stack_list):
+                #     mask_stat.append(torch.sum(mask_stack.cpu(), dim=2))  # TODO: N*T*C*3 -> N*T*3
+                # mask_stat = torch.stack(mask_stat, dim=2)  # TODO L, N*T*3->N*T*L*3
+                # mask_stat_list.append(mask_stat)
                 for layer_i, mask_stack in enumerate(mask_stack_list):
-                    mask_stat.append(torch.sum(mask_stack.cpu(), dim=2))  # TODO: N*T*C*3 -> N*T*3
-                mask_stat = torch.stack(mask_stat, dim=2)  # TODO L, N*T*3->N*T*L*3
-                mask_stat_list.append(mask_stat)
+                    mask_stat_list[layer_i].append(torch.max(mask_stack.cpu(), dim=-1)[1])  # TODO: L, N*T*C*3
+
+
+
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -1003,11 +1009,19 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
 
         if args.save_meta_gate:
             #  TODO all_targets, all_preds, all_mask_stats
-            all_mask_stats = torch.cat(mask_stat_list, dim=0)
+            # all_mask_stats = torch.cat(mask_stat_list, dim=0)
             all_preds = torch.cat(gate_meta_list, dim=0)
 
+            for layer_i in range(len(mask_stack_list)):
+                mask_stat_list[layer_i] = torch.cat(mask_stat_list[layer_i], dim=0)  # TODO: L, N*T*C
+                mask_stat_list[layer_i] = mask_stat_list[layer_i].numpy().astype(np.uint8)
+            # for layer_i in range(len(mask_stack_list)):
+            #     print(mask_stat_list[layer_i].shape)
+
             np.savez("%s/meta-gate-val.npy" % (exp_full_path),
-                     mask_stats=all_mask_stats.numpy(), preds=all_preds.numpy(), targets=torch.cat(all_targets, 0).cpu().numpy())
+                     preds=all_preds.numpy(), targets=torch.cat(all_targets, 0).cpu().numpy())
+            with open("%s/gate-stat-val.pkl" % (exp_full_path), 'wb') as outfile:
+                pickle.dump(mask_stat_list, outfile, pickle.HIGHEST_PROTOCOL)
 
         if tf_writer is not None:
             tf_writer.add_scalar('loss/test', losses_dict["loss"].avg, epoch)

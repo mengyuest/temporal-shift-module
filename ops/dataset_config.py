@@ -224,12 +224,12 @@ def return_minik(modality):
 
 
 def return_jester(modality):
-    filename_categories = 'jester/classInd.txt'
+    filename_categories = 'data/jester/classInd.txt'
     if modality == 'RGB':
         prefix = '{:05d}.jpg'
         root_data = common.JESTER_FRAMES
-        filename_imglist_train = 'jester/train_split.txt'
-        filename_imglist_val = 'jester/validation_split.txt'
+        filename_imglist_train = 'data/jester/train_split.txt'
+        filename_imglist_val = 'data/jester/validation_split.txt'
     else:
         raise NotImplementedError('no such modality:'+modality)
     return filename_categories, filename_imglist_train, filename_imglist_val, root_data, prefix

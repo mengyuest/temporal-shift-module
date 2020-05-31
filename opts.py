@@ -470,3 +470,5 @@ parser.add_argument('--policy_attention', action='store_true')
 #TODO add conv code
 
 #TODO partial current
+
+parser.add_argument('--cap_length', default=8, type=int)

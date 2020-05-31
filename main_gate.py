@@ -99,7 +99,7 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
         model = TSN_Gate(args=args)
     else:
         model = TSN_Ada(args=args)
-    base_model_gflops, gflops_list = init_gflops_table(model, args)
+    base_model_gflops, gflops_list, g_meta = init_gflops_table(model, args)
 
     if args.no_optim:
         policies = [{'params': model.parameters(), 'lr_mult': 1, 'decay_mult': 1, 'name': "parameters"}]
@@ -220,7 +220,7 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
         if not args.skip_training:
             set_random_seed(node_seed_offset + args.random_seed + epoch, args)
             adjust_learning_rate(optimizer, epoch, -1, -1, args.lr_type, args.lr_steps, args)
-            train_usage_str = train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, gflops_list, args, tf_writer)
+            train_usage_str = train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, gflops_list, g_meta, args, tf_writer)
 
         torch.cuda.empty_cache()
         if args.distributed:
@@ -230,7 +230,7 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
         if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
             set_random_seed(args.random_seed, args)
             mAP, mmAP, prec1, prec5, val_usage_str, epic_precs = \
-                validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, exp_full_path, args, tf_writer)
+                validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, g_meta, exp_full_path, args, tf_writer)
 
             if args.distributed:
                 dist.barrier()
@@ -318,17 +318,21 @@ def init_gflops_table(model, args):
 
     if args.ada_reso_skip:
         gflops_list = model.base_model.count_flops((1, 1, 3, args.reso_list[0], args.reso_list[0]))
+        if "AdaBNInc" in args.arch:
+            gflops_list, g_meta = gflops_list
+        else:
+            g_meta = None
         if args.rank==0:
             print("Network@%d (%.4f GFLOPS, %.4f M params) has %d blocks" % (args.reso_list[0], base_model_gflops, params, len(gflops_list)))
             for i, block in enumerate(gflops_list):
                 print("block", i, ",".join(["%.4f GFLOPS" % (x / 1e9) for x in block]))
-        return base_model_gflops, gflops_list
+        return base_model_gflops, gflops_list, g_meta
     else:
         if args.rank == 0:
             print("Network@%d (%.4f GFLOPS, %.4f M params)" % (args.reso_list[0], base_model_gflops, params))
-        return base_model_gflops, None
+        return base_model_gflops, None, None
 
-def compute_gflops_by_mask(mask_tensor_list, base_model_gflops, gflops_list, args):
+def compute_gflops_by_mask(mask_tensor_list, base_model_gflops, gflops_list, g_meta, args):
     # TODO:   -> conv1 -> conv2 ->     // inside the block
     # TODO:    C0   -    C1   -    C2  // channels proc.
     # TODO:  C1 = s0 + s1 + s2         // 0-zero out / 1-history / 2-current     cheap <<< expensive
@@ -370,7 +374,62 @@ def compute_gflops_by_mask(mask_tensor_list, base_model_gflops, gflops_list, arg
 
             upperbound_gflops = upperbound_gflops - downsave * (down_flops - embed_conv_flops) # in worst case, we only compute saving from downstream conv
             real_gflops = real_gflops - upsave * up_flops - downsave * (down_flops - embed_conv_flops)
+    elif "AdaBNInc" in args.arch:
+        for m_i, mask in enumerate(mask_tensor_list):
+            # print("m_i=",m_i)
+            upsave = torch.zeros_like(mask[:, :, :, 0])  # B*T*C*K->B*T*C
+            for t in range(mask.shape[1]-1):
+                if args.gate_history:
+                    upsave[:, t] = (1 - mask[:, t, :, -1]) * (1 - mask[:, t + 1, :, -2])
+                else:
+                    upsave[:, t] = 1 - mask[:, t, :, -1] # since no reusing, as long as not keeping, save from upstream conv
+            upsave[:, -1] = 1 - mask[:, t, :, -1]
+            upsave = torch.mean(upsave, dim=[0,1]) # -> C
 
+            # TODO 0->1        (dim 352)
+            # TODO 2->3->4     (dim 320)
+            # TODO maxpool     (dim 224)
+
+            # TODO 0        (dim 352)
+            # TODO 1->2     (dim 320)
+            # TODO 3->4->5  (dim 224)
+            # TODO 6        (dim 128) total=1024
+            if len(gflops_list[m_i]) == 7:
+                _a,_b,_c,_d = g_meta[m_i]
+                upsaves = [torch.mean(upsave[:_a]),
+                           torch.mean(upsave[_a:_a + _b]),
+                           torch.mean(upsave[_a + _b:_a + _b + _c]),
+                           torch.mean(upsave[_a + _b + _c:])]
+                out_corr_list = [0, 2, 5, 6]  # to the id of last convs in each partition
+                if m_i < len(gflops_list)-1 and len(gflops_list[m_i+1]) == 5:
+                    next_in_corr_list = [0, 2]
+                else:
+                    next_in_corr_list = [0, 1, 3, 6]
+                # print(_a, _a + _b, _a+_b+_c, "channel=", upsave.shape)
+            elif len(gflops_list[m_i]) == 5:
+                _a, _b, _c= g_meta[m_i]
+                # print(_a, _a+_b, "channel=", upsave.shape)
+                upsaves = [torch.mean(upsave[:_a]),
+                            torch.mean(upsave[_a:_a+_b]),
+                            torch.mean(upsave[_a+_b:])]
+                out_corr_list = [1, 4]  # to the id of last convs in each partition
+                next_in_corr_list = [0, 1, 3, 6]
+            # print("upsaves",[xx.item() for xx in upsaves])
+            up_flops_save = sum([upsaves[f_i] * gflops_list[m_i][out_corr_list[f_i]] for f_i in range(len(out_corr_list))]) / 1e9
+            # print("up_flops_save", up_flops_save.item())
+            if args.gate_no_skipping: # downstream conv gflops' saving is from skippings
+                downsave = upsaves[0] * 0
+            else:
+                downsave = torch.mean(mask[:, :, :, 0])
+                # print("downsave", downsave.item())
+            down_flops_save = up_flops_save * 0
+            if m_i < len(mask_tensor_list)-1:
+                # to the id of first convs in each partition in the next layer
+                down_flops_save = downsave * sum([gflops_list[m_i+1][next_in_corr_list[f_i]] for f_i in range(len(next_in_corr_list))]) / 1e9
+            # print("down_flops_save", down_flops_save.item())
+            upperbound_gflops = upperbound_gflops - down_flops_save
+            real_gflops = real_gflops - up_flops_save - down_flops_save
+            # print(upperbound_gflops.item(),real_gflops.item())
     else:
         # s0 for sparsity savings
         # s1 for history
@@ -641,7 +700,7 @@ def get_average_meters(number):
     return [AverageMeter() for _ in range(number)]
 
 
-def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, gflops_list, args, tf_writer):
+def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, gflops_list, g_meta, args, tf_writer):
     batch_time, data_time, top1, top5 = get_average_meters(4)
     if args.dataset=="epic":
         verb_top1, verb_top5, noun_top1, noun_top5 = get_average_meters(4)
@@ -652,6 +711,11 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
             mask_stack_list_list = [0 for _ in gflops_list] + [0 for _ in gflops_list] if args.dense_in_block else [0 for
                                                                                                                   _ in
                                                                                                                   gflops_list]
+        elif "AdaBNInc" in args.arch:
+            mask_stack_list_list = [0 for _ in gflops_list] + [0 for _ in gflops_list] if args.dense_in_block else [0
+                                                                                                                    for
+                                                                                                                    _ in
+                                                                                                                    gflops_list]
         else:
             mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _ in gflops_list]
         upb_batch_gflops_list=[]
@@ -695,7 +759,7 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
             # for m_i in range(len(mask_stack_list)):
             #     mask_stack_list[m_i] = torch.sum(mask_stack_list[m_i], dim=0)
             #     mask_stack_list[m_i] = f.normalize(mask_stack_list[m_i], dim=-1, p=1)
-            upb_gflops_tensor, real_gflops_tensor = compute_gflops_by_mask(mask_stack_list, base_model_gflops, gflops_list, args)
+            upb_gflops_tensor, real_gflops_tensor = compute_gflops_by_mask(mask_stack_list, base_model_gflops, gflops_list, g_meta, args)
             loss_dict = compute_losses(criterion, output, target_var, mask_stack_list,
                                        upb_gflops_tensor, real_gflops_tensor, epoch, model,
                                        train_loader.a_v_m, train_loader.a_n_m, base_model_gflops, args)
@@ -743,6 +807,8 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
             noun_top1.update(noun_prec1.item(), batchsize)
             noun_top5.update(noun_prec5.item(), batchsize)
 
+        # from torch import autograd
+        # with autograd.detect_anomaly():
         # compute gradient and do SGD step
         loss_dict["loss"].backward()
 
@@ -755,6 +821,8 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
         if args.ada_reso_skip:
             for layer_i, mask_stack in enumerate(mask_stack_list):
                 if "batenet" in args.arch:
+                    mask_stack_list_list[layer_i] += torch.sum(mask_stack.detach(), dim=0)
+                elif "AdaBNInc" in args.arch:
                     mask_stack_list_list[layer_i] += torch.sum(mask_stack.detach(), dim=0)
                 else:  # TODO CGNet
                     mask_stack_list_list[layer_i].append(mask_stack.detach()) #TODO removed cpu()
@@ -817,7 +885,7 @@ def train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, g
     return usage_str
 
 
-def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, exp_full_path, args, tf_writer=None):
+def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list, g_meta, exp_full_path, args, tf_writer=None):
     batch_time, top1, top5 = get_average_meters(3)
     if args.dataset=="epic":
         verb_top1, verb_top5, noun_top1, noun_top5 = get_average_meters(4)
@@ -836,6 +904,11 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
             mask_stack_list_list = [0 for _ in gflops_list] + [0 for _ in gflops_list] if args.dense_in_block else [0 for
                                                                                                                   _ in
                                                                                                                   gflops_list]
+        elif "AdaBNInc" in args.arch:
+            mask_stack_list_list = [0 for _ in gflops_list] + [0 for _ in gflops_list] if args.dense_in_block else [0
+                                                                                                                    for
+                                                                                                                    _ in
+                                                                                                                    gflops_list]
         else:
             mask_stack_list_list = [[] for _ in gflops_list] + [[] for _ in gflops_list] if args.dense_in_block else [[] for _ in gflops_list]
         upb_batch_gflops_list = []
@@ -864,7 +937,7 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
 
             # measure losses, accuracy and predictions
             if args.ada_reso_skip:
-                upb_gflops_tensor, real_gflops_tensor = compute_gflops_by_mask(mask_stack_list, base_model_gflops, gflops_list, args)
+                upb_gflops_tensor, real_gflops_tensor = compute_gflops_by_mask(mask_stack_list, base_model_gflops, gflops_list, g_meta, args)
                 loss_dict = compute_losses(criterion, output, target, mask_stack_list,
                                            upb_gflops_tensor, real_gflops_tensor, epoch, model,
                                            val_loader.a_v_m, val_loader.a_n_m, base_model_gflops, args)
@@ -920,6 +993,8 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
                 # gather masks
                 for layer_i, mask_stack in enumerate(mask_stack_list):
                     if "batenet" in args.arch:
+                        mask_stack_list_list[layer_i] += torch.sum(mask_stack.detach(), dim=0)  # TODO remvoed .cpu()
+                    elif "AdaBNInc" in args.arch:
                         mask_stack_list_list[layer_i] += torch.sum(mask_stack.detach(), dim=0)  # TODO remvoed .cpu()
                     else:  # TODO CGNet
                         mask_stack_list_list[layer_i].append(mask_stack.detach()) #TODO remvoed .cpu()
@@ -1101,23 +1176,23 @@ def get_data_loaders(model, prefix, args):
 
     train_transform_flip = torchvision.transforms.Compose([
         model.module.get_augmentation(flip=True),
-        Stack(roll=False),
-        ToTorchFormatTensor(div=True),
+        Stack(roll=("BNInc" in args.arch)),
+        ToTorchFormatTensor(div=("BNInc" not in args.arch)),
         GroupNormalize(model.module.input_mean, model.module.input_std),
     ])
 
     train_transform_nofl = torchvision.transforms.Compose([
         model.module.get_augmentation(flip=False),
-        Stack(roll=False),
-        ToTorchFormatTensor(div=True),
+        Stack(roll=("BNInc" in args.arch)),
+        ToTorchFormatTensor(div=("BNInc" not in args.arch)),
         GroupNormalize(model.module.input_mean, model.module.input_std),
     ])
 
     val_transform = torchvision.transforms.Compose([
                        GroupScale(int(model.module.scale_size)),
                        GroupCenterCrop(model.module.crop_size),
-                       Stack(roll=False),
-                       ToTorchFormatTensor(div=True),
+                       Stack(roll=("BNInc" in args.arch)),
+                       ToTorchFormatTensor(div=("BNInc" not in args.arch)),
                        GroupNormalize(model.module.input_mean, model.module.input_std),
                    ])
 

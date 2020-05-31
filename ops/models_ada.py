@@ -37,7 +37,11 @@ class TSN_Ada(nn.Module):
             self.partialBN(True)
 
     def _prep_a_net(self, model_name, shall_pretrain):
-        model = getattr(torchvision.models, model_name)(shall_pretrain)
+        if "BNInception" in self.args.arch:
+            from archs.bn_inception import bninception
+            model = bninception(args=self.args)
+        else:
+            model = getattr(torchvision.models, model_name)(shall_pretrain)
         model.last_layer_name = 'fc'
         return model
 
@@ -48,11 +52,16 @@ class TSN_Ada(nn.Module):
                             n_div=self.shift_div, place=self.shift_place, temporal_pool=self.temporal_pool)
 
     def _prepare_base_model(self, base_model):
-        self.input_size = 224
-        self.input_mean = [0.485, 0.456, 0.406]
-        self.input_std = [0.229, 0.224, 0.225]
-
         self.base_model = self._prep_a_net(base_model, self.pretrain == 'imagenet')
+
+        self.input_size = 224
+        if "BNInception" in self.args.arch:
+            self.input_mean = self.base_model.mean
+            self.input_std = self.base_model.std
+        else:
+            self.input_mean = [0.485, 0.456, 0.406]
+            self.input_std = [0.229, 0.224, 0.225]
+
         if self.is_shift:
             self._make_a_shift(base_model)
 

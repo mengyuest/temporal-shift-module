@@ -28,12 +28,20 @@ feat_dim_dict = {
     "res3d34": 512,
     "res3d50": 2048,
     "res3d101": 2048,
+    "BNInception": 1024,
+    "AdaBNInc": 1024,
     }
 
 def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretrained=True,args=None):
     last_layer = "fc"
     if "resnet" in model_name:
         model = getattr(torchvision.models, model_name)(pretrained)
+    elif "BNInception" in model_name:
+        from archs.bn_inception import bninception
+        model = bninception(args=args)
+    elif "AdaBNInc" in model_name:
+        from archs.bn_inception_ada import bninception_ada
+        model = bninception_ada(args=args)
     elif "res3d" in model_name:
         model = i3d_resnet(int(model_name.split("res3d")[1]), pretrained=pretrained)
     elif "batenet" in model_name:
@@ -49,6 +57,8 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
         dummy_data = torch.randn(1, 3, resolution, resolution)
         if "batenet" in model_name:
             dummy_data = torch.randn(1 * args.num_segments, 3, resolution, resolution)
+        elif "AdaBNInc" in model_name:
+            dummy_data = torch.randn(1 * args.num_segments, 3, resolution, resolution)
         elif "cgnet" in model_name:
             dummy_data = torch.randn(1, args.num_segments, 3, resolution, resolution)
     else:
@@ -58,7 +68,11 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
 
     if args.shared_policy_net:
         args.shared_policy_net = False
-        model = getattr(ops.batenet, model_name)(pretrained=False, args=args)
+        if "AdaBNInc" in model_name:
+            from archs.bn_inception_ada import bninception_ada
+            model = bninception_ada(args=args)
+        else:
+            model = getattr(ops.batenet, model_name)(pretrained=False, args=args)
         setattr(model, last_layer, nn.Linear(feat_dim_dict[model_name], num_classes))
         flops, _ = profile(model, inputs=(dummy_data,))
         args.shared_policy_net = True

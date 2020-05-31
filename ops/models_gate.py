@@ -28,6 +28,10 @@ class TSN_Gate(nn.Module):
         if "batenet" in model_name:
             model = getattr(batenet, model_name)(shall_pretrain, args=self.args)
             model.last_layer_name = 'fc'
+        elif "BNInc" in self.args.arch:
+            from archs.bn_inception_ada import bninception_ada
+            model = bninception_ada(args=self.args)
+            model.last_layer_name = 'fc'
         elif "cgnet" in model_name:
             model = getattr(cgnet, model_name)(shall_pretrain, args=self.args)
             model.last_layer_name = 'fc'
@@ -36,11 +40,17 @@ class TSN_Gate(nn.Module):
         return model
 
     def _prepare_base_model(self):
-        self.input_size = 224
-        self.input_mean = [0.485, 0.456, 0.406]
-        self.input_std = [0.229, 0.224, 0.225]
         shall_pretrain = len(self.args.model_paths) == 0 or self.args.model_paths[0].lower() != 'none'
         model = self._prep_a_net(self.args.arch, shall_pretrain)
+
+        self.input_size = 224
+        if "BNInc" in self.args.arch:
+            self.input_mean = model.mean
+            self.input_std = model.std
+        else:
+            self.input_mean = [0.485, 0.456, 0.406]
+            self.input_std = [0.229, 0.224, 0.225]
+
         return model
 
     def _prepare_fc(self, num_class):
@@ -73,6 +83,9 @@ class TSN_Gate(nn.Module):
             else:
                 feat, mask_stack_list = self.base_model(input_data.view(_b * _t, _c, _h, _w),
                                                         tau=kwargs["tau"], is_training=is_training, curr_step=curr_step)
+        elif "AdaBNInc" in self.args.arch:
+            feat, mask_stack_list = self.base_model(input_data.view(_b * _t, _c, _h, _w),
+                                                    tau=kwargs["tau"], is_training=is_training, curr_step=curr_step)
         base_out = self.new_fc(feat.view(_b * _t, -1)).view(_b, _t, -1)
 
         if self.args.policy_attention:

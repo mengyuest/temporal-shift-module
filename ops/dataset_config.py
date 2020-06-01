@@ -114,7 +114,8 @@ def return_epic_noun(modality):
 
 def return_something(modality):
     # filename_categories = 'something/v1/category.txt'
-    filename_categories = ospj(common.STHV1_META_PATH,'classInd.txt')
+    # filename_categories = ospj(common.STHV1_META_PATH,'classInd.txt')
+    filename_categories = 174
     if modality == 'RGB':
         # root_data = ROOT_DATASET + 'something/v1/20bn-something-something-v1'
         # filename_imglist_train = 'something/v1/train_videofolder.txt'

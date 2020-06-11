@@ -134,6 +134,7 @@ parser.add_argument('--freeze_policy', action='store_true') #TODO(yue) fix the p
 
 #TODO(yue) reproducibility
 parser.add_argument('--random_seed', type=int, default=1007)
+parser.add_argument('--train_random_seed', type=int, default=-1)
 
 #TODO(yue) for FCVID or datasets where eval is too heavy
 parser.add_argument('--partial_fcvid_eval', action='store_true')

@@ -4,6 +4,8 @@ import matplotlib
 import matplotlib.pyplot as plt
 # from matplotlib import rc
 # rc('text', usetex=True)
+params = {'mathtext.default': 'regular' }
+plt.rcParams.update(params)
 
 # TODO SomethingV1
 # {name: [#params, flops, acc, id]}
@@ -11,18 +13,18 @@ import matplotlib.pyplot as plt
 # AdaFuse-shift
 # AdaFuse-acc
 data={
-    "TSN":[24.3, 33.2, 19.7, 0],
-    "TSM":[24.3, 33.2, 45.7, 1],
-    "TRN": [18.3, 16.0, 34.4, 2],
-    "TRN-rgb-flow":[36.6, 32.0, 42.0,2],
-    "I3D":[28.0, 306, 41.6, 3],
-    "I3D-GCN-NL":[62.2, 606, 46.1, 3],
-    "ECO":[47.5, 32, 39.6, 4],
-    "ECO-enLite":[150, 267, 46.4, 4],
-    "AdaFuse-Inc":[14.5, 12.1, 38.5,5],
-    "AdaFuse-TSN":[37.7, 22.1, 41.9, 5],
-    "AdaFuse-Shift":[37.7, 19.1, 44.9, 5],
-    "AdaFuse-Acc":[39.1,31.3, 46.8, 5],
+    "TSN":[24.3, 33.2, 19.7, 0, 0, 0.8],
+    "TSM":[24.3, 33.2, 45.7, 1, 4, -1],
+    r"$TRN_{Multiscale}$": [18.3, 16.0, 34.4, 2, 0, 0.5],
+    r'$TRN_{RGB+Flow}$':[36.6, 32.0, 42.0,2, 2, 0.6],
+    "I3D":[28.0, 306, 41.6, 3, -60, 0.8],
+    r"I3D+GCN+NL":[62.2, 606, 46.1, 3, -270, 1.2],
+    "ECO":[47.5, 32, 39.6, 4, 2, 0.8],
+    r"$ECO_{en}Lite$":[150, 267, 46.4, 4, -130, 1.6],
+    r"$AdaFuse_{Inc}$":[14.5, 12.1, 38.5,5, -1, 0.7],
+    r"$AdaFuse_{R50}$":[37.7, 22.1, 41.9, 5, -10, 0.88],
+    r"$AdaFuse_{R50}^{TSM}$":[37.7, 19.1, 44.9, 5, -8, 0.85],
+    r"$AdaFuse_{R50}^{TSM+Last}$":[39.1,31.3, 46.8, 5, -11, 1],
 }
 
 log_scale=True
@@ -41,8 +43,10 @@ ss = [(data[key][0])**(1/1)*12 for key in data]  # TODO transform
 labels = [key for key in data]
 
 colors=[red[0], red[1], red[2], orange[0], orange[1], blue[0], blue[1], blue[2]]
-rs = [data[key][-1] for key in data]
+rs = [data[key][3] for key in data]
 cs = [colors[data[key][3]] for key in data]
+xos=[data[key][4] for key in data]
+yos=[data[key][5] for key in data]
 
 from pylab import rcParams
 rcParams['figure.figsize'] = 8, 8
@@ -52,16 +56,20 @@ if log_scale:
     plt.scatter(flops, accs, s=ss, c=cs)
     plt.xlabel("GLOPS", fontsize=label_font_size)
     plt.ylabel("Accuracy (%)", fontsize=label_font_size)
+    plt.ylim(top=49,bottom=19)
+    plt.xlim(right=980, left=10)
     plt.tick_params(labelsize=tick_font_size)
     for i, txt in enumerate(labels):
-        if rs[i]==5:
-            if flops[i]>19:
-                x_offset=-10
-            else:
-                x_offset=-2
-        else:
-            x_offset=2
-        y_offset = 0.75 if rs[i] == 5 else -1
+        # if rs[i]==5:
+        #     if flops[i]>19:
+        #         x_offset=-10
+        #     else:
+        #         x_offset=-2
+        # else:
+        #     x_offset=2
+        # y_offset = 0.75 if rs[i] == 5 else -1
+        x_offset=xos[i]
+        y_offset=yos[i]
         plt.text(flops[i]+x_offset, accs[i]+y_offset, txt, fontsize=legend_font_size)
     plt.xscale("log")
     ax1=plt.gca()
@@ -71,7 +79,7 @@ if log_scale:
     ax1.set_xticks([], minor=True)
     ax1.set_xticklabels([], minor=True)
     # plt.show()
-    plt.savefig("flops_curve.png", bbox_inches='tight')
+    plt.savefig("fig2_curve_v.png", bbox_inches='tight')
 # else:
 #     f, (ax, ax2) = plt.subplots(2, 1, sharex=True, sharey=True)
 #     ax.scatter(flops, accs, s=ss, c=cs)

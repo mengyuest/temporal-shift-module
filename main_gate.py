@@ -73,6 +73,8 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
         node_seed_offset = 10086 * args.rank
     else:
         node_seed_offset = 0
+    if args.train_random_seed<0:
+        args.train_random_seed = args.random_seed
     set_random_seed(node_seed_offset + args.random_seed, args)
 
     args.num_class, args.train_list, args.val_list, args.root_path, prefix = \
@@ -218,7 +220,7 @@ def main_worker(gpu_i, ngpus_per_node, args, test_mode):
     for epoch in range(args.start_epoch, args.epochs):
         # train for one epoch
         if not args.skip_training:
-            set_random_seed(node_seed_offset + args.random_seed + epoch, args)
+            set_random_seed(node_seed_offset + args.train_random_seed + epoch, args)
             adjust_learning_rate(optimizer, epoch, -1, -1, args.lr_type, args.lr_steps, args)
             train_usage_str = train(train_loader, model, criterion, optimizer, epoch, base_model_gflops, gflops_list, g_meta, args, tf_writer)
 
@@ -896,6 +898,9 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
     if args.save_meta_gate:
         gate_meta_list = []
         mask_stat_list = [[] for _ in gflops_list]  # []
+    if args.save_meta:
+        record_path_list = []
+        indices_list = []
 
     tau = get_current_temperature(epoch, args)
 
@@ -927,13 +932,18 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
             # if args.gpus is not None:
             #     input_tuple = [x.cuda(args.gpus, non_blocking=True) for x in input_tuple]
             # else:
-            input_tuple = [x.cuda(non_blocking=True) for x in input_tuple]
-            target = input_tuple[-1]
+            input_data = input_tuple[0].cuda(non_blocking=True)
+            # input_tuple = [x.cuda(non_blocking=True) for x in input_tuple]
+            target = input_tuple[-1].cuda(non_blocking=True)
             # target = input_tuple[-1].cuda(args.gpus, non_blocking=True)
+            if args.save_meta:
+                for save_i in range(batchsize):
+                    record_path_list.append(input_tuple[1][save_i])
+                    indices_list.append(torch.tensor(input_tuple[2][save_i]))
 
             # model forward function
             output, mask_stack_list, _, gate_meta = \
-                model(input=input_tuple[:-1], tau=tau, is_training=False, curr_step=0)
+                model(input=[input_data], tau=tau, is_training=False, curr_step=0)
 
             # measure losses, accuracy and predictions
             if args.ada_reso_skip:
@@ -1008,9 +1018,6 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
                 # mask_stat_list.append(mask_stat)
                 for layer_i, mask_stack in enumerate(mask_stack_list):
                     mask_stat_list[layer_i].append(torch.max(mask_stack.cpu(), dim=-1)[1])  # TODO: L, N*T*C*3
-
-
-
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -1093,10 +1100,21 @@ def validate(val_loader, model, criterion, epoch, base_model_gflops, gflops_list
             # for layer_i in range(len(mask_stack_list)):
             #     print(mask_stat_list[layer_i].shape)
 
+            #     np.savez("%s/meta-gate-val.npy" % (exp_full_path),
+            #              preds=all_preds.numpy(), targets=torch.cat(all_targets, 0).cpu().numpy(),
+            #              record_path=torch.cat(record_path_list, 0).cpu().numpy(),
+            #              indices_list=torch.cat(indices_list, 0).cpu().numpy())
+            # else:
             np.savez("%s/meta-gate-val.npy" % (exp_full_path),
                      preds=all_preds.numpy(), targets=torch.cat(all_targets, 0).cpu().numpy())
             with open("%s/gate-stat-val.pkl" % (exp_full_path), 'wb') as outfile:
                 pickle.dump(mask_stat_list, outfile, pickle.HIGHEST_PROTOCOL)
+            if args.save_meta:
+                with open("%s/record-path-val.pkl" % (exp_full_path), 'wb') as outfile:
+                    pickle.dump(record_path_list, outfile, pickle.HIGHEST_PROTOCOL)
+
+                with open("%s/indices-val.pkl" % (exp_full_path), 'wb') as outfile:
+                    pickle.dump(torch.stack(indices_list,0).cpu().numpy(), outfile, pickle.HIGHEST_PROTOCOL)
 
         if tf_writer is not None:
             tf_writer.add_scalar('loss/test', losses_dict["loss"].avg, epoch)

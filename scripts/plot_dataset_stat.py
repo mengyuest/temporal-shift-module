@@ -17,6 +17,8 @@ usage_d={
 labels=["Skip", "Reuse", "Keep"]
 
 is_pie=True
+# from pylab import rcParams
+# rcParams['figure.figsize'] = 5, 5
 
 label_font_size = 15
 legend_font_size = 15
@@ -32,9 +34,9 @@ for i,key in enumerate(usage_d):
     ax = plt.subplot(2, 2, i+1)
     ax.pie(usage_d[key], labels=labels, colors=[red[0], orange[0], blue[0]], autopct='%1.1f%%',startangle=90)
     ax.axis('equal')
-    ax.set_title(key, weight="bold")
+    ax.set_title(key, weight="bold", y=0.92)
 
 # plt.show()
-plt.subplots_adjust(hspace=0.4)
+plt.subplots_adjust(hspace=0.12)
 plt.subplots_adjust(wspace=-0.2)
-plt.savefig("dataset_pie.png", bbox_inches='tight')
+plt.savefig("fig3_pie_v.png", bbox_inches='tight')

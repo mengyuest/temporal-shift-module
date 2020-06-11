@@ -39,7 +39,7 @@ legend_text_wspace=0.1
 legend_line_width=0.01
 
 from pylab import rcParams
-rcParams['figure.figsize'] = 5, 5
+rcParams['figure.figsize'] = 6, 5
 from matplotlib.ticker import FormatStrFormatter
 import matplotlib.ticker as ticker
 # now plot
@@ -73,7 +73,7 @@ for i in range(3):
     p = np.poly1d(z)
     axs[i].plot(ind, p(ind), "k--")
 
-leg = f.legend(ls,["Skip","Skip\n(Always)", "Reuse","Reuse\n(Always)", "Keep", "Keep\n(Always)"],
+leg = f.legend(ls,["Skip","Skip\n(Instance)", "Reuse","Reuse\n(Instance)", "Keep", "Keep\n(Instance)"],
            loc="center",  # Position of legend
            bbox_to_anchor=[0.85, 0.52], # x-offset, y-offset
            labelspacing=2.5, fontsize = legend_font_size, handletextpad=legend_text_wspace)
@@ -81,6 +81,9 @@ leg = f.legend(ls,["Skip","Skip\n(Always)", "Reuse","Reuse\n(Always)", "Keep", "
 #     legobj.set_linewidth(legend_line_width)
 
 f.tight_layout()
-plt.subplots_adjust(right=0.72)
+# plt.subplots_adjust(right=0.71) #0.72 for Skip(Always)
+# plt.subplots_adjust(right=0.78)  # for figsize (10, 5)
+# plt.subplots_adjust(right=0.75)  # for figsize (8, 5)
+plt.subplots_adjust(right=0.72)  # for figsize (6, 5)
 # plt.show()
-plt.savefig("gate_stat_bar.png", bbox_inches='tight')
+plt.savefig("fig4_bar_v.png", bbox_inches='tight')

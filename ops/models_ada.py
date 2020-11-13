@@ -40,9 +40,18 @@ class TSN_Ada(nn.Module):
         if "BNInception" in self.args.arch:
             from archs.bn_inception import bninception
             model = bninception(args=self.args)
+            model.last_layer_name = 'fc'
+        elif "eff" in self.args.arch:
+            from archs.efficientnet import EfficientNet
+            model = EfficientNet.from_pretrained('efficientnet-b%s'%(self.args.arch.split("b")[1]))
+            model.last_layer_name = '_fc'
+        elif "mobile" in self.args.arch:
+            from archs.mobilenet_v2 import mobilenet_v2
+            model = mobilenet_v2(True)
+            model.last_layer_name = 'classifier'
         else:
             model = getattr(torchvision.models, model_name)(shall_pretrain)
-        model.last_layer_name = 'fc'
+            model.last_layer_name = 'fc'
         return model
 
     def _make_a_shift(self, base_model):

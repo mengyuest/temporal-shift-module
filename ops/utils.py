@@ -132,10 +132,14 @@ class Recorder:
 
 
 
-def count_conv2d_flops(input_data_shape, conv):
+def count_conv2d_flops(input_data_shape, conv, is_effnet_conv=False):
     n, c_in, h_in, w_in = input_data_shape
-    h_out = (h_in + 2 * conv.padding[0] - conv.dilation[0] * (conv.kernel_size[0] - 1) - 1) // conv.stride[0] + 1
-    w_out = (w_in + 2 * conv.padding[1] - conv.dilation[1] * (conv.kernel_size[1] - 1) - 1) // conv.stride[1] + 1
+    if is_effnet_conv:
+        h_out = (h_in  - 1) // conv.stride[0] + 1
+        w_out = (w_in  - 1) // conv.stride[1] + 1
+    else:
+        h_out = (h_in + 2 * conv.padding[0] - conv.dilation[0] * (conv.kernel_size[0] - 1) - 1) // conv.stride[0] + 1
+        w_out = (w_in + 2 * conv.padding[1] - conv.dilation[1] * (conv.kernel_size[1] - 1) - 1) // conv.stride[1] + 1
     c_out = conv.out_channels
     bias = 1 if conv.bias is not None else 0
     # print("h:%d->%d"%(h_in,h_out))

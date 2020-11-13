@@ -35,6 +35,9 @@ class TSN_Gate(nn.Module):
         elif "cgnet" in model_name:
             model = getattr(cgnet, model_name)(shall_pretrain, args=self.args)
             model.last_layer_name = 'fc'
+        elif "eff" in model_name:
+            from archs.efficientnet_ada import EfficientNet
+            model = EfficientNet.from_pretrained(name="efficientnet-b%d"%(model_name.split("b")[1]), args=self.args)
         else:
             exit("I don't how to prep this net:%s; see models_gate.py:: _prep_a_net"%model_name)
         return model

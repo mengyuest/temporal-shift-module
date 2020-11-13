@@ -29,7 +29,16 @@ feat_dim_dict = {
     "res3d50": 2048,
     "res3d101": 2048,
     "BNInception": 1024,
+    "effb0": 1280,
+    "effb1": 1280,
+    "effb2": 1408,
+    "effb3": 1536,
+    "effb4": 1792,
+    "effb5": 2048,
+    "effb6": 2304,
+    "effb7": 2560,
     "AdaBNInc": 1024,
+    "mobilenetv2":1280,
     }
 
 def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretrained=True,args=None):
@@ -39,6 +48,14 @@ def get_gflops_params(model_name, resolution, num_classes, seg_len=-1, pretraine
     elif "BNInception" in model_name:
         from archs.bn_inception import bninception
         model = bninception(args=args)
+    elif "eff" in model_name:
+        from archs.efficientnet import EfficientNet
+        model = EfficientNet.from_name('efficientnet-b%s'%(model_name.split("b")[1]))
+        last_layer="_fc"
+    elif "mobile" in model_name:
+        from archs.mobilenet_v2 import mobilenet_v2
+        model = mobilenet_v2(True)
+        model.last_layer_name = 'classifier'
     elif "AdaBNInc" in model_name:
         from archs.bn_inception_ada import bninception_ada
         model = bninception_ada(args=args)
